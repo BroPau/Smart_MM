@@ -198,9 +198,10 @@ final class MinutesViewController: NSViewController,
             listScroll.trailingAnchor.constraint(equalTo: leftSidebar.trailingAnchor, constant: -1),
             listScroll.bottomAnchor.constraint(equalTo: importBtn.topAnchor, constant: -10),
 
-            // 导入按钮钉在左栏底部（小内缩 12pt），确保完整可见、不随列表长度乱飘
-            importBtn.leadingAnchor.constraint(equalTo: leftSidebar.leadingAnchor),
-            importBtn.trailingAnchor.constraint(equalTo: leftSidebar.trailingAnchor, constant: -1),
+            // 导入按钮钉在左栏底部（小内缩 12pt），确保完整可见、不随列表长度乱飘；
+            // 左右各收 10pt，使按钮比左栏略窄、更协调（仍完整显示）
+            importBtn.leadingAnchor.constraint(equalTo: leftSidebar.leadingAnchor, constant: 10),
+            importBtn.trailingAnchor.constraint(equalTo: leftSidebar.trailingAnchor, constant: -10),
             importBtn.heightAnchor.constraint(equalToConstant: 30),
             importBtn.bottomAnchor.constraint(equalTo: leftSidebar.bottomAnchor, constant: -12)
         ])
@@ -1007,7 +1008,7 @@ extension MinutesViewController: MarkdownEditorViewDelegate, SaveablePage {
         }
     }
 
-    func markdownEditorDidClickWikilink(_ editor: MarkdownEditorView, name: String) {
+    func markdownEditorDidClickWikilink(_ editor: MarkdownEditorView, name: String, anchor: String?) {
         // 汇总页里的 [[纪要名]] 点击 -> 优先打开对应纪要（名称可能带「📥 」前缀，去掉后再匹配）
         let clean = name.replacingOccurrences(of: "📥 ", with: "").trimmingCharacters(in: .whitespaces)
         if let item = items.first(where: { $0.name == clean }) {
@@ -1020,7 +1021,7 @@ extension MinutesViewController: MarkdownEditorViewDelegate, SaveablePage {
             return
         }
         // 否则路由到 LLM Wiki 页（容器负责切到 Wiki 分页并打开；未命中则提示新建）
-        (self.parent as? MainContainerViewController)?.openWikiPage(name)
+        (self.parent as? MainContainerViewController)?.openWikiPage(name, anchor: anchor)
     }
 
     func markdownEditorRequestsPageList(_ editor: MarkdownEditorView) -> [String] { [] }

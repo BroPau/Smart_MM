@@ -196,8 +196,9 @@ final class MainContainerViewController: NSViewController {
     func rebuildWiki() { wikiVC.rebuildWikiFromExternal() }
 
     /// 由「会议纪要」页双链点击路由而来：切到 Wiki 分页并尝试打开对应页（未命中则提示新建）。
-    func openWikiPage(_ name: String) {
+    /// anchor 为 Obsidian 式 [[Page#Heading]] 的标题锚点（可选）。
+    func openWikiPage(_ name: String, anchor: String? = nil) {
         selectTab(.wiki)
-        wikiVC.openWikiPageResolved(name)
+        wikiVC.openWikiPageResolved(name, anchor: anchor)
     }
 }

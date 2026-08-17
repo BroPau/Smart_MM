@@ -129,19 +129,30 @@ md.inline.ruler.before('link', 'wikilink', (state, silent) => {
   const inner = src.slice(start + 2, end)
   if (inner.includes('[') || inner.includes('\n')) return false
   const seg = inner.split('|')
-  const page = (seg[0] || '').trim()
+  const target = (seg[0] || '').trim()
   const alias = (seg[1] || '').trim()
+  if (!target) return false
+  // Obsidian 式锚点：[[Page#Heading]] / [[Page#^blockId]]（同页可省略 Page，写成 [[#Heading]]）
+  let page = target
+  let anchor = ''
+  const h = target.indexOf('#')
+  if (h >= 0) {
+    page = target.slice(0, h).trim()
+    anchor = target.slice(h + 1).trim()
+    if (page.length === 0) page = anchor
+  }
   if (!page) return false
   if (!silent) {
     const token = state.push('wikilink', '', 0)
-    token.meta = { page, alias: alias || page }
+    token.meta = { page, anchor, alias: alias || page }
   }
   state.pos = end + 2
   return true
 })
 md.renderer.rules.wikilink = (tokens, idx) => {
-  const { page, alias } = tokens[idx].meta
-  return '<a data-wikilink data-page="' + escapeAttr(page) + '" data-alias="' + escapeAttr(alias) + '" class="wikilink">' + escapeHtml(alias) + '</a>'
+  const { page, anchor, alias } = tokens[idx].meta
+  const anchorAttr = anchor ? ' data-anchor="' + escapeAttr(anchor) + '"' : ''
+  return '<a data-wikilink data-page="' + escapeAttr(page) + '" data-alias="' + escapeAttr(alias) + '"' + anchorAttr + ' class="wikilink">' + escapeHtml(alias) + '</a>'
 }
 
 // ————————————————————————————————————————————————————————————————
@@ -188,8 +199,10 @@ turndownService.addRule('wikilink', {
   replacement: (content, node) => {
     const page = node.getAttribute('data-page') || content
     const alias = node.getAttribute('data-alias')
-    if (alias && alias !== page) return '[[' + page + '|' + alias + ']]'
-    return '[[' + page + ']]'
+    const anchor = node.getAttribute('data-anchor') || ''
+    const head = page + (anchor ? '#' + anchor : '')
+    if (alias && alias !== page) return '[[' + head + '|' + alias + ']]'
+    return '[[' + head + ']]'
   }
 })
 
@@ -206,6 +219,11 @@ const WikiLink = Mark.create({
         default: null,
         parseHTML: el => el.getAttribute('data-page'),
         renderHTML: attrs => (attrs.page ? { 'data-page': attrs.page } : {})
+      },
+      anchor: {
+        default: null,
+        parseHTML: el => el.getAttribute('data-anchor'),
+        renderHTML: attrs => (attrs.anchor ? { 'data-anchor': attrs.anchor } : {})
       },
       alias: {
         default: null,
@@ -230,10 +248,13 @@ const WikiLink = Mark.create({
       markInputRule({
         find: /\[\[([^\[\]\n]+?)(?:\|([^\[\]\n]+?))?\]\]$/,
         type: this.type,
-        getAttributes: m => ({
-          page: (m[1] || '').trim(),
-          alias: m[2] ? m[2].trim() : null
-        })
+        getAttributes: m => {
+          const target = (m[1] || '').trim()
+          let page = target, anchor = ''
+          const h = target.indexOf('#')
+          if (h >= 0) { page = target.slice(0, h).trim(); anchor = target.slice(h + 1).trim() }
+          return { page, anchor: anchor || null, alias: m[2] ? m[2].trim() : null }
+        }
       })
     ]
   }
@@ -367,7 +388,8 @@ const autocompletePlugin = new Plugin({
 // ————————————————————————————————————————————————————————————————
 //  自动配对 / 自动补全语法符号（引号、括号、单方括号、双方括号等）
 // ————————————————————————————————————————————————————————————————
-const pairMap = { '"': '"', "'": "'", '(': ')', '[': ']', '{': '}' }
+// Markdown common syntax auto-pair: backtick(code) / asterisk(emphasis) / tilde(strike) / bracket(link) / paren(url) / brace(ext) / quote
+const pairMap = { '`': '`', '*': '*', '~': '~', '[': ']', '(': ')', '{': '}', '"': '"', "'": "'" }
 const autoPairKey = new PluginKey('autoPair')
 const autoPairPlugin = new Plugin({
   key: autoPairKey,
@@ -427,7 +449,49 @@ const autoPairPlugin = new Plugin({
         }
         return false
       }
-      // 5) 其余成对符号（" ' ( { ）
+      // 5) 反引号 ` → 行内代码 `code`；第二次敲 ` 跳过闭合符，在已有 ` 后敲 ` 则单插（便于敲出 ``` 围栏块）
+      if (text === '`') {
+        if (after1 === '`') {
+          const tr = state.tr.setSelection(TextSelection.create(state.doc, to + 1))
+          view.dispatch(tr)
+          return true
+        }
+        if (before === '`') {
+          const tr = state.tr.insertText('`', from)
+          tr.setSelection(TextSelection.create(tr.doc, to + 1))
+          view.dispatch(tr.scrollIntoView())
+          return true
+        }
+        const tr = state.tr.insertText('``', from)
+        tr.setSelection(TextSelection.create(tr.doc, from + 1))
+        view.dispatch(tr.scrollIntoView())
+        return true
+      }
+      // 6) 星号 * → 强调 ** / 斜体 *；第二次敲 * 跳过闭合符
+      if (text === '*') {
+        if (after1 === '*') {
+          const tr = state.tr.setSelection(TextSelection.create(state.doc, to + 1))
+          view.dispatch(tr)
+          return true
+        }
+        const tr = state.tr.insertText('**', from)
+        tr.setSelection(TextSelection.create(tr.doc, from + 1))
+        view.dispatch(tr.scrollIntoView())
+        return true
+      }
+      // 7) 波浪号 ~ → 删除线 ~~；第二次敲 ~ 跳过闭合符
+      if (text === '~') {
+        if (after1 === '~') {
+          const tr = state.tr.setSelection(TextSelection.create(state.doc, to + 1))
+          view.dispatch(tr)
+          return true
+        }
+        const tr = state.tr.insertText('~~', from)
+        tr.setSelection(TextSelection.create(tr.doc, from + 1))
+        view.dispatch(tr.scrollIntoView())
+        return true
+      }
+      // 8) 其余成对符号（" ' ( { ）
       if (pairMap[text]) {
         const close = pairMap[text]
         const tr = state.tr.insertText(text + close, from)
@@ -440,7 +504,7 @@ const autoPairPlugin = new Plugin({
     // 输入右符号且光标后已是其配对字符时，直接跳过后跳过（不重复插入）
     handleKeyDown(view, event) {
       if (!view.editable) return false
-      const skip = { ')': ')', ']': ']', '}': '}', '"': '"', "'": "'" }
+      const skip = { ')': ')', ']': ']', '}': '}', '"': '"', "'": "'", '`': '`', '*': '*', '~': '~' }
       if (skip[event.key]) {
         const { state } = view
         const sel = state.selection
@@ -650,8 +714,9 @@ function wireEditorDom() {
     if (el) {
       e.preventDefault()
       const name = el.getAttribute('data-page')
+      const anchor = el.getAttribute('data-anchor') || ''
       if (name && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.editorBridge) {
-        window.webkit.messageHandlers.editorBridge.postMessage({ type: 'wikilink', name: name })
+        window.webkit.messageHandlers.editorBridge.postMessage({ type: 'wikilink', name: name, anchor: anchor })
       }
     }
   })
@@ -725,7 +790,19 @@ window.MMEditor = {
       if (sel) { sel.value = selectName; sel.dispatchEvent(new Event('change', { bubbles: true })) }
     }
   },
-  showPreview(name, html) { window.MMEditor_showPreview(name, html) }
+  showPreview(name, html) { window.MMEditor_showPreview(name, html) },
+  // 双链点击后跳转到 Wiki 页并滚动到锚点标题（Obsidian 式 [[Page#Heading]]）
+  scrollToAnchor(anchor) {
+    const a = (anchor || '').trim()
+    if (!a || !editor) return
+    const heads = editor.view.dom.querySelectorAll('h1,h2,h3,h4,h5,h6')
+    let target = null
+    heads.forEach(h => { if (!target && h.textContent.trim().toLowerCase() === a.toLowerCase()) target = h })
+    if (!target) {
+      try { target = editor.view.dom.querySelector('#' + CSS.escape(a)) } catch (e) {}
+    }
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
 }
 
 // ⌘S 保存

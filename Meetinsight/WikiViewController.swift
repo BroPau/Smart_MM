@@ -54,6 +54,8 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
     private var showingSearch = false
     /// 由「会议纪要」页路由跳转时，若索引尚未加载则先加载，加载完成后用此名打开对应页。
     private var pendingOpenWikiName: String?
+    /// 伴随 pendingOpenWikiName 的锚点（[[Page#Heading]] 的标题）。
+    private var pendingOpenWikiAnchor: String?
 
     private var wikiDir: URL { AppConfig.shared.baseDir.appendingPathComponent("005_LLMWiKi") }
     private var wikiPagesDir: URL { wikiDir.appendingPathComponent("wiki_pages") }
@@ -246,7 +248,9 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
             // 若此前有「会议纪要」页路由过来的待打开页，加载完成后打开它
             if let pending = self.pendingOpenWikiName {
                 self.pendingOpenWikiName = nil
-                self.resolveOrPromptWikiPage(pending)
+                let anchor = self.pendingOpenWikiAnchor
+                self.pendingOpenWikiAnchor = nil
+                self.resolveOrPromptWikiPage(pending, anchor: anchor)
             }
         }
     }
@@ -706,15 +710,21 @@ extension WikiViewController: MarkdownEditorViewDelegate, SaveablePage {
         }
     }
 
-    func markdownEditorDidClickWikilink(_ editor: MarkdownEditorView, name: String) {
-        resolveOrPromptWikiPage(name)
+    func markdownEditorDidClickWikilink(_ editor: MarkdownEditorView, name: String, anchor: String?) {
+        resolveOrPromptWikiPage(name, anchor: anchor)
     }
 
-    /// 解析并跳转，未命中则礼貌提示新建（供纪要页路由与本页点击复用）。
-    private func resolveOrPromptWikiPage(_ name: String) {
+    /// 解析并跳转，未命中则礼貌提示新建（供纪要页路由与本页点击复用）。anchor 为 [[Page#Heading]] 的标题锚点。
+    private func resolveOrPromptWikiPage(_ name: String, anchor: String? = nil) {
         if let (idx, page) = resolveWikiPage(in: pages, rawName: name) {
             tableView.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
             selectPage(page)
+            if let anchor = anchor, !anchor.isEmpty {
+                // 页面加载（含双链/表格渲染）为异步，略延迟后滚动到目标标题
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    self?.editor.scrollToAnchor(anchor)
+                }
+            }
             return
         }
         // 没找到：礼貌给出 ⌘N 新建候选页的提示（带图标，避免破图）
@@ -753,14 +763,15 @@ extension WikiViewController: MarkdownEditorViewDelegate, SaveablePage {
 
     /// 供容器（来自「会议纪要」页双链点击）调用：切到本页并打开对应 Wiki 页；
     /// 若索引尚未加载（用户还没打开过 Wiki 分页），则先加载再打开。
-    func openWikiPageResolved(_ name: String) {
+    func openWikiPageResolved(_ name: String, anchor: String? = nil) {
         if pages.isEmpty {
             pendingOpenWikiName = name
+            pendingOpenWikiAnchor = anchor
             setBusy(true, status: "加载 Wiki 索引…")
             loadPages()
             return
         }
-        resolveOrPromptWikiPage(name)
+        resolveOrPromptWikiPage(name, anchor: anchor)
     }
 
     /// 编辑器初始化时请求现有页面名列表（含别名），供双链自动完成 / 缺失页判定。

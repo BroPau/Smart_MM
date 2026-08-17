@@ -20,8 +20,8 @@ import WebKit
 protocol MarkdownEditorViewDelegate: AnyObject {
     /// 用户点击「保存」后触发，回传当前编辑的 Markdown 源码（含 frontmatter）。
     func markdownEditorDidRequestSave(_ editor: MarkdownEditorView, markdown: String)
-    /// 用户点击预览中的 [[双链]] 时触发。
-    func markdownEditorDidClickWikilink(_ editor: MarkdownEditorView, name: String)
+    /// 用户点击预览中的 [[双链]] 时触发。anchor 为 Obsidian 式 [[Page#Heading]] 的标题锚点（可选）。
+    func markdownEditorDidClickWikilink(_ editor: MarkdownEditorView, name: String, anchor: String?)
     /// 编辑器初始化时请求现有页面名列表（用于双链自动完成与缺失页判定）。
     func markdownEditorRequestsPageList(_ editor: MarkdownEditorView) -> [String]
     /// 悬浮预览双链时，返回目标页正文（Markdown，已剥离 frontmatter）；页面不存在返回 nil。
@@ -162,6 +162,13 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
         webView.evaluateJavaScript("MMEditor.setAutoLinkNames(\(js))")
     }
 
+    /// 跳转到 Wiki 页内某标题锚点（Obsidian 式 [[Page#Heading]]）；无匹配标题时静默忽略。
+    func scrollToAnchor(_ anchor: String) {
+        guard Self.engine == "tiptap", !anchor.isEmpty else { return }
+        let js = "MMEditor.scrollToAnchor(\(jsString(anchor)))"
+        webView.evaluateJavaScript(js)
+    }
+
     // MARK: - WKNavigationDelegate
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -183,7 +190,8 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
             }
         case "wikilink":
             if let name = message["name"] as? String {
-                delegate?.markdownEditorDidClickWikilink(self, name: name)
+                let anchor = message["anchor"] as? String
+                delegate?.markdownEditorDidClickWikilink(self, name: name, anchor: anchor)
             }
         case "getPages":
             let pages = delegate?.markdownEditorRequestsPageList(self) ?? []
