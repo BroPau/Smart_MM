@@ -75,11 +75,6 @@ final class MinutesViewController: NSViewController,
     private let editor = MarkdownEditorView()
     private let statusLabel = NSTextField(labelWithString: "就绪")
     private let rightContainer = NSView()
-    private let summaryScroll = NSScrollView()
-    private let summaryTable = NSTableView()
-    private let sumNameCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("sumName"))
-    private let sumDateCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("sumDate"))
-    private let sumSizeCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("sumSize"))
 
     // MARK: - 状态
     private var items: [MinuteItem] = []
@@ -203,27 +198,17 @@ final class MinutesViewController: NSViewController,
             importBtn.bottomAnchor.constraint(equalTo: leftSidebar.bottomAnchor)
         ])
 
-        // —— 右侧：editor + 汇总表格 ——
-        configureSummaryTable()
+        // —— 右侧：MarkdownEditorView（汇总以 markdown 分类表格呈现，单独纪要以原文呈现）——
         rightContainer.wantsLayer = true
         rightContainer.translatesAutoresizingMaskIntoConstraints = false
         editor.translatesAutoresizingMaskIntoConstraints = false
-        summaryScroll.translatesAutoresizingMaskIntoConstraints = false
-        summaryScroll.hasVerticalScroller = true
-        summaryScroll.documentView = summaryTable
         rightContainer.addSubview(editor)
-        rightContainer.addSubview(summaryScroll)
         NSLayoutConstraint.activate([
             editor.topAnchor.constraint(equalTo: rightContainer.topAnchor),
             editor.leadingAnchor.constraint(equalTo: rightContainer.leadingAnchor),
             editor.trailingAnchor.constraint(equalTo: rightContainer.trailingAnchor),
-            editor.bottomAnchor.constraint(equalTo: rightContainer.bottomAnchor),
-            summaryScroll.topAnchor.constraint(equalTo: rightContainer.topAnchor),
-            summaryScroll.leadingAnchor.constraint(equalTo: rightContainer.leadingAnchor),
-            summaryScroll.trailingAnchor.constraint(equalTo: rightContainer.trailingAnchor),
-            summaryScroll.bottomAnchor.constraint(equalTo: rightContainer.bottomAnchor)
+            editor.bottomAnchor.constraint(equalTo: rightContainer.bottomAnchor)
         ])
-        summaryScroll.isHidden = true
         editor.isHidden = false
 
         // —— 两列主体：左栏 | 右栏，可拖动分界，撑满窗口 ——
@@ -445,18 +430,41 @@ final class MinutesViewController: NSViewController,
         }
     }
 
+    /// 会议纪要汇总（首页）：以 markdown 文档 + 分类表格呈现（按「生成的纪要 / 导入的纪要」分组），
+    /// 每行纪要用 [[名称]] 双链，点击即打开对应纪要。不再使用 NSTableView 网格。
     private func showSummary() {
-        summaryScroll.isHidden = false
-        editor.isHidden = true
-        summaryTable.reloadData()
+        editor.isHidden = false
         deleteSelBtn.isEnabled = false
-        let gen = items.filter { $0.kind == .generated }.count
-        let imp = items.filter { $0.kind == .bookImported }.count
-        statusLabel.stringValue = "会议纪要汇总（共 \(items.count) 份 · 生成 \(gen) · 导入 \(imp)）"
+        let gen = items.filter { $0.kind == .generated }
+        let imp = items.filter { $0.kind == .bookImported }
+        var md = "# 📋 会议纪要汇总\n\n"
+        md += "> 点击任意纪要名称可打开查看 / 编辑。\n\n"
+        md += "## 📊 概览\n"
+        md += "- 共 **\(items.count)** 份：📝 生成 \(gen.count) · 📥 导入 \(imp.count)\n\n"
+        md += summaryTableMarkdown(title: "📝 生成的纪要", items: gen)
+        md += "\n"
+        md += summaryTableMarkdown(title: "📥 导入的纪要", items: imp)
+        editor.load(markdown: md, editable: false)
+        // 把纪要与文件名推给编辑器，使 [[名称]] 被识别为已知页（非缺失），点击可跳转
+        editor.setWikiPages(items.map { $0.name })
+        statusLabel.stringValue = "会议纪要汇总（共 \(items.count) 份 · 生成 \(gen.count) · 导入 \(imp.count)）"
+    }
+
+    /// 生成 GFM 管道表格（名称｜类型｜更新｜大小），第一列用 [[名称]] 双链（名称不含前缀，确保与 setWikiPages 匹配）。
+    private func summaryTableMarkdown(title: String, items: [MinuteItem]) -> String {
+        guard !items.isEmpty else { return "## \(title)（0）\n\n（无）\n" }
+        var s = "## \(title)（\(items.count)）\n\n"
+        s += "| 名称 | 类型 | 更新 | 大小 |\n"
+        s += "| --- | --- | --- | --- |\n"
+        for it in items {
+            let name = it.name.replacingOccurrences(of: "|", with: "／")
+            let kind = (it.kind == .bookImported ? "导入" : "生成")
+            s += "| [[\(name)]] | \(kind) | \(formatDateShort(it.updated)) | \(formatSize(it.size)) |\n"
+        }
+        return s
     }
 
     private func showItem(_ item: MinuteItem) {
-        summaryScroll.isHidden = true
         editor.isHidden = false
         if let text = try? String(contentsOf: item.url, encoding: .utf8) {
             currentMarkdown = text
@@ -470,35 +478,6 @@ final class MinutesViewController: NSViewController,
         }
         deleteSelBtn.isEnabled = true
         editor.setWikiPages([])
-    }
-
-    // MARK: - 汇总表格
-    private func configureSummaryTable() {
-        sumNameCol.title = "名称"; sumNameCol.width = 220
-        sumDateCol.title = "更新"; sumDateCol.width = 120
-        sumSizeCol.title = "大小"; sumSizeCol.width = 90
-        for c in [sumNameCol, sumDateCol, sumSizeCol] { summaryTable.addTableColumn(c) }
-        summaryTable.dataSource = self
-        summaryTable.delegate = self
-        summaryTable.headerView = NSTableHeaderView()
-        summaryTable.allowsEmptySelection = true
-        summaryTable.allowsMultipleSelection = false
-        summaryTable.allowsColumnReordering = false
-        summaryTable.allowsColumnResizing = true
-        summaryTable.target = self
-        summaryTable.doubleAction = #selector(summaryRowDoubleClicked)
-    }
-
-    @objc private func summaryRowDoubleClicked() {
-        let row = summaryTable.clickedRow
-        guard row >= 0, row < items.count else { return }
-        let item = items[row]
-        if let idx = items.firstIndex(where: { $0.file == item.file }) {
-            tableView.selectRowIndexes(IndexSet(integer: idx + 1), byExtendingSelection: false)
-        }
-        selectedIsSummary = false
-        selectedItem = item
-        showItem(item)
     }
 
     // MARK: - 工具栏动作
@@ -921,27 +900,12 @@ final class MinutesViewController: NSViewController,
         return r
     }
 
-    // MARK: - NSTableViewDataSource / Delegate（左侧列表 + 右侧汇总表共用）
+    // MARK: - NSTableViewDataSource / Delegate（左侧纪要列表）
     func numberOfRows(in tableView: NSTableView) -> Int {
-        if tableView === summaryTable { return items.count }
         return items.count + 1   // 第 0 行是「会议纪要汇总」
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        if tableView === summaryTable {
-            guard row < items.count else { return nil }
-            let item = items[row]
-            let value: String
-            switch tableColumn {
-            case sumNameCol: value = (item.kind == .bookImported ? "📥 " : "") + item.name
-            case sumDateCol: value = formatDateShort(item.updated)
-            case sumSizeCol: value = formatSize(item.size)
-            default:         value = item.name
-            }
-            let cell = NSTextField(labelWithString: value)
-            cell.lineBreakMode = .byTruncatingTail
-            return cell
-        }
         // 左侧侧栏：单列自绘行（名称 +「导入」标记 + 右侧短日期）
         let cell = MinuteRowView()
         if row == 0 {
@@ -988,19 +952,6 @@ final class MinutesViewController: NSViewController,
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
-        // 右侧汇总表：单击行打开对应纪要
-        if let tv = notification.object as? NSTableView, tv === summaryTable {
-            let rows = summaryTable.selectedRowIndexes
-            guard rows.count == 1, let first = rows.first, first < items.count else { return }
-            let item = items[first]
-            if let idx = items.firstIndex(where: { $0.file == item.file }) {
-                tableView.selectRowIndexes(IndexSet(integer: idx + 1), byExtendingSelection: false)
-            }
-            selectedIsSummary = false
-            selectedItem = item
-            showItem(item)
-            return
-        }
         // 左侧列表
         if programmaticSelect {
             programmaticSelect = false
@@ -1043,7 +994,15 @@ extension MinutesViewController: MarkdownEditorViewDelegate, SaveablePage {
     }
 
     func markdownEditorDidClickWikilink(_ editor: MarkdownEditorView, name: String) {
-        // 会议纪要页无 Wiki 页面跳转；忽略。
+        // 汇总页里的 [[纪要名]] 点击 -> 打开对应纪要（名称可能带「📥 」前缀，去掉后再匹配）
+        let clean = name.replacingOccurrences(of: "📥 ", with: "").trimmingCharacters(in: .whitespaces)
+        guard let item = items.first(where: { $0.name == clean }) else { return }
+        selectedIsSummary = false
+        selectedItem = item
+        if let idx = items.firstIndex(where: { $0.file == item.file }) {
+            tableView.selectRowIndexes(IndexSet(integer: idx + 1), byExtendingSelection: false)
+        }
+        showItem(item)
     }
 
     func markdownEditorRequestsPageList(_ editor: MarkdownEditorView) -> [String] { [] }

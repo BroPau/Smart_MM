@@ -21,6 +21,7 @@ import { Plugin, PluginKey, TextSelection } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import MarkdownIt from 'markdown-it'
 import TurndownService from 'turndown'
+import { markdownItTable } from 'markdown-it-table'
 
 // ————————————————————————————————————————————————————————————————
 //  工具
@@ -116,6 +117,8 @@ function renderFrontmatterBanner(fm) {
 //  MarkdownIt：把 [[Page]] / [[Page|alias]] 解析为 <a data-wikilink>
 // ————————————————————————————————————————————————————————————————
 const md = new MarkdownIt({ html: false, linkify: false, breaks: false })
+// GFM 管道表格支持：[[Page]] 双链在表格单元格内也可解析（inline 规则）
+md.use(markdownItTable)
 md.inline.ruler.before('link', 'wikilink', (state, silent) => {
   const start = state.pos
   const src = state.src
@@ -163,7 +166,8 @@ turndownService.addRule('gfmTable', {
       else if (s.includes('center')) align[i] = 'center'
       else align[i] = 'left'
     })
-    const cellText = cell => cell.textContent.replace(/\n/g, ' ').replace(/\|/g, '\\|').trim()
+    // 单元格内可能含 [[wikilink]]，必须用 turndown 递归转换（而非 textContent，否则双链在保存时丢失）
+    const cellText = cell => turndownService.turndown(cell).replace(/\s*\n\s*/g, ' ').trim()
     const lines = []
     const head = Array.from(rows[0].querySelectorAll('th, td')).map(cellText)
     lines.push('| ' + head.join(' | ') + ' |')
