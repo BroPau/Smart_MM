@@ -52,7 +52,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 backing: .buffered,
                 defer: false
             )
-            window.title = "Smart Minutes"
+            window.title = "Meetinsight"
             window.minSize = NSSize(width: minW, height: minH)
             window.isReleasedWhenClosed = false
             let container = MainContainerViewController()

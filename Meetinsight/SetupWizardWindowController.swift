@@ -31,7 +31,7 @@ final class SetupWizardWindowController: NSWindowController {
             backing: .buffered,
             defer: false
         )
-        window.title = "Smart Minutes 安装向导"
+        window.title = "Meetinsight 安装向导"
         super.init(window: window)
 
         setupUI()

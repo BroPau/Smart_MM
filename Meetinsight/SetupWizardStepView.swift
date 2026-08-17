@@ -104,7 +104,7 @@ final class Step1RuntimeView: WizardStepView {
 
     override func buildUI() {
         contentStack.addArrangedSubview(makeLabel(
-            "Smart Minutes 使用 whisper.cpp（C++）做语音转写，性能远优于纯 Python 方案，且无需庞大的 torch 依赖。", size: 12))
+            "Meetinsight 使用 whisper.cpp（C++）做语音转写，性能远优于纯 Python 方案，且无需庞大的 torch 依赖。", size: 12))
         contentStack.addArrangedSubview(makeLabel("whisper-cli 路径：", bold: true))
 
         pathField.stringValue = AppConfig.shared.whisperCLI.path
@@ -212,7 +212,7 @@ final class Step1RuntimeView: WizardStepView {
 final class Step2ModelView: WizardStepView, URLSessionDownloadDelegate {
 
     override var title: String { "语音模型" }
-    override var subtitle: String { "下载 whisper.cpp 的 ggml 模型文件（向导会自动扫描已存在的，避免重复下载）" }
+    override var subtitle: String { "下载 whisper.cpp 的 ggml 模型文件（向导会自动扫描已存在的；若未扫到，也可点「浏览本机模型文件…」手动指定已有 .bin，避免重复下载）" }
 
     // 与契约 §8 一致
     private let MODEL_INFO: [(id: String, label: String, approxMB: Int)] = [
@@ -268,13 +268,17 @@ final class Step2ModelView: WizardStepView, URLSessionDownloadDelegate {
         actionBtn.bezelStyle = .rounded
         actionBtn.target = self
         actionBtn.action = #selector(actionButtonClicked)
-        contentStack.addArrangedSubview(actionBtn)
+
+        let browseBtn = makeButton("浏览本机模型文件…", target: self, action: #selector(browseModel))
+        let h = NSStackView(views: [browseBtn, actionBtn])
+        h.spacing = 10
+        contentStack.addArrangedSubview(h)
 
         refreshActionButton()
 
         validate = { [weak self] in self?.AppConfig_shared.isWhisperModelPresent ?? false }
         showValidationError = { [weak self] in
-            self?.presentError("请先下载模型，或点击「使用此模型」直接采用已扫描到的文件。")
+            self?.presentError("请先下载模型，或点击「浏览本机模型文件…」手动指定本机已有的 ggml-*.bin 文件。")
         }
     }
 
@@ -282,8 +286,9 @@ final class Step2ModelView: WizardStepView, URLSessionDownloadDelegate {
 
     // MARK: - 扫描 + 智能选中
 
-    /// 扫描三个默认位置，返回 id → 本地 .bin URL 的映射。
-    /// 顺序：① AppConfig 已存模型的父目录 ② whisperCLI 推导的 models/ ③ 默认 /Users/weilu/whisper.cpp/models/
+    /// 扫描若干默认位置，返回 id → 本地 .bin URL 的映射。
+    /// 顺序：① AppConfig 已存模型的父目录 ② whisperCLI 推导的 models/ ③ 默认 whisper.cpp/models/
+    ///       ④ ~/Downloads ⑤ ~/Desktop ⑥ ~/Documents（常见手动下载落点）
     /// 同一 id 多处出现时，取先扫到的。
     private func scanExistingModels() -> [String: URL] {
         let fm = FileManager.default
@@ -300,7 +305,13 @@ final class Step2ModelView: WizardStepView, URLSessionDownloadDelegate {
                 .deletingLastPathComponent()           // .../whisper.cpp
             dirs.append(root.appendingPathComponent("models"))
         }
-        dirs.append(URL(fileURLWithPath: "/Users/weilu/whisper.cpp/models"))
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        dirs.append(contentsOf: [
+            home.appendingPathComponent("whisper.cpp/models"),
+            home.appendingPathComponent("Downloads"),
+            home.appendingPathComponent("Desktop"),
+            home.appendingPathComponent("Documents")
+        ])
 
         var found: [String: URL] = [:]
         for dir in dirs where fm.fileExists(atPath: dir.path) {
@@ -410,6 +421,35 @@ final class Step2ModelView: WizardStepView, URLSessionDownloadDelegate {
         AppConfig.shared.whisperModel = url
         statusLabel.stringValue = "✅ 已采用：\(url.lastPathComponent) (\(humanSize(fileSize(at: url))))"
         progressBar.doubleValue = 100
+    }
+
+    /// 手动浏览本机已有的 ggml 模型文件：避免用户重复下载（尤其是 ~3GB 的 large-v3）。
+    @objc private func browseModel() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowedFileTypes = ["bin"]
+        panel.allowsOtherFileTypes = false
+        panel.directoryURL = AppConfig.shared.whisperModel.deletingLastPathComponent()
+        panel.begin { [weak self] resp in
+            guard resp == .OK, let url = panel.url else { return }
+            guard url.pathExtension == "bin", url.lastPathComponent.hasPrefix("ggml-") else {
+                self?.presentError("请选择以 ggml- 开头、扩展名为 .bin 的 whisper 模型文件。")
+                return
+            }
+            let id = String(url.lastPathComponent
+                .dropFirst("ggml-".count)
+                .dropLast(".bin".count))
+            AppConfig.shared.whisperModel = url
+            self?.existingModels[id] = url
+            self?.renderScanResult()
+            if let idx = self?.MODEL_INFO.firstIndex(where: { $0.id == id }) {
+                self?.popup.selectItem(at: idx)
+            }
+            self?.updateInfo()
+            self?.refreshActionButton()
+            self?.useExistingModel(url)   // 直接采用本机文件，无需下载
+        }
     }
 
     @objc private func startDownload() {
