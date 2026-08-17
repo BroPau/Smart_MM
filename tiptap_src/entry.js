@@ -365,6 +365,139 @@ const autocompletePlugin = new Plugin({
 })
 
 // ————————————————————————————————————————————————————————————————
+//  自动配对 / 自动补全语法符号（引号、括号、单方括号、双方括号等）
+// ————————————————————————————————————————————————————————————————
+const pairMap = { '"': '"', "'": "'", '(': ')', '[': ']', '{': '}' }
+const autoPairKey = new PluginKey('autoPair')
+const autoPairPlugin = new Plugin({
+  key: autoPairKey,
+  props: {
+    // 输入成对的左符号时，自动补上右符号并把光标置于中间
+    handleTextInput(view, from, to, text) {
+      if (!view.editable) return false
+      const { state } = view
+      if (from !== to) return false  // 有选区时不自动配对，交给默认行为
+      const after = state.doc.textBetween(to, to + 2, undefined, '￼')
+      const after1 = state.doc.textBetween(to, to + 1, undefined, '￼')
+      const before = from > 0 ? state.doc.textBetween(from - 1, from, undefined, '￼') : ''
+      // 1) 直接输入 [[ → 自动成对 [[ ]]
+      if (text === '[[') {
+        const tr = state.tr.insertText('[[]]', from)
+        tr.setSelection(TextSelection.create(tr.doc, from + 2))
+        view.dispatch(tr.scrollIntoView())
+        return true
+      }
+      // 2) 直接输入 ]] 且后面紧跟 ]] → 跳过（不重复插入）
+      if (text === ']]') {
+        if (after === ']]') {
+          const tr = state.tr.setSelection(TextSelection.create(state.doc, to + 2))
+          view.dispatch(tr)
+          return true
+        }
+        return false
+      }
+      // 3) 单方括号 [
+      if (text === '[') {
+        if (after1 === '[') {
+          // 第二个 [ 已存在，补全 ]]
+          const tr = state.tr.insertText(']]', to)
+          tr.setSelection(TextSelection.create(tr.doc, to))
+          view.dispatch(tr.scrollIntoView())
+          return true
+        }
+        if (after1 === ']' && before === '[') {
+          // 在自动成对的 [ ] 内补成 [[ ]]
+          const tr = state.tr.insertText('[', from)
+          tr.insertText(']', from + 2)
+          tr.setSelection(TextSelection.create(tr.doc, from + 2))
+          view.dispatch(tr.scrollIntoView())
+          return true
+        }
+        const tr = state.tr.insertText('[]', from)
+        tr.setSelection(TextSelection.create(tr.doc, from + 1))
+        view.dispatch(tr.scrollIntoView())
+        return true
+      }
+      // 4) 单方括号 ] → 若后面已是 ]，跳过
+      if (text === ']') {
+        if (after1 === ']') {
+          const tr = state.tr.setSelection(TextSelection.create(state.doc, to + 1))
+          view.dispatch(tr)
+          return true
+        }
+        return false
+      }
+      // 5) 其余成对符号（" ' ( { ）
+      if (pairMap[text]) {
+        const close = pairMap[text]
+        const tr = state.tr.insertText(text + close, from)
+        tr.setSelection(TextSelection.create(tr.doc, from + 1))
+        view.dispatch(tr.scrollIntoView())
+        return true
+      }
+      return false
+    },
+    // 输入右符号且光标后已是其配对字符时，直接跳过后跳过（不重复插入）
+    handleKeyDown(view, event) {
+      if (!view.editable) return false
+      const skip = { ')': ')', ']': ']', '}': '}', '"': '"', "'": "'" }
+      if (skip[event.key]) {
+        const { state } = view
+        const sel = state.selection
+        if (sel.empty) {
+          const after = state.doc.textBetween(sel.to, sel.to + 1, undefined, '￼')
+          if (after === event.key) {
+            const tr = state.tr.setSelection(TextSelection.create(state.doc, sel.to + 1))
+            view.dispatch(tr)
+            return true
+          }
+        }
+      }
+      return false
+    }
+  }
+})
+
+// ————————————————————————————————————————————————————————————————
+//  自动双链：把正文里出现的已知 Wiki 页名裸词包裹为 [[名称]]
+// ————————————————————————————————————————————————————————————————
+function autoLinkWiki(body, names) {
+  if (!names || !names.length) return body
+  const sorted = names.filter(Boolean).slice().sort((a, b) => b.length - a.length)
+  const lines = body.split('\n')
+  let out = ''
+  let inFence = false
+  for (let li = 0; li < lines.length; li++) {
+    let line = lines[li]
+    // 跳过围栏代码块（``` / ~~~）
+    if (/^\s*(```|~~~)/.test(line)) { inFence = !inFence; out += line + '\n'; continue }
+    if (inFence) { out += line + '\n'; continue }
+    out += autoLinkLine(line, sorted) + '\n'
+  }
+  return out
+}
+function autoLinkLine(line, sorted) {
+  const protectedChunks = []
+  let s = line
+  // 保护：行内代码 `...`，避免把代码里的词也链接
+  s = s.replace(/`[^`]*`/g, m => { protectedChunks.push(m); return '\u0000' + (protectedChunks.length - 1) + '\u0000' })
+  // 保护：已有的标准链接 [text](url) 与双链 [[...]]，避免重复包裹
+  s = s.replace(/\[[^\]]*\]\([^)]*\)/g, m => { protectedChunks.push(m); return '\u0000' + (protectedChunks.length - 1) + '\u0000' })
+  s = s.replace(/\[\[[^\]]*\]\]/g, m => { protectedChunks.push(m); return '\u0000' + (protectedChunks.length - 1) + '\u0000' })
+  // 包裹已知名称（长名优先）
+  for (const name of sorted) {
+    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const re = new RegExp(esc, 'g')
+    s = s.replace(re, '[[$&]]')
+    // 重新保护刚生成的 [[名称]]，避免更短的名称在长名结果内被二次包裹
+    s = s.replace(/\[\[[^\]]*\]\]/g, m => { protectedChunks.push(m); return '\u0000' + (protectedChunks.length - 1) + '\u0000' })
+  }
+  // 还原被保护的片段
+  s = s.replace(/\u0000(\d+)\u0000/g, (_, i) => protectedChunks[Number(i)])
+  return s
+}
+
+// ————————————————————————————————————————————————————————————————
 //  悬浮预览气泡
 // ————————————————————————————————————————————————————————————————
 let previewEl = null
@@ -427,7 +560,8 @@ function buildEditor(editable) {
   editor = new Editor({
     element: document.getElementById('editor'),
     extensions: [
-      StarterKit.configure({ link: false }),
+      // 启用标准 Markdown 链接 [text](url)（关闭点击跳转/自动链接，编辑体验更可控）
+      StarterKit.configure({ link: { openOnClick: false, autolink: false, linkOnPaste: false } }),
       Placeholder.configure({ placeholder: '输入正文，或输入 [[ 关联其他页面…' }),
       WikiLink,
       Table.configure({ resizable: true }),
@@ -443,6 +577,9 @@ function buildEditor(editable) {
       },
       {
         addProseMirrorPlugins() { return [autocompletePlugin] }
+      },
+      {
+        addProseMirrorPlugins() { return [autoPairPlugin] }
       }
     ],
     editable: editable,
@@ -527,7 +664,7 @@ window.MMEditor = {
   init() {
     buildEditor(true)
   },
-  loadMarkdown(mdText, editable) {
+  loadMarkdown(mdText, editable, mode, autoLink) {
     const sp = splitFrontmatter(mdText || '')
     pendingFrontmatter = sp.fmRaw
     currentFM = sp.fmRaw ? parseFrontmatter(sp.fmRaw.split('\n').slice(1, -1)) : {}
@@ -539,8 +676,13 @@ window.MMEditor = {
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.editorBridge) {
       window.webkit.messageHandlers.editorBridge.postMessage({ type: 'getCustomTypes' })
     }
+    // 自动双链：加载单人纪要时，把正文里出现的已知 Wiki 页名裸词包裹成 [[名称]]（点击即跳 Wiki）
+    let body = sp.body || ''
+    if (autoLink && window.__autoLinkNames && window.__autoLinkNames.length) {
+      body = autoLinkWiki(body, window.__autoLinkNames)
+    }
     // md → html → 编辑器
-    const html = md.render(sp.body || '')
+    const html = md.render(body)
     if (!editor) buildEditor(editable !== false)
     editor.commands.setContent(html, false)
     editor.setEditable(editable !== false)
@@ -569,6 +711,10 @@ window.MMEditor = {
   setWikiPages(arr) {
     window.__wikiPages = Array.isArray(arr) ? arr : []
     if (editor) editor.view.dispatch(editor.state.tr.setMeta(missingKey, { recompute: true }))
+  },
+  // 推送「自动双链」目标名（仅 Wiki 页名），加载纪要时把裸词包裹成 [[名称]]
+  setAutoLinkNames(arr) {
+    window.__autoLinkNames = Array.isArray(arr) ? arr : []
   },
   // 宿主下发自定义类型列表（共享自 custom_types.json），并入类型下拉；可选 selectName 自动选中新类型
   setCustomTypes(arr, selectName) {

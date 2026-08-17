@@ -13,7 +13,8 @@
 import Cocoa
 import UniformTypeIdentifiers
 
-private struct WikiPage {
+/// Wiki 页面（internal，供 WikiIndex 共享复用）。
+struct WikiPage {
     let name: String
     let type: String
     /// 别名集合（来自 markdown frontmatter `aliases:`），用于双链点击 fuzzy 查找。
@@ -51,6 +52,8 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
     private var selectedPage: WikiPage?
     private var busy = false
     private var showingSearch = false
+    /// 由「会议纪要」页路由跳转时，若索引尚未加载则先加载，加载完成后用此名打开对应页。
+    private var pendingOpenWikiName: String?
 
     private var wikiDir: URL { AppConfig.shared.baseDir.appendingPathComponent("005_LLMWiKi") }
     private var wikiPagesDir: URL { wikiDir.appendingPathComponent("wiki_pages") }
@@ -233,11 +236,18 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
                 list.append(WikiPage(name: name, type: type, aliases: aliases, file: file, isHome: false))
             }
             self.pages = list
+            // 同步共享索引，供「会议纪要」页做名词联动 / 缺失页判定（无需再次跑子进程）
+            WikiIndex.shared.sync(from: self.pages)
             self.tableView.reloadData()
             self.setBusy(false, status: "共 \(self.pages.count) 个页面（首页已置顶）")
             // 默认选中 Wiki 首页
             self.tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
             self.selectPage(self.pages[0])
+            // 若此前有「会议纪要」页路由过来的待打开页，加载完成后打开它
+            if let pending = self.pendingOpenWikiName {
+                self.pendingOpenWikiName = nil
+                self.resolveOrPromptWikiPage(pending)
+            }
         }
     }
 
@@ -587,7 +597,7 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
 
 // MARK: - 名称模糊匹配：半/全角括号与空格归一化，以便双链 `[[AMD (超威半导体)]]`
 // 能命中存盘名 `AMD（超威半导体）.md` 之类的页面。
-private func normalizeForWikiMatch(_ s: String) -> String {
+func normalizeForWikiMatch(_ s: String) -> String {
     var t = s.trimmingCharacters(in: .whitespacesAndNewlines)
     t = t.replacingOccurrences(of: "(", with: "（")
          .replacingOccurrences(of: ")", with: "）")
@@ -603,7 +613,7 @@ private func normalizeForWikiMatch(_ s: String) -> String {
 ///   ④ aliases 命中（同样的等值/归一化两档）
 ///   ⑤ 前缀 fuzzy：剥掉 "ST (宪法半导体)" → "ST"，再按 canonical_name 前缀匹配
 ///      （应对 LLM 自动生成的双链里塞了描述性括号、但库里只存了短名的情况）
-private func resolveWikiPage(in pages: [WikiPage], rawName: String) -> (Int, WikiPage)? {
+func resolveWikiPage(in pages: [WikiPage], rawName: String) -> (Int, WikiPage)? {
     let target = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
     let targetN = normalizeForWikiMatch(target)
     guard !target.isEmpty else { return nil }
@@ -659,7 +669,7 @@ private func resolveWikiPage(in pages: [WikiPage], rawName: String) -> (Int, Wik
 ///   "AMD （超威半导体） 别名"     → "AMD"
 ///   "AMD"                       → "AMD"  （无变化，仍用于递归探测，避免误判）
 ///   "（待补全）"                  → nil  （纯括号描述没有短名）
-private func extractWikiShortName(_ s: String) -> String? {
+func extractWikiShortName(_ s: String) -> String? {
     let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !t.isEmpty else { return nil }
     // 找到第一个 "(" / "（" / 全角空格 / 普通空格 的位置
@@ -697,6 +707,11 @@ extension WikiViewController: MarkdownEditorViewDelegate, SaveablePage {
     }
 
     func markdownEditorDidClickWikilink(_ editor: MarkdownEditorView, name: String) {
+        resolveOrPromptWikiPage(name)
+    }
+
+    /// 解析并跳转，未命中则礼貌提示新建（供纪要页路由与本页点击复用）。
+    private func resolveOrPromptWikiPage(_ name: String) {
         if let (idx, page) = resolveWikiPage(in: pages, rawName: name) {
             tableView.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
             selectPage(page)
@@ -710,25 +725,42 @@ extension WikiViewController: MarkdownEditorViewDelegate, SaveablePage {
             style: .informational,
             buttons: ["新建", "取消"]
         ) == .alertFirstButtonReturn {
-            // 预填：规范名 = [[双链]] 目标名，类型默认 person
-            var prefill = WikiPageSpec(
-                name: name, type: "person",
-                aliases: [], tags: [], updated: "", backlinks: [],
-                summary: "",
-                company: "", jobTitle: "", role: "",
-                companyType: "", industry: "", companyIntro: "",
-                brand: "", model: "", category: "",
-                functionDesc: "", status: "", replacement: ""
-            )
-            prefill.tags = ["wiki", "person"]
-            WikiPropertySheet.present(initial: prefill) { [weak self] spec in
-                guard let self, let spec = spec else { return }
-                self.submitPageCommand(arguments: [
-                    "--add-wiki-page",
-                    self.jsonString(spec.asDictForPython())
-                ])
-            }
+            showCreateWikiPagePrompt(name)
         }
+    }
+
+    /// 未命中时弹出新建候选页表单（规范名 = name，类型默认 person）。
+    private func showCreateWikiPagePrompt(_ name: String) {
+        // 预填：规范名 = [[双链]] 目标名，类型默认 person
+        var prefill = WikiPageSpec(
+            name: name, type: "person",
+            aliases: [], tags: [], updated: "", backlinks: [],
+            summary: "",
+            company: "", jobTitle: "", role: "",
+            companyType: "", industry: "", companyIntro: "",
+            brand: "", model: "", category: "",
+            functionDesc: "", status: "", replacement: ""
+        )
+        prefill.tags = ["wiki", "person"]
+        WikiPropertySheet.present(initial: prefill) { [weak self] spec in
+            guard let self, let spec = spec else { return }
+            self.submitPageCommand(arguments: [
+                "--add-wiki-page",
+                self.jsonString(spec.asDictForPython())
+            ])
+        }
+    }
+
+    /// 供容器（来自「会议纪要」页双链点击）调用：切到本页并打开对应 Wiki 页；
+    /// 若索引尚未加载（用户还没打开过 Wiki 分页），则先加载再打开。
+    func openWikiPageResolved(_ name: String) {
+        if pages.isEmpty {
+            pendingOpenWikiName = name
+            setBusy(true, status: "加载 Wiki 索引…")
+            loadPages()
+            return
+        }
+        resolveOrPromptWikiPage(name)
     }
 
     /// 编辑器初始化时请求现有页面名列表（含别名），供双链自动完成 / 缺失页判定。

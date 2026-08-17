@@ -59,6 +59,7 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
     private var pendingMarkdown: String?
     private var pendingEditable: Bool = true
     private var pendingMode: String = "ir"
+    private var pendingAutoLink: Bool = false
 
     override init(frame frameRect: NSRect) {
         let cfg = WKWebViewConfiguration()
@@ -123,12 +124,14 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
 
     /// 载入并渲染 Markdown。editable=false 时预览区不可编辑（如搜索结果）。
     /// mode 可选：'ir'(实时预览,默认) / 'wysiwyg'(真·所见即所得) / 'sv'(分屏)。
-    func load(markdown: String, editable: Bool = true, mode: String = "ir") {
+    /// autoLink=true 时（仅纪要页单人纪要用），加载时会把正文里出现的已知 Wiki 页名裸词自动包裹为 [[名称]]。
+    func load(markdown: String, editable: Bool = true, mode: String = "ir", autoLink: Bool = false) {
         pendingMarkdown = markdown
         pendingEditable = editable
         pendingMode = mode
+        pendingAutoLink = autoLink
         if didLoad {
-            webView.evaluateJavaScript("loadMarkdown(\(jsString(markdown)), \(jsBool(editable)), \(jsString(mode)))")
+            webView.evaluateJavaScript("loadMarkdown(\(jsString(markdown)), \(jsBool(editable)), \(jsString(mode)), \(jsBool(autoLink)))")
         }
     }
 
@@ -151,13 +154,21 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
         webView.evaluateJavaScript("MMEditor.setWikiPages(\(js))")
     }
 
+    /// 推送「自动双链」目标名列表（仅 Wiki 页名）给 JS；加载纪要时把正文里出现的裸词包裹为 [[名称]]。
+    func setAutoLinkNames(_ names: [String]) {
+        guard Self.engine == "tiptap" else { return }
+        let json = (try? JSONSerialization.data(withJSONObject: names)) ?? Data("[]".utf8)
+        let js = String(data: json, encoding: .utf8) ?? "[]"
+        webView.evaluateJavaScript("MMEditor.setAutoLinkNames(\(js))")
+    }
+
     // MARK: - WKNavigationDelegate
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         didLoad = true
         if let pending = pendingMarkdown {
             pendingMarkdown = nil
-            webView.evaluateJavaScript("loadMarkdown(\(jsString(pending)), \(jsBool(pendingEditable)), \(jsString(pendingMode)))")
+            webView.evaluateJavaScript("loadMarkdown(\(jsString(pending)), \(jsBool(pendingEditable)), \(jsString(pendingMode)), \(jsBool(pendingAutoLink)))")
         }
     }
 
@@ -766,7 +777,7 @@ fileprivate enum TipTapEditorHTML {
       window.addEventListener('DOMContentLoaded', function(){
         if (window.MMEditor) MMEditor.init();
         // 暴露与 Vditor 模板同名的全局函数，复用 MarkdownEditorView 现有调用约定
-        window.loadMarkdown = function(md, editable, mode){ return window.MMEditor.loadMarkdown(md, editable, mode); };
+        window.loadMarkdown = function(md, editable, mode, autoLink){ return window.MMEditor.loadMarkdown(md, editable, mode, autoLink); };
         window.requestSave = function(){ return window.MMEditor.requestSave(); };
         window.setMode = function(m){ return window.MMEditor.setMode(m); };
         if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.editorBridge) {

@@ -14,9 +14,9 @@
 //         · 导入的纪要带「导入」小徽标，与生成的纪要区分（名称本身不含前缀，改名干净）；
 //         · 短日期：当天 → HH:mm；当年非当天 → M月d日；跨年 → yyyy年M月d日（按时间倒序即按年分组）；
 //         · 双击行进入行内改名（Finder 逻辑，回车提交 / Esc 取消），改名即 rename 磁盘文件。
-//      ③ 紧贴列表底部的「📥 导入会议纪要」按钮（复用 --import-docs 流程）；
-//         列表按内容自适应高度（min 180 / max 320 封顶），不再撑满剩余空间，
-//         避免「列表项数少时按钮被甩到左栏最底、与列表之间出现大段空白」的不协调感。
+//      ③ 钉在左栏底部的「📥 导入会议纪要」按钮（复用 --import-docs 流程）；
+//         列表占据「生成卡片」与按钮之间的剩余空间，按钮以 12pt 内缩稳居左栏底部，
+//         始终完整可见——既不会因列表项少而被甩到中部，也不会贴死边被裁切。
 //  - 右侧：
 //      · 选中「汇总」→ 以汇总表格呈现所有纪要（名称 / 更新 / 大小），点击行打开对应纪要；
 //      · 选中某纪要 → MarkdownEditorView 预览/编辑（点击进入编辑、保存写回 .md）。
@@ -173,11 +173,11 @@ final class MinutesViewController: NSViewController,
         importBtn.target = self
         importBtn.action = #selector(importMinutesAction)
 
-        // 左侧栏：生成卡片（上）/ 列表（中，按内容自适应高度，最小 180 / 最大 320 封顶）/ 导入按钮（紧贴列表下方）
-        //   [v2.2.18 修订] 之前是「列表撑开占满剩余高度 / 按钮钉在 sidebar 底」，列表项数少时
-        //   列表和按钮之间出现大段空白，导入按钮被孤零零甩到左栏底，看起来不协调。
-        //   改为列表按内容自适应（封顶 320，多了滚动），按钮紧贴列表下方（8pt 间隔），
-        //   空余空间留在「按钮↔sidebar 底」之间，视觉上按钮与列表贴在一起。
+        // 左侧栏：生成卡片（上）/ 列表（占生成卡片与导入按钮之间的剩余高度）/ 导入按钮（钉在左栏底部）
+        //   [v2.2.19 修订] 回退 v2.2.18「列表自适应高度(min180/max320)+ 按钮紧贴列表下方」策略——
+        //   该项策略在列表项数少时把按钮甩到左栏中部，显得过高、不协调。
+        //   改为：列表撑满「生成卡片 ↔ 导入按钮」之间的剩余空间，按钮以 12pt 内缩稳居左栏底部，
+        //   始终完整可见：既不会因列表项少被甩到中部，也不会贴死边被裁切。
         let leftSidebar = NSView()
         leftSidebar.translatesAutoresizingMaskIntoConstraints = false
         leftSidebar.addSubview(genCard)
@@ -192,17 +192,17 @@ final class MinutesViewController: NSViewController,
             genCard.leadingAnchor.constraint(equalTo: leftSidebar.leadingAnchor),
             genCard.trailingAnchor.constraint(equalTo: leftSidebar.trailingAnchor, constant: -1),
 
+            // 列表占据生成卡片下方 → 导入按钮上方的剩余空间（无 min/max 高度封顶）
             listScroll.topAnchor.constraint(equalTo: genCard.bottomAnchor, constant: 10),
             listScroll.leadingAnchor.constraint(equalTo: leftSidebar.leadingAnchor),
             listScroll.trailingAnchor.constraint(equalTo: leftSidebar.trailingAnchor, constant: -1),
-            listScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 180),
-            listScroll.heightAnchor.constraint(lessThanOrEqualToConstant: 320),    // 封顶，避免列表项少时把按钮挤到 sidebar 底
+            listScroll.bottomAnchor.constraint(equalTo: importBtn.topAnchor, constant: -10),
 
+            // 导入按钮钉在左栏底部（小内缩 12pt），确保完整可见、不随列表长度乱飘
             importBtn.leadingAnchor.constraint(equalTo: leftSidebar.leadingAnchor),
             importBtn.trailingAnchor.constraint(equalTo: leftSidebar.trailingAnchor, constant: -1),
             importBtn.heightAnchor.constraint(equalToConstant: 30),
-            importBtn.topAnchor.constraint(equalTo: listScroll.bottomAnchor, constant: 8),   // 紧贴列表下方（而非钉在 sidebar 底）
-            importBtn.bottomAnchor.constraint(lessThanOrEqualTo: leftSidebar.bottomAnchor, constant: -8)  // 软上限，万一 sidebar 太矮不溢出
+            importBtn.bottomAnchor.constraint(equalTo: leftSidebar.bottomAnchor, constant: -12)
         ])
 
         // —— 右侧：MarkdownEditorView（汇总以 markdown 分类表格呈现，单独纪要以原文呈现）——
@@ -379,6 +379,8 @@ final class MinutesViewController: NSViewController,
         pendingAutoJump?.cancel(); pendingAutoJump = nil
         items = scanMinutes()
         tableView.reloadData()
+        // 刷新共享 Wiki 索引，使纪要加载时即可做名词联动 / 自动双链（完成后由 WikiViewController 继续同步）
+        WikiIndex.shared.refresh()
         // 默认选中「会议纪要汇总」
         selectedIsSummary = true
         selectedItem = nil
@@ -452,8 +454,8 @@ final class MinutesViewController: NSViewController,
         md += "\n"
         md += summaryTableMarkdown(title: "📥 导入的纪要", items: imp)
         editor.load(markdown: md, editable: false)
-        // 把纪要与文件名推给编辑器，使 [[名称]] 被识别为已知页（非缺失），点击可跳转
-        editor.setWikiPages(items.map { $0.name })
+        // 纪要与 Wiki 页名都推给编辑器，使 [[名称]] 被识别为已知页（非缺失），点击可跳转
+        editor.setWikiPages(items.map { $0.name } + WikiIndex.shared.wikiNames)
         statusLabel.stringValue = "会议纪要汇总（共 \(items.count) 份 · 生成 \(gen.count) · 导入 \(imp.count)）"
     }
 
@@ -473,10 +475,16 @@ final class MinutesViewController: NSViewController,
 
     private func showItem(_ item: MinuteItem) {
         editor.isHidden = false
+        // 已知页集合：Wiki 页名（用于名词联动跳转）+ 本列表纪要名（点击 [[纪要名]] 回到对应纪要）
+        let knownPages = WikiIndex.shared.wikiNames + items.map { $0.name }
+        editor.setWikiPages(knownPages)
+        // 自动双链仅针对 Wiki 页名（人名/公司/品牌/型号），避免在纪要正文里把其他纪要名也强行包裹
+        editor.setAutoLinkNames(WikiIndex.shared.wikiNames)
         if let text = try? String(contentsOf: item.url, encoding: .utf8) {
             currentMarkdown = text
             currentSaveURL = item.url
-            editor.load(markdown: text, editable: true)
+            // autoLink: 加载时把正文中出现的已知 Wiki 页名裸词包裹为 [[名称]]，点击即可跳转到 Wiki
+            editor.load(markdown: text, editable: true, autoLink: true)
             statusLabel.stringValue = "\(item.name)（\(formatDateShort(item.updated))）"
         } else {
             currentMarkdown = ""
@@ -484,7 +492,6 @@ final class MinutesViewController: NSViewController,
             editor.load(markdown: "（无法读取文件：\(item.url.path)）", editable: false)
         }
         deleteSelBtn.isEnabled = true
-        editor.setWikiPages([])
     }
 
     // MARK: - 工具栏动作
@@ -1001,15 +1008,19 @@ extension MinutesViewController: MarkdownEditorViewDelegate, SaveablePage {
     }
 
     func markdownEditorDidClickWikilink(_ editor: MarkdownEditorView, name: String) {
-        // 汇总页里的 [[纪要名]] 点击 -> 打开对应纪要（名称可能带「📥 」前缀，去掉后再匹配）
+        // 汇总页里的 [[纪要名]] 点击 -> 优先打开对应纪要（名称可能带「📥 」前缀，去掉后再匹配）
         let clean = name.replacingOccurrences(of: "📥 ", with: "").trimmingCharacters(in: .whitespaces)
-        guard let item = items.first(where: { $0.name == clean }) else { return }
-        selectedIsSummary = false
-        selectedItem = item
-        if let idx = items.firstIndex(where: { $0.file == item.file }) {
-            tableView.selectRowIndexes(IndexSet(integer: idx + 1), byExtendingSelection: false)
+        if let item = items.first(where: { $0.name == clean }) {
+            selectedIsSummary = false
+            selectedItem = item
+            if let idx = items.firstIndex(where: { $0.file == item.file }) {
+                tableView.selectRowIndexes(IndexSet(integer: idx + 1), byExtendingSelection: false)
+            }
+            showItem(item)
+            return
         }
-        showItem(item)
+        // 否则路由到 LLM Wiki 页（容器负责切到 Wiki 分页并打开；未命中则提示新建）
+        (self.parent as? MainContainerViewController)?.openWikiPage(name)
     }
 
     func markdownEditorRequestsPageList(_ editor: MarkdownEditorView) -> [String] { [] }

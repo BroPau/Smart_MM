@@ -194,4 +194,10 @@ final class MainContainerViewController: NSViewController {
 
     /// 触发 LLM Wiki 重建。
     func rebuildWiki() { wikiVC.rebuildWikiFromExternal() }
+
+    /// 由「会议纪要」页双链点击路由而来：切到 Wiki 分页并尝试打开对应页（未命中则提示新建）。
+    func openWikiPage(_ name: String) {
+        selectTab(.wiki)
+        wikiVC.openWikiPageResolved(name)
+    }
 }
