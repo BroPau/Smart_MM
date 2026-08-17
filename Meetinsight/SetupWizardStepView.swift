@@ -38,6 +38,9 @@ class WizardStepView: NSView {
         return s
     }()
 
+    /// 防止 `embed` 在「上一步→下一步→上一步」来回导航时被重复调用导致控件叠加复制。
+    private var didBuild = false
+
     /// 嵌入到向导容器（自动加边距）。
     func embed(in parent: NSView) {
         translatesAutoresizingMaskIntoConstraints = false
@@ -54,7 +57,12 @@ class WizardStepView: NSView {
             contentStack.leadingAnchor.constraint(equalTo: leadingAnchor),
             contentStack.trailingAnchor.constraint(equalTo: trailingAnchor)
         ])
-        buildUI()
+        // buildUI 只跑一次：step 实例在 steps 数组中只创建一次，
+        // 但 showStep 每次都会 removeFromSuperview + embed，重复跑会重复 addArrangedSubview。
+        if !didBuild {
+            buildUI()
+            didBuild = true
+        }
     }
 
     /// 子类在此构建 UI（已确保 contentStack 存在）。

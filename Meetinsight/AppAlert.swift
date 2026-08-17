@@ -21,6 +21,7 @@ enum AppAlertIcon: String {
     case wiki     // 知识库 / Wiki
     case save     // 保存
     case success  // 成功
+    case minutes  // 会议纪要
 
     private var symbolName: String {
         switch self {
@@ -31,6 +32,7 @@ enum AppAlertIcon: String {
         case .wiki:     return "books.vertical.fill"
         case .save:     return "tray.and.arrow.down.fill"
         case .success:  return "checkmark.circle.fill"
+        case .minutes:  return "doc.text.fill"
         }
     }
 

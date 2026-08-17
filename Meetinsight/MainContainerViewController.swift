@@ -16,7 +16,7 @@ protocol SaveablePage: AnyObject {
     func saveCurrent()
 }
 
-enum MainTab: Int { case generate = 0, wiki = 1, settings = 2 }
+enum MainTab: Int { case minutes = 0, generate = 1, wiki = 2, settings = 3 }
 
 final class MainContainerViewController: NSViewController {
 
@@ -26,8 +26,9 @@ final class MainContainerViewController: NSViewController {
 
     private var tabButtons: [NSButton] = []
     private var pages: [MainTab: NSViewController] = [:]
-    private var activeTab: MainTab = .wiki
+    private var activeTab: MainTab = .minutes
 
+    private var minutesVC: MinutesViewController { pages[.minutes] as! MinutesViewController }
     private var generateVC: GenerateViewController { pages[.generate] as! GenerateViewController }
     private var wikiVC: WikiViewController { pages[.wiki] as! WikiViewController }
 
@@ -40,7 +41,7 @@ final class MainContainerViewController: NSViewController {
         super.viewDidLoad()
         setupUI()
         buildPages()
-        selectTab(.wiki)   // 默认显示 LLM Wiki（首页）
+        selectTab(.minutes)   // 默认显示「会议纪要」页（需求 #6）
     }
 
     // MARK: - UI
@@ -52,8 +53,9 @@ final class MainContainerViewController: NSViewController {
         saveBtn.target = self
         saveBtn.action = #selector(saveActive)
 
-        // 创建 3 个 tab 按钮
+        // 创建 4 个 tab 按钮（会议纪要默认置顶）
         let tabDefs: [(MainTab, String)] = [
+            (.minutes, "📝 会议纪要"),
             (.generate, "🎙 纪要生成"),
             (.wiki, "📚 LLM Wiki"),
             (.settings, "⚙️ 设置")
@@ -143,6 +145,7 @@ final class MainContainerViewController: NSViewController {
     }
 
     private func buildPages() {
+        pages[.minutes] = MinutesViewController()
         pages[.generate] = GenerateViewController()
         pages[.wiki] = WikiViewController()
         pages[.settings] = SettingsViewController()

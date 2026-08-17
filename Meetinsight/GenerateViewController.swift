@@ -108,8 +108,8 @@ final class GenerateViewController: NSViewController {
         leftStack.spacing = 10
         leftStack.alignment = .leading
         leftStack.translatesAutoresizingMaskIntoConstraints = false
-        // 让 leftStack 撑出固定宽度
-        leftStack.widthAnchor.constraint(equalToConstant: 280).isActive = true
+        // 仅设最小宽度（不再固定 280），让 NSSplitView 的 divider 可拖动调节左右比例。
+        leftStack.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
         // 日志区撑出剩余高度
         logScroll.translatesAutoresizingMaskIntoConstraints = false
         leftStack.addArrangedSubview(logScroll)
@@ -126,14 +126,16 @@ final class GenerateViewController: NSViewController {
         rightStack.alignment = .leading
         rightStack.translatesAutoresizingMaskIntoConstraints = false
 
-        // —— 整体：左右 NSSplitView（仿 Wiki 风格） ——
+        // —— 整体：左右 NSSplitView（仿 Wiki 风格，分界可拖动） ——
         let split = NSSplitView()
         split.isVertical = true
         split.dividerStyle = .thin
         split.translatesAutoresizingMaskIntoConstraints = false
+        // 持久化用户的拖动位置（Xcode/macOS 原生支持）
+        split.autosaveName = "GenerateSplitPosition"
         split.addArrangedSubview(leftStack)
         split.addArrangedSubview(rightStack)
-        // 拆分条位置:左侧占 280
+        // 初次加载给一个合理的默认左侧宽度
         split.setPosition(280, ofDividerAt: 0)
 
         view.addSubview(split)

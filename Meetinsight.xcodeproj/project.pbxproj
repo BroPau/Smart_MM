@@ -55,9 +55,9 @@
 				72414F1B302F2BCB00C89E2C /* Sources */,
 				72414F1C302F2BCB00C89E2C /* Frameworks */,
 				72414F1D302F2BCB00C89E2C /* Resources */,
-				72414FA1302F2BCB00C89E2C /* Copy TipTap */,
-				72414FA2302F2BCB00C89E2C /* Copy Vditor */,
-				72414FA3302F2BCB00C89E2C /* Copy PythonEngine */,
+				72414FA1302F2BCB00C89E2C /* ShellScript */,
+				72414FA2302F2BCB00C89E2C /* ShellScript */,
+				72414FA3302F2BCB00C89E2C /* ShellScript */,
 			);
 			buildRules = (
 			);
@@ -107,8 +107,18 @@
 		};
 /* End PBXProject section */
 
+/* Begin PBXResourcesBuildPhase section */
+		72414F1D302F2BCB00C89E2C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
 /* Begin PBXShellScriptBuildPhase section */
-		72414FA1302F2BCB00C89E2C /* Copy TipTap */ = {
+		72414FA1302F2BCB00C89E2C /* ShellScript */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -125,7 +135,7 @@
 			shellPath = /bin/sh;
 			shellScript = "rm -rf \"${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/tiptap\"\ncp -R \"${PROJECT_DIR}/tiptap\" \"${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/tiptap\"\n";
 		};
-		72414FA2302F2BCB00C89E2C /* Copy Vditor */ = {
+		72414FA2302F2BCB00C89E2C /* ShellScript */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -142,7 +152,7 @@
 			shellPath = /bin/sh;
 			shellScript = "rm -rf \"${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/vditor\"\ncp -R \"${PROJECT_DIR}/vditor\" \"${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/vditor\"\n";
 		};
-		72414FA3302F2BCB00C89E2C /* Copy PythonEngine */ = {
+		72414FA3302F2BCB00C89E2C /* ShellScript */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -160,16 +170,6 @@
 			shellScript = "set -e\nSRC=\"${PROJECT_DIR}/../PythonEngine\"\nDST=\"${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/PythonEngine\"\nif [ ! -d \"$SRC\" ]; then\n  echo \"[Copy PythonEngine] skip: $SRC not found (engine lives outside repo by design)\"\n  exit 0\nfi\nrm -rf \"$DST\"\nmkdir -p \"$DST\"\n# Pure Python + stdlib (macOS preinstalled); 拷贝引擎代码与脚本，排除用户数据/缓存/.enc/.sh/release 资源。\n/usr/bin/python3 - \"$SRC\" \"$DST\" <<'PY'\nimport os, shutil, sys\nsrc, dst = sys.argv[1], sys.argv[2]\nEXCLUDE_DIR_TOP = {\"__pycache__\", \"app_icons\", \"001_Audio\", \"002_Transcript\",\n                   \"003_Meeting_Minutes\", \"004_Desensitize_Cache\", \"006_Runtime_Log\"}\nEXCLUDE_DIR_NESTED = {\"__pycache__\"}\nEXCLUDE_SUFFIX = (\".pyc\", \".pyo\", \".enc\")\nEXCLUDE_FILE = {\"share_export.sh\", \"app/build_app.sh\", \"app/launcher.sh\",\n                \"app/obfuscate.py\", \"app/_loader.py\",\n                \"app/sys_bootstrap.sh\"}\nEXCLUDE_SUFFIX_FILES_NESTED = (\".pyc\", \".pyo\", \".enc\")\n# 005_LLMWiKi 是脚本与用户数据混在一起的特殊目录：仅拷三个 wiki 脚本 + 用户\n# 模板（其它 Reference Documents / KB / wiki_pages / SOP.md 等运行期数据不入 bundle，\n# 否则 ~254MB，会让 App 暴涨一倍且拷绝大多数是用户已有的资料）。\nWIKI_KEEP_FILES = {\"wiki_build.py\", \"wiki_query.py\", \"wiki_sync.py\",\n                   \"手动添加Wiki页_模板.md\"}\n\ndef should_copy(rel, is_dir):\n    parts = rel.split(os.sep)\n    if not is_dir and any(rel == ef or rel.endswith(os.sep + ef) for ef in EXCLUDE_FILE):\n        return False\n    if is_dir:\n        if EXCLUDE_DIR_TOP and parts and parts[0] in EXCLUDE_DIR_TOP: return False\n        if EXCLUDE_DIR_NESTED and any(p in EXCLUDE_DIR_NESTED for p in parts): return False\n        # 005_LLMWiKi 下任何子目录都不拷（Reference Documents 等用户数据）\n        if parts and parts[0] == \"005_LLMWiKi\" and len(parts) > 1: return False\n    if not is_dir:\n        if rel.endswith(EXCLUDE_SUFFIX): return False\n        # 005_LLMWiKi 下仅 wiki_*.py 与模板白名单可拷\n        if parts and parts[0] == \"005_LLMWiKi\" and parts[-1] not in WIKI_KEEP_FILES:\n            return False\n    return True\n\nsrc = os.path.realpath(src)\ndst = os.path.realpath(dst)\nfor root, dirs, files in os.walk(src):\n    kept_dirs = []\n    for d in dirs:\n        rel = os.path.relpath(os.path.join(root, d), src)\n        if should_copy(rel, True):\n            kept_dirs.append(d)\n            os.makedirs(os.path.join(dst, rel), exist_ok=True)\n    dirs[:] = kept_dirs\n    for f in files:\n        rel = os.path.relpath(os.path.join(root, f), src)\n        if not should_copy(rel, False): continue\n        os.makedirs(os.path.join(dst, os.path.dirname(rel)), exist_ok=True)\n        shutil.copy2(os.path.join(root, f), os.path.join(dst, rel))\nprint(\"[Copy PythonEngine] OK ->\", dst)\nPY\n";
 		};
 /* End PBXShellScriptBuildPhase section */
-
-/* Begin PBXResourcesBuildPhase section */
-		72414F1D302F2BCB00C89E2C /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		72414F1B302F2BCB00C89E2C /* Sources */ = {

@@ -34,6 +34,21 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
     private let importBtn = NSButton(title: "📥 导入会议纪要", target: nil, action: nil)
     /// 「删除选中」按钮——多选模式下批量删除。
     private let deleteSelBtn = NSButton(title: "🗑 删除选中", target: nil, action: nil)
+    /// 首页视图切换按钮（表格 ⇄ 原文）
+    private let homeViewToggleBtn = NSButton(title: "📄 原文", target: nil, action: nil)
+
+    /// 首页「汇总表格」视图（默认以表格形式展现 Wiki 首页，可切回 markdown 原文）—— #4
+    private let homeTable = NSTableView()
+    private let homeNameCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("homeName"))
+    private let homeTypeCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("homeType"))
+    private let homeAliasCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("homeAlias"))
+    private let homeUpdatedCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("homeUpdated"))
+    private let homeSummaryScroll = NSScrollView()
+    /// 右侧内容容器：同时托管 editor 与首页汇总表格，按 homeViewMode 切换显隐
+    private let rightContainer = NSView()
+    private enum HomeViewMode { case table, markdown }
+    private var homeViewMode: HomeViewMode = .table
+    private var homeRows: [WikiPage] = []
 
     private let tableView = NSTableView()
     private let nameColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
@@ -88,7 +103,7 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         searchField.action = #selector(runSearch)
         searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
 
-        [homeBtn, rebuildBtn, refreshBtn, folderBtn, addBtn, importBtn, deleteSelBtn].forEach { b in
+        [homeBtn, rebuildBtn, refreshBtn, folderBtn, addBtn, importBtn, deleteSelBtn, homeViewToggleBtn].forEach { b in
             b.target = self
             b.bezelStyle = .rounded
         }
@@ -99,15 +114,16 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         addBtn.action = #selector(addPage)
         importBtn.action = #selector(importMinutes)
         deleteSelBtn.action = #selector(deleteSelected)
+        homeViewToggleBtn.action = #selector(toggleHomeView)
         deleteSelBtn.isEnabled = false   // 有选中才启用
 
-        let toolbar = NSStackView(views: [searchField, homeBtn, rebuildBtn, refreshBtn, folderBtn, addBtn, importBtn, deleteSelBtn])
+        let toolbar = NSStackView(views: [searchField, homeBtn, rebuildBtn, refreshBtn, folderBtn, addBtn, importBtn, deleteSelBtn, homeViewToggleBtn])
         toolbar.orientation = .horizontal
         toolbar.spacing = 10
         toolbar.alignment = .centerY
         toolbar.distribution = .fill
         searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        [homeBtn, rebuildBtn, refreshBtn, folderBtn, addBtn, importBtn, deleteSelBtn].forEach {
+        [homeBtn, rebuildBtn, refreshBtn, folderBtn, addBtn, importBtn, deleteSelBtn, homeViewToggleBtn].forEach {
             $0.setContentHuggingPriority(.required, for: .horizontal)
         }
 
@@ -151,7 +167,29 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         split.setContentHuggingPriority(.defaultLow, for: .vertical)
         split.setContentHuggingPriority(.defaultLow, for: .horizontal)
         split.addSubview(listScroll)
-        split.addSubview(editor)
+        // 右侧内容容器：托管 editor 与首页汇总表格（按 homeViewMode 切换显隐）
+        rightContainer.wantsLayer = true
+        rightContainer.translatesAutoresizingMaskIntoConstraints = false
+        editor.translatesAutoresizingMaskIntoConstraints = false
+        homeSummaryScroll.translatesAutoresizingMaskIntoConstraints = false
+        homeSummaryScroll.hasVerticalScroller = true
+        homeSummaryScroll.documentView = homeTable
+        configureHomeTable()
+        rightContainer.addSubview(editor)
+        rightContainer.addSubview(homeSummaryScroll)
+        NSLayoutConstraint.activate([
+            editor.topAnchor.constraint(equalTo: rightContainer.topAnchor),
+            editor.leadingAnchor.constraint(equalTo: rightContainer.leadingAnchor),
+            editor.trailingAnchor.constraint(equalTo: rightContainer.trailingAnchor),
+            editor.bottomAnchor.constraint(equalTo: rightContainer.bottomAnchor),
+            homeSummaryScroll.topAnchor.constraint(equalTo: rightContainer.topAnchor),
+            homeSummaryScroll.leadingAnchor.constraint(equalTo: rightContainer.leadingAnchor),
+            homeSummaryScroll.trailingAnchor.constraint(equalTo: rightContainer.trailingAnchor),
+            homeSummaryScroll.bottomAnchor.constraint(equalTo: rightContainer.bottomAnchor)
+        ])
+        homeSummaryScroll.isHidden = true   // 默认首页以表格呈现，selectPage 时再切换显隐
+        editor.isHidden = false
+        split.addSubview(rightContainer)
         // 默认 NSSplitView 已允许用户拖动 divider；列表的 fixed-width 移除后即生效。
 
         progressIndicator.style = .spinning
@@ -229,7 +267,32 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
     private func selectPage(_ page: WikiPage) {
         showingSearch = false
         selectedPage = page
-        let url = page.isHome ? homeFile : wikiPagesDir.appendingPathComponent(page.file)
+        updateHomeToggleBtn()
+        // 首页：默认以汇总表格呈现，可一键切回 markdown 原文（#4）
+        if page.isHome {
+            if homeViewMode == .table {
+                homeSummaryScroll.isHidden = false
+                editor.isHidden = true
+                reloadHomeTable()
+                statusLabel.stringValue = "Wiki 首页（汇总表格）"
+            } else {
+                homeSummaryScroll.isHidden = true
+                editor.isHidden = false
+                if let text = try? String(contentsOf: homeFile, encoding: .utf8) {
+                    editor.load(markdown: text, editable: true)
+                    statusLabel.stringValue = "Wiki 首页（原文）"
+                } else {
+                    editor.load(markdown: "（无法读取文件：\(homeFile.path)）", editable: false)
+                    presentBaseDirAccessReset(message: "无法读取文件：\(homeFile.path)")
+                }
+            }
+            editor.setWikiPages(pages.flatMap { [$0.name] + $0.aliases })
+            return
+        }
+        // 普通页面：显示编辑器
+        homeSummaryScroll.isHidden = true
+        editor.isHidden = false
+        let url = wikiPagesDir.appendingPathComponent(page.file)
         if let text = try? String(contentsOf: url, encoding: .utf8) {
             editor.load(markdown: text, editable: true)
             statusLabel.stringValue = "\(page.name)（\(page.type)）"
@@ -266,6 +329,66 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
     @objc private func goHome() {
         tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         selectPage(pages[0])
+    }
+
+    // MARK: - 首页汇总表格（#4）
+
+    private func configureHomeTable() {
+        homeNameCol.title = "名称"; homeNameCol.width = 200
+        homeTypeCol.title = "类型"; homeTypeCol.width = 90
+        homeAliasCol.title = "别名"; homeAliasCol.width = 200
+        homeUpdatedCol.title = "更新"; homeUpdatedCol.width = 120
+        for c in [homeNameCol, homeTypeCol, homeAliasCol, homeUpdatedCol] { homeTable.addTableColumn(c) }
+        homeTable.dataSource = self
+        homeTable.delegate = self
+        homeTable.headerView = NSTableHeaderView()
+        homeTable.allowsEmptySelection = true
+        homeTable.allowsMultipleSelection = false
+        homeTable.allowsColumnReordering = false
+        homeTable.allowsColumnResizing = true
+        homeTable.target = self
+        homeTable.doubleAction = #selector(homeTableRowDoubleClicked)
+    }
+
+    private func reloadHomeTable() {
+        homeRows = pages
+        homeTable.reloadData()
+    }
+
+    /// 工具栏「📋 表格 / 📄 原文」切换：在首页时切换视图模式，否则先回到首页（默认表格）。
+    @objc private func toggleHomeView() {
+        if selectedPage?.isHome == true {
+            homeViewMode = (homeViewMode == .table) ? .markdown : .table
+            selectPage(pages[0])
+        } else {
+            goHome()
+        }
+    }
+
+    private func updateHomeToggleBtn() {
+        if selectedPage?.isHome == true {
+            homeViewToggleBtn.title = (homeViewMode == .table) ? "📄 原文" : "📋 表格"
+        } else {
+            homeViewToggleBtn.title = "📋 表格视图"
+        }
+    }
+
+    @objc private func homeTableRowDoubleClicked() {
+        let row = homeTable.clickedRow
+        guard row >= 0, row < homeRows.count else { return }
+        let page = homeRows[row]
+        guard !page.isHome else { return }
+        if let idx = pages.firstIndex(where: { $0.file == page.file }) {
+            tableView.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
+        }
+        selectPage(page)
+    }
+
+    private func updatedString(for page: WikiPage) -> String {
+        let url = page.isHome ? homeFile : wikiPagesDir.appendingPathComponent(page.file)
+        guard let d = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date else { return "—" }
+        let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd"
+        return fmt.string(from: d)
     }
 
     /// 供容器 / 菜单「重建 Wiki」调用（公开入口）。
@@ -393,9 +516,27 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
     }
 
     // MARK: - NSTableViewDataSource / Delegate
-    func numberOfRows(in tableView: NSTableView) -> Int { pages.count }
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        if tableView === homeTable { return homeRows.count }
+        return pages.count
+    }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        if tableView === homeTable {
+            guard row < homeRows.count else { return nil }
+            let page = homeRows[row]
+            let value: String
+            switch tableColumn {
+            case homeNameCol:   value = page.name
+            case homeTypeCol:   value = page.type
+            case homeAliasCol:  value = page.aliases.joined(separator: "、")
+            case homeUpdatedCol: value = updatedString(for: page)
+            default:            value = page.name
+            }
+            let cell = NSTextField(labelWithString: value)
+            cell.lineBreakMode = .byTruncatingTail
+            return cell
+        }
         guard row < pages.count else { return nil }
         let page = pages[row]
         let value = (tableColumn == nameColumn) ? page.name : page.type
@@ -405,7 +546,19 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
-        // 删除按钮：跟随选中数变化
+        // 首页汇总表格：单击行 -> 跳转对应页面
+        if let tv = notification.object as? NSTableView, tv === homeTable {
+            let rows = homeTable.selectedRowIndexes
+            guard rows.count == 1, let first = rows.first, first < homeRows.count else { return }
+            let page = homeRows[first]
+            guard !page.isHome else { return }
+            if let idx = pages.firstIndex(where: { $0.file == page.file }) {
+                tableView.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
+            }
+            selectPage(page)
+            return
+        }
+        // 左侧页面列表：删除按钮跟随选中数变化
         deleteSelBtn.isEnabled = (tableView.selectedRowIndexes.count > 0) && !busy
         // 仅当"恰好选中 1 行（导航式选择）"才跳转；
         // ⌘+点击/拖选扩展多选时保持当前页不变，避免误把用户刚翻到的页切走。

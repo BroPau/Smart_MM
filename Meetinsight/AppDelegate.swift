@@ -80,7 +80,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let container = MainContainerViewController()
             window.contentViewController = container
             mainContainer = container
-            installWikiMenu()
+            installMainMenu()
             // 中心化显示
             if let screen = NSScreen.main {
                 let sf = screen.visibleFrame
@@ -108,24 +108,65 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         AppConfig.shared.stopAccessingBaseDir()
     }
 
+    /// 关闭主窗口后，点击 Dock 图标重新唤起（#2）。
+    /// 窗口已设 `isReleasedWhenClosed = false`，故实例仍在，仅需再次前置显示。
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if mainWindow == nil {
+            showMainWindow()
+        } else {
+            mainWindow?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        return true
+    }
+
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
         return true
     }
 
-    // MARK: - 知识库 Wiki 菜单（切到 LLM Wiki 分页）
+    // MARK: - 主菜单（含标准 Edit 菜单，确保系统快捷键可用）
 
-    private func installWikiMenu() {
-        guard let mainMenu = NSApp.mainMenu else { return }
-        let sub = NSMenu(title: "知识库")
+    private func installMainMenu() {
+        let mainMenu = NSMenu()
+
+        // App 菜单
+        let appMenu = NSMenu(title: "Meetinsight")
+        let appItem = NSMenuItem(title: "Meetinsight", action: nil, keyEquivalent: "")
+        appItem.submenu = appMenu
+        let quitItem = NSMenuItem(title: "退出 Meetinsight", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(quitItem)
+        mainMenu.addItem(appItem)
+
+        // 编辑菜单：把复制/粘贴/全选/撤销等系统快捷键接入响应链（#5）
+        let editMenu = NSMenu(title: "编辑")
+        let editItem = NSMenuItem(title: "编辑", action: nil, keyEquivalent: "")
+        editItem.submenu = editMenu
+        let undo = NSMenuItem(title: "撤销", action: Selector("undo:"), keyEquivalent: "z")
+        let redo = NSMenuItem(title: "重做", action: Selector("redo:"), keyEquivalent: "Z")
+        let cut = NSMenuItem(title: "剪切", action: Selector("cut:"), keyEquivalent: "x")
+        let copy = NSMenuItem(title: "复制", action: Selector("copy:"), keyEquivalent: "c")
+        let paste = NSMenuItem(title: "粘贴", action: Selector("paste:"), keyEquivalent: "v")
+        let delete = NSMenuItem(title: "删除", action: Selector("delete:"), keyEquivalent: "")
+        let selectAll = NSMenuItem(title: "全选", action: Selector("selectAll:"), keyEquivalent: "a")
+        for m in [undo, redo, cut, copy, paste, delete, selectAll] {
+            m.target = nil  // 交给第一响应者（NSTextView / WKWebView 编辑区）
+            editMenu.addItem(m)
+            if m === redo || m === cut { editMenu.addItem(.separator()) }
+        }
+        mainMenu.addItem(editItem)
+
+        // 知识库菜单
+        let wikiSub = NSMenu(title: "知识库")
         let openItem = NSMenuItem(title: "打开 LLM Wiki", action: #selector(openWikiTab), keyEquivalent: "")
         let rebuildItem = NSMenuItem(title: "重建 Wiki", action: #selector(rebuildWikiFromMenu), keyEquivalent: "")
         [openItem, rebuildItem].forEach { $0.target = self }
-        sub.addItem(openItem)
-        sub.addItem(rebuildItem)
+        wikiSub.addItem(openItem)
+        wikiSub.addItem(rebuildItem)
+        let wikiItem = NSMenuItem(title: "知识库", action: nil, keyEquivalent: "")
+        wikiItem.submenu = wikiSub
+        mainMenu.addItem(wikiItem)
 
-        let item = NSMenuItem(title: "知识库", action: nil, keyEquivalent: "")
-        item.submenu = sub
-        mainMenu.addItem(item)
+        NSApp.mainMenu = mainMenu
     }
 
     @objc private func openWikiTab() {
