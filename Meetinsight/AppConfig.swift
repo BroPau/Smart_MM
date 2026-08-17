@@ -102,6 +102,15 @@ final class AppConfig {
         set { defaults.set(newValue, forKey: "EMBEDDING_USE_MIRROR") }
     }
 
+    /// Hugging Face 缓存/下载根目录（HF_HOME）。
+    /// **关键**：沙箱 App 禁止写用户主目录下的 ~/.cache，故指向沙箱容器可写的
+    /// Caches/huggingface（App 进程天生可读写）。下载与离线加载都走这个目录，
+    /// 与 pipelineEnvironment() 注入的 HF_HOME 完全一致。
+    var huggingfaceHome: URL {
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        return caches.appendingPathComponent("huggingface")
+    }
+
     /// pipeline.py 脚本路径。
     var pipelineScript: URL {
         if let p = defaults.string(forKey: "PIPELINE_SCRIPT") { return URL(fileURLWithPath: p) }
@@ -192,6 +201,8 @@ final class AppConfig {
         if let res = Bundle.main.resourceURL?.path {
             env["MM_APP_RESOURCES"] = res
         }
+        // Hugging Face 缓存根目录：沙箱 App 无法写 ~/.cache，改指容器可写 Caches/huggingface
+        env["HF_HOME"] = huggingfaceHome.path
         // 用户选择跳过嵌入模型 → 停用语义 RAG
         if embeddingModelSkipped {
             env["MM_EMBEDDING_SKIP"] = "1"

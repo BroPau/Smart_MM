@@ -854,9 +854,10 @@ final class StepEmbeddingModelView: WizardStepView {
     private var skipped = false
 
     private let modelID = "BAAI/bge-small-zh-v1.5"
-    private let cacheDir: URL = {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".cache/huggingface/hub/models--BAAI--bge-small-zh-v1.5")
+    /// 下载落点：沙箱容器可写的 Caches/huggingface/bge-small-zh-v1.5（扁平、无软链，
+    /// SentenceTransformer 可直接加载）。沙箱禁止写 ~/.cache，故必须走这里。
+    private let downloadDir: URL = {
+        AppConfig.shared.huggingfaceHome.appendingPathComponent("bge-small-zh-v1.5")
     }()
     /// 已知国内 CDN 镜像（Hugging Face 的官方推荐替代，无需科学上网，文件结构与 HF 完全一致）
     private let mirrorEndpoint = "https://hf-mirror.com"
@@ -934,22 +935,23 @@ final class StepEmbeddingModelView: WizardStepView {
             progressLabel.stringValue = "可直接进入下一步；若不打算用 RAG，也可点「跳过」。"
             return
         }
-        // 2) HF 缓存目录存在 → 就绪
-        let exists = FileManager.default.fileExists(atPath: cacheDir.path)
-        modelReady = exists
-        if exists {
-            statusLabel.stringValue = "✅ 已在本机发现 bge-small-zh-v1.5 缓存（\(humanCacheSize())）。"
+        // 2) 下载落点（沙箱 Caches/huggingface/bge-small-zh-v1.5）含权重 → 就绪
+        let hasWeights = FileManager.default.fileExists(atPath: downloadDir.appendingPathComponent("model.safetensors").path)
+                       || FileManager.default.fileExists(atPath: downloadDir.appendingPathComponent("pytorch_model.bin").path)
+        modelReady = hasWeights
+        if hasWeights {
+            statusLabel.stringValue = "✅ 已就绪：bge-small-zh-v1.5（位于 \(downloadDir.path)）。"
             statusLabel.textColor = .systemGreen
             progressLabel.stringValue = "可直接进入下一步；若不打算用 RAG，也可点「跳过」。"
         } else {
-            statusLabel.stringValue = "🔍 未检测到 bge-small-zh-v1.5 缓存。"
+            statusLabel.stringValue = "🔍 未检测到 bge-small-zh-v1.5（本机无缓存、也未下载）。"
             statusLabel.textColor = .secondaryLabelColor
             progressLabel.stringValue = "推荐点「下载（国内镜像）」或「浏览本机嵌入模型…」；或「跳过」。"
         }
     }
 
     private func humanCacheSize() -> String {
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: cacheDir.path),
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: downloadDir.path),
               let size = (attrs[.size] as? NSNumber)?.int64Value else { return "未知大小" }
         let mb = Double(size) / 1_048_576
         if mb >= 1024 { return String(format: "%.2f GB", mb / 1024) }
@@ -967,7 +969,8 @@ final class StepEmbeddingModelView: WizardStepView {
         appendLog("已切换到国内镜像 \(mirrorEndpoint)（无需科学上网）")
         runDownload()
     }
-    /// 共享下载逻辑：根据 AppConfig.embeddingUseMirror 决定是否注入 HF_ENDPOINT。
+    /// 共享下载逻辑：把模型解包到沙箱可写目录（HF_HOME/bge-small-zh-v1.5），
+    /// 用 huggingface_hub.snapshot_download 避免 HF 软链结构；注入 HF_HOME + HF_ENDPOINT 到子进程。
     private func runDownload() {
         // 清掉可能残留的本地路径（这次走下载）
         AppConfig.shared.embeddingModelPath = nil
@@ -976,14 +979,24 @@ final class StepEmbeddingModelView: WizardStepView {
         let src = useMirror ? "国内镜像 \(mirrorEndpoint)" : "HuggingFace 直连（需科学上网）"
         appendLog("将下载 \(modelID)（首次需联网，约 90MB，源：\(src)）…")
         progressLabel.stringValue = "下载中…（进度见日志，源：\(src)）"
-        let script = "\(shellQuote(py)) -c \"from sentence_transformers import SentenceTransformer; SentenceTransformer('\(modelID)')\""
+
+        // 用 huggingface_hub 直接解包到沙箱可写目录（扁平、无软链），SentenceTransformer 可直接加载
+        let localDir = downloadDir.path
+        let pyScript = """
+from huggingface_hub import snapshot_download
+p = snapshot_download(\"\(modelID)\", local_dir=\(shellQuote(localDir)), local_dir_use_symlinks=False)
+print("LOCAL_DIR=" + p)
+"""
+        let script = "\(shellQuote(py)) -c \(shellQuote(pyScript))"
+
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/bash")
-        var args = ["-c"]
-        // 注入 HF_ENDPOINT 到子进程（huggingface_hub 会读这个环境变量，作用范围仅限本次调用）
-        let envPrefix = useMirror ? "export HF_ENDPOINT=\(mirrorEndpoint) && " : ""
-        args.append("\(envPrefix)\(script)")
-        proc.arguments = args
+        // 注入网络/缓存环境变量（沙箱默认禁网，需 entitlements 开 network.client）
+        var env = ProcessInfo.processInfo.environment
+        env["HF_HOME"] = AppConfig.shared.huggingfaceHome.path
+        if useMirror { env["HF_ENDPOINT"] = mirrorEndpoint }
+        proc.environment = env
+        proc.arguments = ["-c", script]
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = pipe
@@ -994,8 +1007,10 @@ final class StepEmbeddingModelView: WizardStepView {
         proc.terminationHandler = { [weak self] p in
             DispatchQueue.main.async {
                 if p.terminationStatus == 0 {
-                    self?.appendLog("✅ 模型已下载并缓存。")
+                    // 下载落点即我们指定的扁平目录，自动「采用」
+                    AppConfig.shared.embeddingModelPath = self?.downloadDir
                     self?.skipped = false
+                    self?.appendLog("✅ 模型已下载到：\(self?.downloadDir.path ?? "")")
                     self?.detect()
                 } else {
                     let hint = useMirror
@@ -1016,7 +1031,7 @@ final class StepEmbeddingModelView: WizardStepView {
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         panel.canCreateDirectories = false
-        panel.directoryURL = AppConfig.shared.embeddingModelPath ?? cacheDir
+        panel.directoryURL = AppConfig.shared.embeddingModelPath ?? downloadDir
         panel.message = "请选择含 bge-small-zh-v1.5 模型文件的目录（必须包含 config.json + model.safetensors 或 pytorch_model.bin）"
         panel.prompt = "采用此目录"
         panel.begin { [weak self] resp in
