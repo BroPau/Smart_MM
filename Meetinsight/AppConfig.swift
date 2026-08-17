@@ -112,10 +112,38 @@ final class AppConfig {
     }
 
     /// pipeline.py 脚本路径。
+    /// 解析顺序（v2.2.12+）：
+    ///   ① Bundle 内嵌 `Contents/Resources/PythonEngine/pipeline.py`（Xcode 「Copy PythonEngine」
+    ///      阶段注入；sandbox 可读，不依赖任何 sandbox 外路径——永远受 sandbox 友好）；
+    ///   ② UserDefaults 显式 `PIPELINE_SCRIPT`（向后兼容高级用户/开发期临时切换）；
+    ///   ③ 旧硬编码开发路径（保留回退以防 IDE 单独打开工程、bundle 内未填充）。
     var pipelineScript: URL {
-        if let p = defaults.string(forKey: "PIPELINE_SCRIPT") { return URL(fileURLWithPath: p) }
-        return URL(fileURLWithPath:
-            "/Users/weilu/Downloads/ShareFolder/Meetinsight/PythonEngine/pipeline.py")
+        get {
+            if let u = Self.bundledPythonEngineURL()?.appendingPathComponent("pipeline.py"),
+               FileManager.default.fileExists(atPath: u.path) {
+                return u
+            }
+            if let p = defaults.string(forKey: "PIPELINE_SCRIPT"), !p.isEmpty {
+                return URL(fileURLWithPath: p)
+            }
+            return URL(fileURLWithPath:
+                "/Users/weilu/Downloads/ShareFolder/Meetinsight/PythonEngine/pipeline.py")
+        }
+        /// setter：让高级用户/开发期通过 `defaults write ... PIPELINE_SCRIPT <路径>`
+        /// 或后续"浏览脚本…"UI 注入显式路径，覆盖默认解析；正常情况下无需调用。
+        set { defaults.set(newValue.path, forKey: "PIPELINE_SCRIPT") }
+    }
+
+    /// Bundle 内嵌 PythonEngine 根目录（v2.2.12+）。
+    /// 构建时 Xcode 「Copy PythonEngine」阶段把 `pipeline.py + app/*.py +
+    /// 005_LLMWiKi/wiki_*.py + default_system_prompt.txt + icon_source.png +
+    /// requirements.txt` 拷入 `Contents/Resources/PythonEngine/`；本方法在
+    /// `pipeline.py` 存在时返回该目录 URL，否则 nil（用于回退到 sandbox 外旧路径）。
+    static func bundledPythonEngineURL() -> URL? {
+        guard let r = Bundle.main.resourceURL else { return nil }
+        let root = r.appendingPathComponent("PythonEngine")
+        let probe = root.appendingPathComponent("pipeline.py")
+        return FileManager.default.fileExists(atPath: probe.path) ? root : nil
     }
 
     // MARK: - 大模型供应商（契约 §2）

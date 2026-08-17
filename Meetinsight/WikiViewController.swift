@@ -53,7 +53,17 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
     private var wikiPagesDir: URL { wikiDir.appendingPathComponent("wiki_pages") }
     private var homeFile: URL { wikiDir.appendingPathComponent("Wiki_首页.md") }
     private var wikiScriptsDir: URL {
-        AppConfig.shared.pipelineScript.deletingLastPathComponent().appendingPathComponent("005_LLMWiKi")
+        // ① Bundle 内嵌 PythonEngine/005_LLMWiKi（v2.2.12+ 推荐路径，sandbox 友好）。
+        // ② 回退到 `pipelineScript` 所在目录的 005_LLMWiKi/ 子目录（兼容开发期把脚本放在
+        //    工程 PythonEngine/ 下、用户运行 `--query` 时按目录查找）。
+        // 旧版走的是 `MM_BASE_DIR/005_LLMWiKi/`——但 sandbox App 启动后该路径在多数
+        // 用户的 Downloads 外，已被 sandbox 拒；正确做法是把脚本拷到 bundle 内。
+        if let r = AppConfig.bundledPythonEngineURL()?.appendingPathComponent("005_LLMWiKi"),
+           FileManager.default.fileExists(atPath: r.appendingPathComponent("wiki_query.py").path) {
+            return r
+        }
+        return AppConfig.shared.pipelineScript.deletingLastPathComponent()
+            .appendingPathComponent("005_LLMWiKi")
     }
 
     override func loadView() {
