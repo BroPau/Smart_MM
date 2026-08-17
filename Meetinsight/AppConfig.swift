@@ -17,7 +17,20 @@ final class AppConfig {
     private let keychain = KeychainHelper.shared
 
     // MARK: - 路径配置（契约 §3 工作目录布局）
-    /// 根工作目录 MM_BASE_DIR。默认放在用户文档下的 MeetingMinutes。
+    /// 根工作目录 MM_BASE_DIR。
+    ///
+    /// **App Sandbox 跨重启访问机制（v2.2.13 根治）**：
+    /// sandbox 下 App 重启后无法自动访问用户在向导里「选择目录…」选中的
+    /// `~/Downloads/ShareFolder/Meeting_Minutes/` 这类 sandbox 外目录（报
+    /// `Operation not permitted` / EPERM），因为系统不会跨进程重启记住一次性授权。
+    /// 解决：把用户经 NSOpenPanel 选出的 URL 生成 **security-scoped bookmark**
+    /// 持久化到 UserDefaults（`MM_BASE_DIR_BOOKMARK`），启动时再
+    /// `resolve` + `startAccessingSecurityScopedResource()` 重新获得授权
+    /// （无需再次弹窗、也无需点「始终允许」）。 entitlement
+    /// `com.apple.security.files.user-selected.read-write` 与 bookmark 配套。
+    private var baseDirSecurityURL: URL?
+    private var isBaseDirAccessing = false
+
     var baseDir: URL {
         get {
             if let p = defaults.string(forKey: "MM_BASE_DIR") {
@@ -27,6 +40,74 @@ final class AppConfig {
                 .appendingPathComponent("MeetingMinutes")
         }
         set { defaults.set(newValue.path, forKey: "MM_BASE_DIR") }
+    }
+
+    /// 一次性设置工作目录：写路径 **并** 持久化 security-scoped bookmark。
+    /// 调用方（向导 / 设置页）传入的 `url` 必须来自 NSOpenPanel 用户选择，
+    /// 否则生成不了带授权范围的 bookmark，跨重启授权依旧会失败。
+    /// - Returns: 是否成功生成并保存 bookmark（路径本身一定已写入，启动可兜底）。
+    @discardableResult
+    func setBaseDir(_ url: URL) -> Bool {
+        baseDir = url
+        do {
+            let data = try url.bookmarkData(
+                options: .withSecurityScope,
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+            defaults.set(data, forKey: "MM_BASE_DIR_BOOKMARK")
+            return true
+        } catch {
+            print("[AppConfig] 生成 baseDir security-scoped bookmark 失败：\(error.localizedDescription)")
+            // 仍保留路径；若 url 本身在本会话已 startAccess 过，本次启动可用。
+            return false
+        }
+    }
+
+    /// 启动时重新获得对工作目录的 sandbox 访问授权。
+    /// 解析持久化 bookmark 并 `startAccessingSecurityScopedResource()`；
+    /// 解析出的 URL 与已授权资源完全一致，会回写 `baseDir` 以消除 /var 软链等歧义。
+    /// - Returns: 是否成功获得授权。失败（无 bookmark / 目录已删 / 失效）时调用方应引导「重设工作目录」。
+    @discardableResult
+    func startAccessingBaseDir() -> Bool {
+        guard !isBaseDirAccessing else { return true }
+        if let data = defaults.data(forKey: "MM_BASE_DIR_BOOKMARK") {
+            do {
+                var isStale = false
+                let url = try URL(
+                    resolvingBookmarkData: data,
+                    options: .withSecurityScope,
+                    relativeTo: nil,
+                    bookmarkDataIsStale: &isStale
+                )
+                baseDir = url   // 让路径与已授权资源保持一致
+                baseDirSecurityURL = url
+                if url.startAccessingSecurityScopedResource() {
+                    isBaseDirAccessing = true
+                    return true
+                }
+                print("[AppConfig] startAccessingSecurityScopedResource 返回 false（bookmark 可能已失效）")
+                return false
+            } catch {
+                print("[AppConfig] 解析 baseDir bookmark 失败：\(error.localizedDescription)")
+                return false
+            }
+        }
+        // 回退：没有 bookmark（老安装）时尝试直接对路径 URL 启动访问——通常返回 false，仅兜底。
+        let url = baseDir
+        if url.startAccessingSecurityScopedResource() {
+            baseDirSecurityURL = url
+            isBaseDirAccessing = true
+            return true
+        }
+        return false
+    }
+
+    /// 应用退出前释放对工作目录的 sandbox 访问授权（与 `startAccessingBaseDir()` 配对）。
+    func stopAccessingBaseDir() {
+        guard isBaseDirAccessing, let url = baseDirSecurityURL else { return }
+        url.stopAccessingSecurityScopedResource()
+        isBaseDirAccessing = false
     }
 
     /// whisper.cpp 二进制路径（WHISPER_CLI）。
@@ -247,8 +328,11 @@ final class AppConfig {
     }
 
     /// 是否已基本配置完成（用于决定是否弹出安装向导）。
+    /// **注意**：不能依赖 `FileManager.fileExists` 探测 `baseDir`——sandbox 下未授权时
+    /// `fileExists` 永远返回 false，会把已配置用户反复踢回向导（v2.2.13 修复点）。
+    /// 改为判断「配置是否已记录」：API Key（钥匙串）存在 且 已记录工作目录路径。
     var isConfigured: Bool {
-        apiKey() != nil && FileManager.default.fileExists(atPath: baseDir.path)
+        apiKey() != nil && !baseDir.path.isEmpty
     }
 
     // MARK: - 各组件就绪判定（向导逐步校验用）

@@ -193,7 +193,13 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
             guard let self else { return }
             if let err = result.error {
                 self.setBusy(false, status: "读取失败")
-                self.showAlert("无法读取 Wiki 页面列表：\(err.localizedDescription)")
+                let msg = "无法读取 Wiki 页面列表：\(err.localizedDescription)"
+                // 授权失效（EPERM）时引导重设；其余错误（如 Python 缺失）走普通提示。
+                if err.localizedDescription.contains("Operation not permitted") {
+                    self.presentBaseDirAccessReset(message: msg)
+                } else {
+                    self.showAlert(msg)
+                }
                 return
             }
             guard let data = result.stdout.data(using: .utf8),
@@ -229,6 +235,9 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
             statusLabel.stringValue = "\(page.name)（\(page.type)）"
         } else {
             editor.load(markdown: "（无法读取文件：\(url.path)）", editable: false)
+            // v2.2.13：读取失败多半是 App 重启后丢失对 sandbox 外目录的授权（EPERM）。
+            // 引导用户「重设工作目录…」重新授权，无需重启 App。
+            presentBaseDirAccessReset(message: "无法读取文件：\(url.path)")
         }
         // 把现有页面名（含别名）推给编辑器，供双链自动完成 + 缺失页判定。
         editor.setWikiPages(pages.flatMap { [$0.name] + $0.aliases })
@@ -346,6 +355,41 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
 
     private func showAlert(_ msg: String) {
         AppAlert.show(message: "LLM Wiki", informative: msg, icon: .wiki)
+    }
+
+    // MARK: - 工作目录授权失效兜底（v2.2.13）
+
+    /// 工作目录访问失败（EPERM）的统一兜底：弹提示并附「重设工作目录…」按钮，
+    /// 用户重新用 NSOpenPanel 选目录后写 bookmark + 立即恢复授权 + 刷新，无需重启 App。
+    private func presentBaseDirAccessReset(message: String) {
+        let alert = NSAlert()
+        alert.messageText = "工作目录无法访问"
+        alert.informativeText = message +
+            "\n\n如果是「Operation not permitted」类错误，通常是 App 重启后丢失了对该目录的授权。" +
+            "点「重设工作目录…」重新选择同一目录即可恢复（无需重装）。"
+        alert.alertStyle = .warning
+        alert.icon = AppAlertIcon.warning.image
+        alert.addButton(withTitle: "重设工作目录…")
+        alert.addButton(withTitle: "取消")
+        if alert.runModal() == .alertFirstButtonReturn {
+            promptResetBaseDir()
+        }
+    }
+
+    /// 弹 NSOpenPanel 重新选择工作目录，写入 bookmark 并立即恢复授权 + 刷新页面列表。
+    private func promptResetBaseDir() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.message = "重新选择工作目录（建议选回原来的目录）"
+        panel.prompt = "设为工作目录"
+        panel.begin { [weak self] resp in
+            guard resp == .OK, let url = panel.url else { return }
+            AppConfig.shared.setBaseDir(url)
+            _ = AppConfig.shared.startAccessingBaseDir()
+            self?.loadPages()
+        }
     }
 
     // MARK: - NSTableViewDataSource / Delegate
@@ -609,7 +653,14 @@ extension WikiViewController: MarkdownEditorViewDelegate, SaveablePage {
             try markdown.write(to: url, atomically: true, encoding: .utf8)
             statusLabel.stringValue = "已保存 · \(page.name)"
         } catch {
-            showAlert("保存失败：\(error.localizedDescription)")
+            let msg = "保存失败：\(error.localizedDescription)"
+            // 写入失败多半也是工作目录授权失效（EPERM），引导重设。
+            if error.localizedDescription.contains("Operation not permitted")
+                || error.localizedDescription.contains("permission") {
+                presentBaseDirAccessReset(message: msg)
+            } else {
+                showAlert(msg)
+            }
         }
     }
 

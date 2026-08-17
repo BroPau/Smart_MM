@@ -44,6 +44,12 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
     private let promptView = NSTextView()
     private let savePromptBtn = NSButton(title: "保存提示词", target: nil, action: nil)
 
+    // MARK: - 工作目录（v2.2.13：重设授权兜底）
+    private let baseDirField = NSTextField(labelWithString: "")
+    private let resetBaseDirBtn = NSButton(title: "重设工作目录…", target: nil, action: nil)
+    private let baseDirHint = NSTextField(labelWithString:
+        "App 重启后若 Wiki / 纪要报「Operation not permitted」，点此重新选择同一目录即可恢复授权（无需重装）。")
+
     // MARK: - 恢复默认
     private let restoreBtn = NSButton(title: "恢复默认", target: nil, action: nil)
 
@@ -52,12 +58,40 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
     override func viewDidLoad() {
         super.viewDidLoad()
         setupUI()
+        refreshBaseDir()
         refreshWhisperPath()
         refreshPrompt()
         existingModels = scanExistingModels()
         renderScanResult()
         applySmartSelection()
         refreshModelActionButton()
+    }
+
+    // MARK: - 工作目录（v2.2.13）
+
+    private func refreshBaseDir() {
+        baseDirField.stringValue = AppConfig.shared.baseDir.path
+    }
+
+    @objc private func resetBaseDir() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.message = "重新选择工作目录（建议选回原来的目录）"
+        panel.prompt = "设为工作目录"
+        panel.begin { [weak self] resp in
+            guard resp == .OK, let url = panel.url else { return }
+            // 写路径 + 持久化 security-scoped bookmark，并立即恢复授权。
+            AppConfig.shared.setBaseDir(url)
+            _ = AppConfig.shared.startAccessingBaseDir()
+            self?.refreshBaseDir()
+            AppAlert.show(
+                message: "已重设工作目录",
+                informative: "工作目录已更新为：\n\(url.path)\n\n对该目录的访问授权已恢复，可重新打开 LLM Wiki 验证。",
+                icon: .save
+            )
+        }
     }
 
     // MARK: - UI
@@ -70,6 +104,24 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
         stack.alignment = .leading
         stack.spacing = 14
         stack.translatesAutoresizingMaskIntoConstraints = false
+
+        // —— 工作目录（v2.2.13 置顶）——
+        stack.addArrangedSubview(sectionTitle("工作目录（MM_BASE_DIR）"))
+        baseDirField.lineBreakMode = .byTruncatingMiddle
+        baseDirField.preferredMaxLayoutWidth = 560
+        stack.addArrangedSubview(makeLabel("当前工作目录：", bold: true))
+        stack.addArrangedSubview(baseDirField)
+        resetBaseDirBtn.bezelStyle = .rounded
+        resetBaseDirBtn.target = self; resetBaseDirBtn.action = #selector(resetBaseDir)
+        stack.addArrangedSubview(resetBaseDirBtn)
+        baseDirHint.font = NSFont.systemFont(ofSize: 11)
+        baseDirHint.textColor = .secondaryLabelColor
+        baseDirHint.lineBreakMode = .byWordWrapping
+        baseDirHint.maximumNumberOfLines = 0
+        baseDirHint.preferredMaxLayoutWidth = 560
+        stack.addArrangedSubview(baseDirHint)
+
+        stack.addArrangedSubview(divider())
 
         // —— whisper.cpp 文件夹 ——
         stack.addArrangedSubview(sectionTitle("语音转写引擎 · whisper.cpp"))

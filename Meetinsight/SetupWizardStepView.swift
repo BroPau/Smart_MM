@@ -579,7 +579,9 @@ final class Step3DirectoryView: WizardStepView {
         panel.allowsMultipleSelection = false
         panel.begin { [weak self] resp in
             guard resp == .OK, let url = panel.url else { return }
-            AppConfig.shared.baseDir = url
+            // v2.2.13：用 setBaseDir 写入路径 **并** 持久化 security-scoped bookmark，
+            // 否则 App 重启后 sandbox 无法再访问该目录（EPERM）。
+            AppConfig.shared.setBaseDir(url)
             self?.pathField.stringValue = url.path
             if self?.createSubdirs.state == .on {
                 self?.createStandardSubdirs(at: url)

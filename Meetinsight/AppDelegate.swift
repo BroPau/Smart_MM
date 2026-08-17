@@ -15,6 +15,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var mainContainer: MainContainerViewController?
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
+        // v2.2.13：先恢复对工作目录的 sandbox 授权（解析持久化 security-scoped bookmark）。
+        // 必须在 isConfigured（依赖 FileManager.fileExists 探测 baseDir）之前调用，
+        // 否则 sandbox 下 fileExists 永远返回 false，会反复把已配置用户踢回向导。
+        let accessOK = AppConfig.shared.startAccessingBaseDir()
+
         if !AppConfig.shared.isConfigured {
             let wizard = SetupWizardWindowController()
             setupWizard = wizard
@@ -28,16 +33,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
+                // 向导结束时再次确保授权（Step3 刚写入 bookmark）。
+                AppConfig.shared.startAccessingBaseDir()
                 self?.setupWizard = nil
                 self?.showMainWindow()
             }
         } else {
             showMainWindow()
         }
+
+        // 已配置但授权恢复失败（目录被删 / 旧安装无 bookmark）：一次性引导到「设置 → 重设工作目录」。
+        if AppConfig.shared.isConfigured && !accessOK {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                AppAlert.show(
+                    message: "工作目录访问授权已失效",
+                    informative: "App 已无法读取「\(AppConfig.shared.baseDir.path)」。\n\n请打开「设置 → 工作目录 → 重设工作目录…」重新选择该目录即可恢复（无需重装）。",
+                    icon: .warning,
+                    style: .warning,
+                    buttons: ["知道了"]
+                )
+            }
+        }
     }
 
     /// 显示主窗口（单窗口分页：纪要生成 / LLM Wiki / 设置）。
     private func showMainWindow() {
+        // 确保对工作目录的 sandbox 授权已激活（重复调用由 AppConfig 内部 isBaseDirAccessing 守卫）。
+        AppConfig.shared.startAccessingBaseDir()
         if mainWindow == nil {
             // 默认窗口大小：以「能完整显示 Wiki 首页左右式预览」为目标；
             // 用户调整过的尺寸会写入 UserDefaults,下次启动沿用。
@@ -81,7 +103,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    func applicationWillTerminate(_ aNotification: Notification) {}
+    func applicationWillTerminate(_ aNotification: Notification) {
+        // 释放对工作目录的 sandbox 授权（与 applicationDidFinishLaunching 的 start 配对）。
+        AppConfig.shared.stopAccessingBaseDir()
+    }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
         return true
