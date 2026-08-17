@@ -843,7 +843,7 @@ final class StepPythonEngineView: WizardStepView {
 final class StepEmbeddingModelView: WizardStepView {
 
     override var title: String { "嵌入模型 · RAG 语义检索" }
-    override var subtitle: String { "会议纪要的 Wiki 知识库用 bge-small-zh-v1.5 做语义向量；可现在下载（约 90MB，存本机），或跳过（不使用 RAG，Wiki 检索降级为关键词匹配）" }
+    override var subtitle: String { "会议纪要的 Wiki 知识库用 bge-small-zh-v1.5 做语义向量；可现在下载（约 90MB，存本机），或跳过（不使用 RAG，Wiki 检索降级为关键词匹配）；如本机已有模型文件夹，也可直接「浏览本机嵌入模型…」指定。" }
 
     private let statusLabel = NSTextField(labelWithString: "")
     private let progressLabel = NSTextField(labelWithString: "")
@@ -858,19 +858,43 @@ final class StepEmbeddingModelView: WizardStepView {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".cache/huggingface/hub/models--BAAI--bge-small-zh-v1.5")
     }()
+    /// 已知国内 CDN 镜像（Hugging Face 的官方推荐替代，无需科学上网，文件结构与 HF 完全一致）
+    private let mirrorEndpoint = "https://hf-mirror.com"
 
     override func buildUI() {
         contentStack.addArrangedSubview(makeLabel(
             "该模型仅用于本地语义检索（把 Wiki 知识库切成向量，会议时按语义匹配背景资料），不会上传。向导会先检测本机是否已有缓存。", size: 12))
 
+        // 科学上网 / 国内镜像提示（关键：用户截图反馈默认走 HF 直连会失败）
+        let notice = makeLabel(
+            "⚠️ 默认下载源 huggingface.co 在国内需要科学上网。若无法科学上网，请：\n" +
+            "  ① 点「下载（国内镜像 hf-mirror.com）」按钮（一键切到国内 CDN，无需 VPN）；或\n" +
+            "  ② 点「浏览本机嵌入模型…」手动指定本机已有的 bge-small-zh-v1.5 目录（含 config.json + model.safetensors），\n" +
+            "     例如 ~/.cache/huggingface/hub/models--BAAI--bge-small-zh-v1.5/snapshots/<hash>/；或自行从 hf-mirror.com 下载后的解压目录。",
+            size: 11)
+        notice.textColor = .systemOrange
+        notice.maximumNumberOfLines = 0
+        notice.lineBreakMode = .byWordWrapping
+        contentStack.addArrangedSubview(notice)
+
         contentStack.addArrangedSubview(statusLabel)
         contentStack.addArrangedSubview(progressLabel)
 
-        let download = makeButton("下载模型", target: self, action: #selector(downloadModel))
+        // 第一行：下载 / 跳过
+        let download = makeButton("下载模型（HuggingFace 直连，需科学上网）",
+                                  target: self, action: #selector(downloadModelDefault))
         let skip = makeButton("跳过（不使用 RAG）", target: self, action: #selector(skipModel))
-        let h = NSStackView(views: [download, skip])
-        h.spacing = 10
-        contentStack.addArrangedSubview(h)
+        let row1 = NSStackView(views: [download, skip])
+        row1.spacing = 10
+        contentStack.addArrangedSubview(row1)
+
+        // 第二行：国内镜像 / 浏览本机
+        let mirror = makeButton("下载（国内镜像 hf-mirror.com，免 VPN）",
+                                target: self, action: #selector(downloadModelMirror))
+        let browse = makeButton("浏览本机嵌入模型…", target: self, action: #selector(browseLocalModel))
+        let row2 = NSStackView(views: [mirror, browse])
+        row2.spacing = 10
+        contentStack.addArrangedSubview(row2)
 
         scroll.hasVerticalScroller = true
         scroll.translatesAutoresizingMaskIntoConstraints = false
@@ -888,7 +912,7 @@ final class StepEmbeddingModelView: WizardStepView {
         // 本步骤不强制：模型已就绪 或 用户选择跳过 均可前进
         validate = { [weak self] in (self?.modelReady ?? false) || (self?.skipped ?? false) }
         showValidationError = { [weak self] in
-            self?.presentError("请先「下载模型」，或点击「跳过（不使用 RAG）」。")
+            self?.presentError("请先「下载模型」（国内推荐用国内镜像按钮，免 VPN），或「浏览本机嵌入模型…」指定本机已有的目录；也可「跳过（不使用 RAG）」。")
         }
 
         detect()
@@ -902,6 +926,15 @@ final class StepEmbeddingModelView: WizardStepView {
     }
 
     private func detect() {
+        // 1) 用户显式指定 → 就绪
+        if let p = AppConfig.shared.embeddingModelPath, FileManager.default.fileExists(atPath: p.path) {
+            modelReady = true
+            statusLabel.stringValue = "✅ 已采用本机嵌入模型：\(p.path)"
+            statusLabel.textColor = .systemGreen
+            progressLabel.stringValue = "可直接进入下一步；若不打算用 RAG，也可点「跳过」。"
+            return
+        }
+        // 2) HF 缓存目录存在 → 就绪
         let exists = FileManager.default.fileExists(atPath: cacheDir.path)
         modelReady = exists
         if exists {
@@ -911,7 +944,7 @@ final class StepEmbeddingModelView: WizardStepView {
         } else {
             statusLabel.stringValue = "🔍 未检测到 bge-small-zh-v1.5 缓存。"
             statusLabel.textColor = .secondaryLabelColor
-            progressLabel.stringValue = "点击「下载模型」获取（约 90MB）；或点「跳过」。"
+            progressLabel.stringValue = "推荐点「下载（国内镜像）」或「浏览本机嵌入模型…」；或「跳过」。"
         }
     }
 
@@ -923,14 +956,34 @@ final class StepEmbeddingModelView: WizardStepView {
         return String(format: "%.0f MB", mb)
     }
 
-    @objc private func downloadModel() {
+    // MARK: 下载入口（默认 = HF 直连）
+    @objc private func downloadModelDefault() {
+        AppConfig.shared.embeddingUseMirror = false
+        runDownload()
+    }
+    // MARK: 下载入口（国内镜像）
+    @objc private func downloadModelMirror() {
+        AppConfig.shared.embeddingUseMirror = true
+        appendLog("已切换到国内镜像 \(mirrorEndpoint)（无需科学上网）")
+        runDownload()
+    }
+    /// 共享下载逻辑：根据 AppConfig.embeddingUseMirror 决定是否注入 HF_ENDPOINT。
+    private func runDownload() {
+        // 清掉可能残留的本地路径（这次走下载）
+        AppConfig.shared.embeddingModelPath = nil
+        let useMirror = AppConfig.shared.embeddingUseMirror
         let py = AppConfig.shared.pythonExecutable.path
-        appendLog("将下载 \(modelID)（首次需联网，约 90MB）…")
-        progressLabel.stringValue = "下载中…（进度见日志）"
-        let script = "\(py) -c \"from sentence_transformers import SentenceTransformer; SentenceTransformer('\(modelID)')\""
+        let src = useMirror ? "国内镜像 \(mirrorEndpoint)" : "HuggingFace 直连（需科学上网）"
+        appendLog("将下载 \(modelID)（首次需联网，约 90MB，源：\(src)）…")
+        progressLabel.stringValue = "下载中…（进度见日志，源：\(src)）"
+        let script = "\(shellQuote(py)) -c \"from sentence_transformers import SentenceTransformer; SentenceTransformer('\(modelID)')\""
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/bash")
-        proc.arguments = ["-c", script]
+        var args = ["-c"]
+        // 注入 HF_ENDPOINT 到子进程（huggingface_hub 会读这个环境变量，作用范围仅限本次调用）
+        let envPrefix = useMirror ? "export HF_ENDPOINT=\(mirrorEndpoint) && " : ""
+        args.append("\(envPrefix)\(script)")
+        proc.arguments = args
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = pipe
@@ -945,7 +998,10 @@ final class StepEmbeddingModelView: WizardStepView {
                     self?.skipped = false
                     self?.detect()
                 } else {
-                    self?.appendLog("❌ 下载失败，退出码 \(p.terminationStatus)。可重试，或点「跳过」。")
+                    let hint = useMirror
+                        ? "国内镜像也失败，请检查网络后重试；或点「浏览本机嵌入模型…」指定本机已有目录；或「跳过」。"
+                        : "HuggingFace 直连失败（国内通常需要科学上网），请改点「下载（国内镜像 hf-mirror.com）」；或「浏览本机嵌入模型…」；或「跳过」。"
+                    self?.appendLog("❌ 下载失败，退出码 \(p.terminationStatus)。\(hint)")
                 }
             }
         }
@@ -953,9 +1009,51 @@ final class StepEmbeddingModelView: WizardStepView {
         try? proc.run()
     }
 
+    // MARK: 浏览本机嵌入模型（NSOpenPanel 选目录，校验 config.json + model.safetensors）
+    @objc private func browseLocalModel() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        panel.directoryURL = AppConfig.shared.embeddingModelPath ?? cacheDir
+        panel.message = "请选择含 bge-small-zh-v1.5 模型文件的目录（必须包含 config.json + model.safetensors 或 pytorch_model.bin）"
+        panel.prompt = "采用此目录"
+        panel.begin { [weak self] resp in
+            guard resp == .OK, let url = panel.url else { return }
+            guard Self.isValidEmbeddingDir(url) else {
+                self?.presentError("所选目录不是有效的 bge-small-zh-v1.5 模型目录（需要 config.json + model.safetensors/pytorch_model.bin）。")
+                return
+            }
+            AppConfig.shared.embeddingModelPath = url
+            AppConfig.shared.embeddingModelSkipped = false
+            self?.skipped = false
+            self?.appendLog("✅ 已采用本机嵌入模型：\(url.path)")
+            self?.detect()
+        }
+    }
+
+    /// 校验目录是否含 bge-small-zh-v1.5 的最小可加载文件集。
+    /// 同时支持两种目录形式：① 解压后的模型根目录；② HF 缓存 snapshots/<hash>/ 子目录。
+    private static func isValidEmbeddingDir(_ dir: URL) -> Bool {
+        let fm = FileManager.default
+        let required = ["config.json"]
+        let weights = ["model.safetensors", "pytorch_model.bin", "pytorch_model.bin.index.json",
+                       "model.safetensors.index.json"]
+        for f in required {
+            if !fm.fileExists(atPath: dir.appendingPathComponent(f).path) { return false }
+        }
+        for w in weights {
+            if fm.fileExists(atPath: dir.appendingPathComponent(w).path) { return true }
+        }
+        return false
+    }
+
     @objc private func skipModel() {
         skipped = true
         AppConfig.shared.embeddingModelSkipped = true
+        // 同时清掉本机路径，避免 pipeline 同时拿到两边信号
+        AppConfig.shared.embeddingModelPath = nil
         statusLabel.stringValue = "⏭️ 已跳过嵌入模型；RAG 语义检索将停用（Wiki 检索降级为关键词匹配）。"
         statusLabel.textColor = .systemOrange
         progressLabel.stringValue = "可继续下一步。"
@@ -964,6 +1062,11 @@ final class StepEmbeddingModelView: WizardStepView {
     private func presentError(_ msg: String) {
         AppAlert.show(message: "无法继续", informative: msg, icon: .error)
     }
+}
+
+/// 给 Python 路径做 shell-safe 引号转义（处理含空格/特殊字符的路径）。
+fileprivate func shellQuote(_ s: String) -> String {
+    "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
 }
 
 // MARK: - 小工具

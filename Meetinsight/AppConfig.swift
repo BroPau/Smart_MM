@@ -73,6 +73,35 @@ final class AppConfig {
         set { defaults.set(newValue, forKey: "MM_EMBEDDING_SKIP") }
     }
 
+    /// 本地嵌入模型路径（可选）。若用户在向导中点了「浏览本机嵌入模型…」指定了
+    /// 已有 bge-small-zh-v1.5 目录（含 config.json + model.safetensors），则 pipeline
+    /// 优先从此处加载，无需走网络下载。空时回退到 ~/.cache/huggingface 或在线。
+    /// 同时兼容指向 snapshots/<hash>/ 子目录或解压后的模型根目录两种形式。
+    var embeddingModelPath: URL? {
+        get {
+            guard let p = defaults.string(forKey: "EMBEDDING_MODEL_PATH"),
+                  !p.isEmpty else { return nil }
+            return URL(fileURLWithPath: p)
+        }
+        set {
+            if let v = newValue {
+                defaults.set(v.path, forKey: "EMBEDDING_MODEL_PATH")
+            } else {
+                defaults.removeObject(forKey: "EMBEDDING_MODEL_PATH")
+            }
+        }
+    }
+
+    /// 是否使用国内镜像下载嵌入模型（默认 false）。
+    /// 设为 true 时 pipelineEnvironment() 会注入 HF_ENDPOINT=https://hf-mirror.com，
+    /// huggingface_hub 库下载时即走镜像（无需科学上网）。
+    /// hf-mirror.com 是 huggingface.co 的国内 CDN 镜像，文件结构完全一致，对
+    /// sentence-transformers / huggingface_hub 透明（设置 HF_ENDPOINT 后所有请求自动走镜像）。
+    var embeddingUseMirror: Bool {
+        get { defaults.bool(forKey: "EMBEDDING_USE_MIRROR") }
+        set { defaults.set(newValue, forKey: "EMBEDDING_USE_MIRROR") }
+    }
+
     /// pipeline.py 脚本路径。
     var pipelineScript: URL {
         if let p = defaults.string(forKey: "PIPELINE_SCRIPT") { return URL(fileURLWithPath: p) }
@@ -166,6 +195,14 @@ final class AppConfig {
         // 用户选择跳过嵌入模型 → 停用语义 RAG
         if embeddingModelSkipped {
             env["MM_EMBEDDING_SKIP"] = "1"
+        }
+        // 用户手动指定的本地嵌入模型路径 → pipeline 优先本地加载（避免重复下载）
+        if let p = embeddingModelPath {
+            env["MM_EMBEDDING_MODEL_PATH"] = p.path
+        }
+        // 国内镜像开关 → huggingface_hub 自动走 hf-mirror.com（无需科学上网）
+        if embeddingUseMirror {
+            env["HF_ENDPOINT"] = "https://hf-mirror.com"
         }
         return env
     }
