@@ -3,9 +3,9 @@
 //  Meetinsight
 //
 //  单窗口分页容器（无弹出窗口）：
-//  - 顶部横向 tab 切换三个分页：纪要生成 / LLM Wiki / 设置。
-//  - 默认选中「LLM Wiki」（显示 Wiki 首页，见需求 ⑤）。
-//  - 顶部工具栏右侧「保存」按钮：对当前可保存分页（纪要生成 / LLM Wiki）触发保存。
+//  - 顶部横向 tab 切换三个分页：会议纪要（含生成）/ LLM Wiki / 设置。
+//  - 默认选中「会议纪要」页（生成流程已合并进该页，见 v2.2.15）。
+//  - 顶部工具栏右侧「保存」按钮：对当前可保存分页（会议纪要 / LLM Wiki）触发保存。
 //  - 对外暴露 selectTab(_:) / rebuildWiki() 供 AppDelegate 菜单调用。
 //
 
@@ -16,7 +16,7 @@ protocol SaveablePage: AnyObject {
     func saveCurrent()
 }
 
-enum MainTab: Int { case minutes = 0, generate = 1, wiki = 2, settings = 3 }
+enum MainTab: Int { case minutes = 0, wiki = 1, settings = 2 }
 
 final class MainContainerViewController: NSViewController {
 
@@ -29,7 +29,6 @@ final class MainContainerViewController: NSViewController {
     private var activeTab: MainTab = .minutes
 
     private var minutesVC: MinutesViewController { pages[.minutes] as! MinutesViewController }
-    private var generateVC: GenerateViewController { pages[.generate] as! GenerateViewController }
     private var wikiVC: WikiViewController { pages[.wiki] as! WikiViewController }
 
     override func loadView() {
@@ -53,10 +52,9 @@ final class MainContainerViewController: NSViewController {
         saveBtn.target = self
         saveBtn.action = #selector(saveActive)
 
-        // 创建 4 个 tab 按钮（会议纪要默认置顶）
+        // 创建 3 个 tab 按钮（会议纪要默认置顶）
         let tabDefs: [(MainTab, String)] = [
             (.minutes, "📝 会议纪要"),
-            (.generate, "🎙 纪要生成"),
             (.wiki, "📚 LLM Wiki"),
             (.settings, "⚙️ 设置")
         ]
@@ -146,7 +144,6 @@ final class MainContainerViewController: NSViewController {
 
     private func buildPages() {
         pages[.minutes] = MinutesViewController()
-        pages[.generate] = GenerateViewController()
         pages[.wiki] = WikiViewController()
         pages[.settings] = SettingsViewController()
     }

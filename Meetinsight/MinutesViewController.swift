@@ -2,17 +2,26 @@
 //  MinutesViewController.swift
 //  Meetinsight
 //
-//  「会议纪要」分页（默认首页）：
+//  「会议纪要」分页（默认首页，已合并原「纪要生成」）：
 //  - 顶部工具栏：刷新 / 打开文件夹 / 导出 ▾（Markdown·Word·PDF·HTML·纯文本）/ 删除选中。
-//  - 左侧：会议纪要列表（「📋 会议纪要汇总」置顶，其余为 003_Meeting_Minutes 下的 .md）。
+//  - 左侧栏（自上而下）：
+//      ① 生成卡片（常驻）：拖放音频 / 选择音频文件 / 开始生成 / 取消 / 进度（进度在卡片内刷新）/ 处理日志；
+//      ② 会议纪要列表（「📋 会议纪要汇总」置顶，其余为 003_Meeting_Minutes 下的 .md，含导入的纪要子目录）；
+//         · 区分「生成的纪要」与「导入的纪要」（导入项以 📥 标记）；
+//         · 列表时间使用短格式（当天 → HH:mm；当年非当天 → M月d日；跨年 → yyyy年M月d日）；
+//         · 双击名称即可改名（与 macOS Finder 一致）。
+//      ③ 列表底部「📥 导入会议纪要」按钮（复用 --import-docs 流程）。
 //  - 右侧：
-//      · 选中「汇总」→ 以汇总表格呈现所有纪要（名称 / 更新 / 大小），点击行打开对应纪要（#7）；
+//      · 选中「汇总」→ 以汇总表格呈现所有纪要（名称 / 更新 / 大小），点击行打开对应纪要；
 //      · 选中某纪要 → MarkdownEditorView 预览/编辑（点击进入编辑、保存写回 .md）。
+//  - 生成完成后：提示「N 秒后自动跳转到新纪要」，5 秒后自动选中并打开新生成的纪要。
 //  - 导出：原生实现，零额外依赖、沙箱离线可用（markdown→HTML 后用系统 textutil 转 docx/pdf）。
 //
 
 import Cocoa
 import UniformTypeIdentifiers
+
+private enum MinuteKind { case generated, bookImported }
 
 private struct MinuteItem {
     let name: String      // 显示名（去 .md 后缀）
@@ -20,6 +29,7 @@ private struct MinuteItem {
     let url: URL
     let updated: Date
     let size: Int64
+    let kind: MinuteKind
 }
 
 private enum ExportFormat { case md, docx, pdf, html, txt }
@@ -27,20 +37,35 @@ private enum ExportFormat { case md, docx, pdf, html, txt }
 final class MinutesViewController: NSViewController,
                                     NSTableViewDataSource, NSTableViewDelegate {
 
-    // MARK: - UI 组件
+    // MARK: - 顶部工具栏
     private let refreshBtn = NSButton(title: "刷新", target: nil, action: nil)
     private let folderBtn = NSButton(title: "打开文件夹", target: nil, action: nil)
     private let exportBtn = NSPopUpButton(frame: .zero, pullsDown: true)
     private let deleteSelBtn = NSButton(title: "🗑 删除选中", target: nil, action: nil)
 
+    // MARK: - 左侧：生成卡片
+    private let genCard = NSView()
+    private let genTitle = NSTextField(labelWithString: "🎙 生成会议纪要")
+    private let dropView = DropView()
+    private let audioField = NSTextField(labelWithString: "尚未选择音频文件")
+    private let pickBtn = NSButton(title: "选择音频文件…", target: nil, action: nil)
+    private let runBtn = NSButton(title: "开始生成", target: nil, action: nil)
+    private let cancelBtn = NSButton(title: "取消", target: nil, action: nil)
+    private let genProgressBar = NSProgressIndicator()
+    private let genStatusLabel = NSTextField(labelWithString: "就绪")
+    private let genLogTitle = NSTextField(labelWithString: "处理日志")
+    private let genLogView = NSTextView()
+    private let genLogScroll = NSScrollView()
+
+    // MARK: - 左侧：列表 + 导入按钮
     private let tableView = NSTableView()
     private let nameColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
     private let dateColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("date"))
+    private let importBtn = NSButton(title: "📥 导入会议纪要", target: nil, action: nil)
 
+    // MARK: - 右侧容器
     private let editor = MarkdownEditorView()
     private let statusLabel = NSTextField(labelWithString: "就绪")
-
-    // 右侧容器：同时托管 editor 与汇总表格，按选中项切换显隐
     private let rightContainer = NSView()
     private let summaryScroll = NSScrollView()
     private let summaryTable = NSTableView()
@@ -55,6 +80,14 @@ final class MinutesViewController: NSViewController,
     private var currentMarkdown: String = ""
     private var currentSaveURL: URL?
     private var pendingSaveURL: URL?
+
+    // 生成流程
+    private var audioURL: URL?
+    private var running = false
+
+    // 自动跳转
+    private var programmaticSelect = false
+    private var pendingAutoJump: DispatchWorkItem?
 
     private var minutesDir: URL { AppConfig.shared.baseDir.appendingPathComponent("003_Meeting_Minutes") }
 
@@ -102,9 +135,14 @@ final class MinutesViewController: NSViewController,
         toolbar.distribution = .fill
         toolbar.translatesAutoresizingMaskIntoConstraints = false
 
-        // 左侧列表
-        nameColumn.title = "会议纪要"; nameColumn.width = 240
-        dateColumn.title = "更新"; dateColumn.width = 130
+        // —— 左侧：生成卡片 ——
+        buildGenCard()
+
+        // —— 左侧：列表 ——
+        nameColumn.title = "会议纪要"; nameColumn.width = 220
+        dateColumn.title = "更新"; dateColumn.width = 110
+        nameColumn.isEditable = true          // 支持双击改名
+        dateColumn.isEditable = false
         tableView.addTableColumn(nameColumn)
         tableView.addTableColumn(dateColumn)
         tableView.dataSource = self
@@ -118,9 +156,33 @@ final class MinutesViewController: NSViewController,
         listScroll.hasVerticalScroller = true
         listScroll.documentView = tableView
         listScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
-        listScroll.widthAnchor.constraint(equalToConstant: 320).isActive = true
 
-        // 右侧：editor + 汇总表格
+        importBtn.bezelStyle = .rounded
+        importBtn.target = self
+        importBtn.action = #selector(importMinutesAction)
+        importBtn.heightAnchor.constraint(equalToConstant: 28).isActive = true
+
+        // 左侧栏：生成卡片（上）/ 列表（中，撑开）/ 导入按钮（下）
+        let leftSidebar = NSView()
+        leftSidebar.translatesAutoresizingMaskIntoConstraints = false
+        leftSidebar.wantsLayer = true
+        leftSidebar.addSubview(genCard)
+        leftSidebar.addSubview(listScroll)
+        leftSidebar.addSubview(importBtn)
+        NSLayoutConstraint.activate([
+            genCard.topAnchor.constraint(equalTo: leftSidebar.topAnchor),
+            genCard.leadingAnchor.constraint(equalTo: leftSidebar.leadingAnchor),
+            genCard.trailingAnchor.constraint(equalTo: leftSidebar.trailingAnchor),
+            listScroll.topAnchor.constraint(equalTo: genCard.bottomAnchor, constant: 10),
+            listScroll.leadingAnchor.constraint(equalTo: leftSidebar.leadingAnchor),
+            listScroll.trailingAnchor.constraint(equalTo: leftSidebar.trailingAnchor),
+            listScroll.bottomAnchor.constraint(equalTo: importBtn.topAnchor, constant: -10),
+            importBtn.leadingAnchor.constraint(equalTo: leftSidebar.leadingAnchor),
+            importBtn.trailingAnchor.constraint(equalTo: leftSidebar.trailingAnchor),
+            importBtn.bottomAnchor.constraint(equalTo: leftSidebar.bottomAnchor)
+        ])
+
+        // —— 右侧：editor + 汇总表格 ——
         configureSummaryTable()
         rightContainer.wantsLayer = true
         rightContainer.translatesAutoresizingMaskIntoConstraints = false
@@ -143,15 +205,16 @@ final class MinutesViewController: NSViewController,
         summaryScroll.isHidden = true
         editor.isHidden = false
 
-        // 左右可拖动分界（仿 Wiki / 纪要生成页）
+        // —— 左右可拖动分界 ——
         let split = NSSplitView()
         split.isVertical = true
         split.dividerStyle = .thin
         split.autosaveName = "MinutesSplitPosition"
         split.setContentHuggingPriority(.defaultLow, for: .vertical)
         split.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        split.addSubview(listScroll)
+        split.addSubview(leftSidebar)
         split.addSubview(rightContainer)
+        split.setPosition(360, ofDividerAt: 0)
 
         let bottomRow = NSStackView(views: [statusLabel])
         bottomRow.orientation = .horizontal
@@ -175,10 +238,96 @@ final class MinutesViewController: NSViewController,
         ])
     }
 
+    // MARK: - 生成卡片
+    private func buildGenCard() {
+        genCard.wantsLayer = true
+        genCard.layer?.cornerRadius = 10
+        genCard.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        genCard.layer?.borderWidth = 1
+        genCard.layer?.borderColor = NSColor.separatorColor.cgColor
+        genCard.translatesAutoresizingMaskIntoConstraints = false
+
+        genTitle.font = NSFont.boldSystemFont(ofSize: 13)
+        genTitle.translatesAutoresizingMaskIntoConstraints = false
+
+        dropView.translatesAutoresizingMaskIntoConstraints = false
+        dropView.heightAnchor.constraint(equalToConstant: 60).isActive = true
+        dropView.onAudioDropped = { [weak self] url in self?.setAudio(url) }
+
+        audioField.preferredMaxLayoutWidth = 240
+        audioField.lineBreakMode = .byTruncatingMiddle
+        audioField.translatesAutoresizingMaskIntoConstraints = false
+
+        [pickBtn, runBtn, cancelBtn].forEach { b in
+            b.bezelStyle = .rounded
+            b.alignment = .center
+            b.widthAnchor.constraint(greaterThanOrEqualToConstant: 92).isActive = true
+        }
+        pickBtn.target = self; pickBtn.action = #selector(pickAudio)
+        runBtn.target = self;   runBtn.action = #selector(runPipeline)
+        cancelBtn.target = self; cancelBtn.action = #selector(cancelRun)
+        cancelBtn.isEnabled = false
+
+        let controlRow = NSStackView(views: [pickBtn, runBtn, cancelBtn])
+        controlRow.orientation = .horizontal
+        controlRow.spacing = 8
+        controlRow.alignment = .centerY
+        controlRow.distribution = .fillEqually
+        controlRow.translatesAutoresizingMaskIntoConstraints = false
+
+        genProgressBar.style = .bar
+        genProgressBar.minValue = 0
+        genProgressBar.maxValue = 100
+        genProgressBar.doubleValue = 0
+        genProgressBar.isIndeterminate = false
+        genProgressBar.translatesAutoresizingMaskIntoConstraints = false
+
+        genStatusLabel.font = NSFont.systemFont(ofSize: 12)
+        genStatusLabel.textColor = .secondaryLabelColor
+        genStatusLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        genLogTitle.font = NSFont.boldSystemFont(ofSize: 11)
+        genLogTitle.textColor = .tertiaryLabelColor
+        genLogTitle.translatesAutoresizingMaskIntoConstraints = false
+
+        genLogView.isEditable = false
+        genLogView.isSelectable = true
+        genLogView.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        genLogView.backgroundColor = NSColor.textBackgroundColor
+        genLogScroll.hasVerticalScroller = true
+        genLogScroll.translatesAutoresizingMaskIntoConstraints = false
+        genLogScroll.documentView = genLogView
+        genLogScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 70).isActive = true
+
+        let genStack = NSStackView(views: [
+            genTitle, dropView, audioField, controlRow,
+            genProgressBar, genStatusLabel, genLogTitle, genLogScroll
+        ])
+        genStack.orientation = .vertical
+        genStack.spacing = 8
+        genStack.alignment = .leading
+        genStack.distribution = .fill
+        genStack.translatesAutoresizingMaskIntoConstraints = false
+        genStack.setHuggingPriority(.defaultHigh, for: .vertical)
+
+        genCard.addSubview(genStack)
+        NSLayoutConstraint.activate([
+            genStack.topAnchor.constraint(equalTo: genCard.topAnchor, constant: 12),
+            genStack.leadingAnchor.constraint(equalTo: genCard.leadingAnchor, constant: 12),
+            genStack.trailingAnchor.constraint(equalTo: genCard.trailingAnchor, constant: -12),
+            genStack.bottomAnchor.constraint(equalTo: genCard.bottomAnchor, constant: -12),
+            dropView.widthAnchor.constraint(equalTo: genStack.widthAnchor),
+            controlRow.widthAnchor.constraint(equalTo: genStack.widthAnchor),
+            genProgressBar.widthAnchor.constraint(equalTo: genStack.widthAnchor),
+            genLogScroll.widthAnchor.constraint(equalTo: genStack.widthAnchor)
+        ])
+    }
+
     // MARK: - 加载纪要列表
     @objc private func refresh() { loadMinutes() }
 
     private func loadMinutes() {
+        pendingAutoJump?.cancel(); pendingAutoJump = nil
         items = scanMinutes()
         tableView.reloadData()
         // 默认选中「会议纪要汇总」
@@ -186,29 +335,38 @@ final class MinutesViewController: NSViewController,
         selectedItem = nil
         tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         showSummary()
+        let gen = items.filter { $0.kind == .generated }.count
+        let imp = items.filter { $0.kind == .bookImported }.count
         statusLabel.stringValue = items.isEmpty
             ? "003_Meeting_Minutes 暂无纪要"
-            : "共 \(items.count) 份会议纪要"
+            : "共 \(items.count) 份（生成 \(gen) · 导入 \(imp)）"
     }
 
+    /// 递归扫描 003_Meeting_Minutes：顶层 .md 为「生成的纪要」，imported_* 子目录内 .md 为「导入的纪要」。
     private func scanMinutes() -> [MinuteItem] {
         let dir = minutesDir
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        guard let files = try? FileManager.default.contentsOfDirectory(
-            at: dir, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]
-        ) else { return [] }
-        let mds = files.filter { $0.pathExtension.lowercased() == "md" }
         var out: [MinuteItem] = []
-        for f in mds {
-            let vals = try? f.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+        guard let enumerator = FileManager.default.enumerator(
+            at: dir,
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+        for case let url as URL in enumerator {
+            guard url.pathExtension.lowercased() == "md" else { continue }
+            let vals = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey])
+            guard vals?.isRegularFile == true else { continue }
+            let parent = url.deletingLastPathComponent().lastPathComponent.lowercased()
+            let kind: MinuteKind = parent.contains("imported") ? .bookImported : .generated
             let updated = vals?.contentModificationDate ?? Date.distantPast
             let size = Int64(vals?.fileSize ?? 0)
             out.append(MinuteItem(
-                name: f.deletingPathExtension().lastPathComponent,
-                file: f.lastPathComponent,
-                url: f,
+                name: url.deletingPathExtension().lastPathComponent,
+                file: url.lastPathComponent,
+                url: url,
                 updated: updated,
-                size: size
+                size: size,
+                kind: kind
             ))
         }
         out.sort { $0.updated > $1.updated }   // 最新的在前
@@ -235,7 +393,9 @@ final class MinutesViewController: NSViewController,
         editor.isHidden = true
         summaryTable.reloadData()
         deleteSelBtn.isEnabled = false
-        statusLabel.stringValue = "会议纪要汇总（共 \(items.count) 份）"
+        let gen = items.filter { $0.kind == .generated }.count
+        let imp = items.filter { $0.kind == .bookImported }.count
+        statusLabel.stringValue = "会议纪要汇总（共 \(items.count) 份 · 生成 \(gen) · 导入 \(imp)）"
     }
 
     private func showItem(_ item: MinuteItem) {
@@ -245,7 +405,7 @@ final class MinutesViewController: NSViewController,
             currentMarkdown = text
             currentSaveURL = item.url
             editor.load(markdown: text, editable: true)
-            statusLabel.stringValue = "\(item.name)（\(formatDate(item.updated))）"
+            statusLabel.stringValue = "\(item.name)（\(formatDateShort(item.updated))）"
         } else {
             currentMarkdown = ""
             currentSaveURL = nil
@@ -255,11 +415,11 @@ final class MinutesViewController: NSViewController,
         editor.setWikiPages([])
     }
 
-    // MARK: - 汇总表格（#7）
+    // MARK: - 汇总表格
     private func configureSummaryTable() {
-        sumNameCol.title = "名称"; sumNameCol.width = 240
-        sumDateCol.title = "更新"; sumDateCol.width = 140
-        sumSizeCol.title = "大小"; sumSizeCol.width = 100
+        sumNameCol.title = "名称"; sumNameCol.width = 220
+        sumDateCol.title = "更新"; sumDateCol.width = 120
+        sumSizeCol.title = "大小"; sumSizeCol.width = 90
         for c in [sumNameCol, sumDateCol, sumSizeCol] { summaryTable.addTableColumn(c) }
         summaryTable.dataSource = self
         summaryTable.delegate = self
@@ -347,7 +507,6 @@ final class MinutesViewController: NSViewController,
                                      destURL: url)
                 if !ok {
                     showAlert("导出 \(format == .docx ? "Word" : "PDF") 失败：系统 textutil 不可用或被沙箱限制。已改为导出 HTML 副本。")
-                    // 兜底：写一份 HTML 到同目录
                     let fallback = url.deletingPathExtension().appendingPathExtension("html")
                     try? markdownToHTML(md).write(to: fallback, atomically: true, encoding: .utf8)
                     return
@@ -400,15 +559,235 @@ final class MinutesViewController: NSViewController,
         }
     }
 
+    // MARK: - 导入会议纪要（复用 --import-docs 流程）
+    @objc private func importMinutesAction() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        var allowed: [UTType] = [.data, .plainText, .pdf, .commaSeparatedText,
+                                UTType("org.openxmlformats.wordprocessingml.document"),
+                                UTType("public.msword"),
+                                UTType("org.openxmlformats.spreadsheetml.sheet"),
+                                UTType("com.microsoft.excel"),
+                                UTType("org.openxmlformats.email")].compactMap { $0 }
+        allowed.append(.text)
+        panel.allowedContentTypes = allowed
+        panel.prompt = "导入会议纪要"
+        panel.message = "选择一个或多个文档（或一个文件夹）。支持: .md/.txt/.csv/.doc/.docx/.pdf/.eml/.xls/.xlsx"
+        panel.begin { [weak self] resp in
+            guard resp == .OK, !panel.urls.isEmpty else { return }
+            self?.runImportMinutes(urls: panel.urls)
+        }
+    }
+
+    private func runImportMinutes(urls: [URL]) {
+        let targetPath: String
+        if urls.count == 1 {
+            targetPath = urls[0].path
+        } else {
+            let stash = FileManager.default.temporaryDirectory
+                .appendingPathComponent("smm_minutes_import_\(Int(Date().timeIntervalSince1970))")
+            try? FileManager.default.createDirectory(at: stash, withIntermediateDirectories: true)
+            for u in urls {
+                let dest = stash.appendingPathComponent(u.lastPathComponent)
+                try? FileManager.default.copyItem(at: u, to: dest)
+            }
+            targetPath = stash.path
+        }
+        importBtn.isEnabled = false
+        genStatusLabel.stringValue = "正在导入会议纪要…"
+        statusLabel.stringValue = "正在导入会议纪要…"
+        PipelineRunner.shared.run(
+            arguments: ["--json-log", "--import-docs", targetPath],
+            progress: { [weak self] p in self?.genStatusLabel.stringValue = p.message },
+            completion: { [weak self] result in
+                guard let self else { return }
+                self.importBtn.isEnabled = true
+                if let err = result.error {
+                    self.genStatusLabel.stringValue = "导入失败"
+                    self.statusLabel.stringValue = "导入失败：\(err.localizedDescription)"
+                    self.showAlert("导入失败：\(err.localizedDescription)")
+                    return
+                }
+                self.loadMinutes()
+                var msg = "导入完成"
+                if let j = result.finalJSON {
+                    let total = j["total"] as? Int ?? 0
+                    let suc = (j["succeeded"] as? [String])?.count ?? 0
+                    let fail = (j["failed"] as? [String])?.count ?? 0
+                    msg = "导入成功 \(suc)/\(total)，失败 \(fail)"
+                }
+                self.genStatusLabel.stringValue = msg
+                self.statusLabel.stringValue = msg
+            }
+        )
+    }
+
+    // MARK: - 生成流程（合并自原 GenerateViewController）
+    private func setAudio(_ url: URL) {
+        audioURL = url
+        audioField.stringValue = url.lastPathComponent
+        appendLog("已选择音频：\(url.lastPathComponent)")
+    }
+
+    @objc private func pickAudio() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.audio]
+        panel.begin { [weak self] resp in
+            guard resp == .OK, let url = panel.url else { return }
+            self?.setAudio(url)
+        }
+    }
+
+    @objc private func runPipeline() {
+        guard let audio = audioURL else {
+            showAlert("请先选择一段音频文件（或拖入）。")
+            return
+        }
+        let audioDir = AppConfig.shared.baseDir.appendingPathComponent("001_Audio")
+        try? FileManager.default.createDirectory(at: audioDir, withIntermediateDirectories: true)
+        let dest = audioDir.appendingPathComponent(audio.lastPathComponent)
+        if FileManager.default.fileExists(atPath: dest.path) {
+            try? FileManager.default.removeItem(at: dest)
+        }
+        do {
+            try FileManager.default.copyItem(at: audio, to: dest)
+        } catch {
+            showAlert("无法复制音频到工作目录：\(error.localizedDescription)")
+            return
+        }
+
+        running = true
+        runBtn.isEnabled = false
+        cancelBtn.isEnabled = true
+        genProgressBar.doubleValue = 0
+        genStatusLabel.stringValue = "启动中…"
+        genLogView.string = ""
+        appendLog("开始生成：\(audio.lastPathComponent)")
+
+        PipelineRunner.shared.run(
+            arguments: ["--json-log"],
+            progress: { [weak self] p in self?.handleProgress(p) },
+            completion: { [weak self] result in self?.handleCompletion(result) }
+        )
+    }
+
+    private func handleProgress(_ p: PipelineProgress) {
+        if let prog = p.progress { genProgressBar.doubleValue = prog * 100 }
+        genStatusLabel.stringValue = (p.step.map { "[\($0)] " } ?? "") + p.message
+        appendLog("[\(p.level)] \(p.message)")
+    }
+
+    private func handleCompletion(_ result: PipelineResult) {
+        running = false
+        runBtn.isEnabled = true
+        cancelBtn.isEnabled = false
+
+        if let error = result.error {
+            appendLog("❌ 失败：\(error.localizedDescription)")
+            genStatusLabel.stringValue = "失败"
+            showAlert("生成失败：\(error.localizedDescription)")
+            return
+        }
+
+        let minutesDir = AppConfig.shared.baseDir.appendingPathComponent("003_Meeting_Minutes")
+        guard let md = newestMarkdown(in: minutesDir) else {
+            genStatusLabel.stringValue = "完成（未找到纪要）"
+            appendLog("⚠️ 未在 003_Meeting_Minutes 找到纪要文件。")
+            return
+        }
+        appendLog("✅ 已生成：\(md.lastPathComponent)")
+        genStatusLabel.stringValue = "完成 · \(md.lastPathComponent)"
+        // 刷新列表，并提示 5 秒后自动跳转到新纪要
+        refreshAndSelect(url: md, autoJumpAfter: 5.0)
+    }
+
+    /// 刷新列表，展示提示，并在 delay 秒后自动选中并打开指定纪要；期间若用户手动切换则取消自动跳转。
+    private func refreshAndSelect(url: URL, autoJumpAfter seconds: TimeInterval) {
+        items = scanMinutes()
+        tableView.reloadData()
+        statusLabel.stringValue = "✅ 已生成《\(url.deletingPathExtension().lastPathComponent)》，\(Int(seconds)) 秒后自动跳转到新纪要…"
+        pendingAutoJump?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            if let idx = self.items.firstIndex(where: { $0.url == url }) {
+                self.programmaticSelect = true
+                self.tableView.selectRowIndexes(IndexSet(integer: idx + 1), byExtendingSelection: false)
+                self.statusLabel.stringValue = "已打开新纪要：\(url.lastPathComponent)"
+            }
+        }
+        pendingAutoJump = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
+    }
+
+    @objc private func cancelRun() {
+        PipelineRunner.shared.cancel()
+        appendLog("⏹ 已请求取消")
+    }
+
+    private func appendLog(_ s: String) {
+        genLogView.string += s + "\n"
+        genLogView.scrollToEndOfDocument(nil)
+    }
+
+    private func newestMarkdown(in dir: URL) -> URL? {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: [.contentModificationDateKey]
+        ) else { return nil }
+        let mds = files.filter { $0.pathExtension == "md" }
+        return mds.max { a, b in
+            let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            return da < db
+        }
+    }
+
+    // MARK: - 改名（双击名称，类 macOS Finder）
+    private func renameItem(_ item: MinuteItem, to newBase: String) {
+        let newFile = newBase + ".md"
+        let newURL = item.url.deletingLastPathComponent().appendingPathComponent(newFile)
+        if FileManager.default.fileExists(atPath: newURL.path) {
+            showAlert("已存在同名纪要：「\(newFile)」，请换一个名称。")
+            tableView.reloadData()
+            return
+        }
+        do {
+            try FileManager.default.moveItem(at: item.url, to: newURL)
+            if currentSaveURL == item.url { currentSaveURL = newURL }
+            loadMinutes()
+            if let newIdx = items.firstIndex(where: { $0.url == newURL }) {
+                programmaticSelect = true
+                tableView.selectRowIndexes(IndexSet(integer: newIdx + 1), byExtendingSelection: false)
+            }
+            statusLabel.stringValue = "已重命名为：\(newFile)"
+        } catch {
+            showAlert("重命名失败：\(error.localizedDescription)")
+            tableView.reloadData()
+        }
+    }
+
     // MARK: - 工具
     private func showAlert(_ msg: String) {
         AppAlert.show(message: "会议纪要", informative: msg, icon: .minutes)
     }
 
-    private func formatDate(_ d: Date) -> String {
-        let fmt = DateFormatter()
-        fmt.dateFormat = "yyyy-MM-dd HH:mm"
-        return fmt.string(from: d)
+    /// 短日期：当天 → HH:mm；当年非当天 → M月d日；跨年 → yyyy年M月d日。
+    private func formatDateShort(_ d: Date) -> String {
+        let cal = Calendar.current
+        let now = Date()
+        if cal.isDateInToday(d) {
+            let f = DateFormatter(); f.dateFormat = "HH:mm"; return f.string(from: d)
+        }
+        let year = cal.component(.year, from: d)
+        let thisYear = cal.component(.year, from: now)
+        if year == thisYear {
+            let f = DateFormatter(); f.dateFormat = "M月d日"; return f.string(from: d)
+        }
+        let f = DateFormatter(); f.dateFormat = "yyyy年M月d日"; return f.string(from: d)
     }
 
     private func formatSize(_ bytes: Int64) -> String {
@@ -501,8 +880,8 @@ final class MinutesViewController: NSViewController,
             let item = items[row]
             let value: String
             switch tableColumn {
-            case sumNameCol: value = item.name
-            case sumDateCol: value = formatDate(item.updated)
+            case sumNameCol: value = (item.kind == .bookImported ? "📥 " : "") + item.name
+            case sumDateCol: value = formatDateShort(item.updated)
             case sumSizeCol: value = formatSize(item.size)
             default:         value = item.name
             }
@@ -518,10 +897,45 @@ final class MinutesViewController: NSViewController,
         }
         guard row - 1 < items.count else { return nil }
         let item = items[row - 1]
-        let value: String = (tableColumn === nameColumn) ? item.name : formatDate(item.updated)
-        let cell = NSTextField(labelWithString: value)
-        cell.lineBreakMode = .byTruncatingTail
-        return cell
+        if tableColumn === nameColumn {
+            let cellView = NSTableCellView()
+            let prefix = (item.kind == .bookImported) ? "📥 " : ""
+            let tf = NSTextField()
+            tf.stringValue = prefix + item.name
+            tf.isEditable = true
+            tf.isBordered = false
+            tf.drawsBackground = false
+            tf.font = NSFont.systemFont(ofSize: 13)
+            tf.lineBreakMode = .byTruncatingTail
+            cellView.addSubview(tf)
+            tf.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                tf.leadingAnchor.constraint(equalTo: cellView.leadingAnchor),
+                tf.trailingAnchor.constraint(equalTo: cellView.trailingAnchor),
+                tf.centerYAnchor.constraint(equalTo: cellView.centerYAnchor)
+            ])
+            cellView.textField = tf
+            return cellView
+        } else {
+            let cell = NSTextField(labelWithString: formatDateShort(item.updated))
+            cell.lineBreakMode = .byTruncatingTail
+            return cell
+        }
+    }
+
+    /// 提交改名（双击名称编辑结束后由 NSTableView 回调）。
+    func tableView(_ tableView: NSTableView, setObjectValue object: Any?, for tableColumn: NSTableColumn?, row: Int) {
+        guard tableView === self.tableView,
+              let col = tableColumn, col === nameColumn,
+              row > 0 else { return }
+        let idx = row - 1
+        guard idx < items.count else { return }
+        let item = items[idx]
+        var newName = (object as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if newName.isEmpty { tableView.reloadData(); return }
+        if newName.lowercased().hasSuffix(".md") { newName = String(newName.dropLast(3)) }
+        if newName.isEmpty { tableView.reloadData(); return }
+        renameItem(item, to: newName)
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -539,6 +953,13 @@ final class MinutesViewController: NSViewController,
             return
         }
         // 左侧列表
+        if programmaticSelect {
+            programmaticSelect = false
+        } else {
+            // 用户手动切换 → 取消待执行的自动跳转
+            pendingAutoJump?.cancel()
+            pendingAutoJump = nil
+        }
         let rows = tableView.selectedRowIndexes
         guard rows.count == 1, let first = rows.first else {
             deleteSelBtn.isEnabled = (rows.count > 0)
@@ -579,4 +1000,61 @@ extension MinutesViewController: MarkdownEditorViewDelegate, SaveablePage {
     func markdownEditorRequestsPageList(_ editor: MarkdownEditorView) -> [String] { [] }
 
     func markdownEditorPreviewForWikilink(_ editor: MarkdownEditorView, name: String) -> String? { nil }
+}
+
+// MARK: - 拖放区（合并后迁移到本文件）
+fileprivate final class DropView: NSView {
+    var onAudioDropped: ((URL) -> Void)?
+
+    private let label = NSTextField(labelWithString: "🎙 拖放音频文件到此处（或点「选择音频文件…」）")
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setup()
+    }
+    required init?(coder: NSCoder) { super.init(coder: coder); setup() }
+
+    private func setup() {
+        wantsLayer = true
+        layer?.borderWidth = 1.5
+        layer?.borderColor = NSColor.separatorColor.cgColor
+        layer?.cornerRadius = 10
+        label.font = NSFont.systemFont(ofSize: 12)
+        label.textColor = .secondaryLabelColor
+        label.alignment = .center
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+        registerForDraggedTypes([.fileURL])
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        highlight(true)
+        return .copy
+    }
+    override func draggingExited(_ sender: NSDraggingInfo?) { highlight(false) }
+    override func draggingEnded(_ sender: NSDraggingInfo) { highlight(false) }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let items = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self]) as? [URL] else { return false }
+        for url in items {
+            if isAudio(url) { onAudioDropped?(url); return true }
+        }
+        return false
+    }
+
+    private func isAudio(_ url: URL) -> Bool {
+        if let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType {
+            return type.conforms(to: .audio)
+        }
+        return ["mp3", "wav", "m4a", "aac", "flac", "ogg", "caf"].contains(url.pathExtension.lowercased())
+    }
+
+    private func highlight(_ on: Bool) {
+        layer?.borderColor = on ? NSColor.controlAccentColor.cgColor : NSColor.separatorColor.cgColor
+    }
 }
