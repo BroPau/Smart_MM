@@ -17,6 +17,8 @@ import Table from '@tiptap/extension-table'
 import TableRow from '@tiptap/extension-table-row'
 import TableHeader from '@tiptap/extension-table-header'
 import TableCell from '@tiptap/extension-table-cell'
+import TaskList from '@tiptap/extension-task-list'
+import TaskItem from '@tiptap/extension-task-item'
 import { Plugin, PluginKey, TextSelection } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import MarkdownIt from 'markdown-it'
@@ -119,6 +121,8 @@ function renderFrontmatterBanner(fm) {
 const md = new MarkdownIt({ html: false, linkify: false, breaks: false })
 // GFM 管道表格支持：[[Page]] 双链在表格单元格内也可解析（inline 规则）
 md.use(markdownItTable)
+// GFM 任务列表：- [ ] 未完成 / - [x] 已完成 → TipTap taskList/taskItem（可勾选）
+md.use(taskListsPlugin)
 md.inline.ruler.before('link', 'wikilink', (state, silent) => {
   const start = state.pos
   const src = state.src
@@ -153,6 +157,62 @@ md.renderer.rules.wikilink = (tokens, idx) => {
   const { page, anchor, alias } = tokens[idx].meta
   const anchorAttr = anchor ? ' data-anchor="' + escapeAttr(anchor) + '"' : ''
   return '<a data-wikilink data-page="' + escapeAttr(page) + '" data-alias="' + escapeAttr(alias) + '"' + anchorAttr + ' class="wikilink">' + escapeHtml(alias) + '</a>'
+}
+
+// GFM 任务列表解析：- [ ] / - [x] / - [X] 开头的列表项 → TipTap taskList/taskItem。
+// 只要列表中「任一项」是任务项，就把整张列表转成 taskList，且所有项都作为 taskItem
+// （非任务项默认未勾选）。这样既不丢数据（普通项保留为未勾选），也满足 TaskList 的
+// 内容必须是 taskItem+ 的 schema 约束，不会在加载/保存时崩溃。
+function taskListsPlugin(md) {
+  md.core.ruler.push('gfm_task_lists', state => {
+    const tokens = state.tokens
+    for (let i = 0; i < tokens.length; i++) {
+      if (tokens[i].type !== 'bullet_list_open') continue
+      // 收集该 bullet_list 内的所有 list_item_open 索引
+      let j = i + 1
+      const itemOpens = []
+      while (j < tokens.length && tokens[j].type !== 'bullet_list_close') {
+        if (tokens[j].type === 'list_item_open') itemOpens.push(j)
+        j++
+      }
+      if (itemOpens.length === 0) continue
+      const checkedFlags = []
+      let anyTask = false
+      for (const io of itemOpens) {
+        let k = io + 1
+        let detected = false
+        let checked = false
+        while (k < tokens.length && tokens[k].type !== 'list_item_close') {
+          if (tokens[k].type === 'inline') {
+            const t = tokens[k]
+            const m = /^\s*\[([ xX])\]\s+/.exec(t.content || '')
+            let cm = null
+            if (t.children && t.children.length && t.children[0].type === 'text') {
+              cm = /^\s*\[([ xX])\]\s+/.exec(t.children[0].content || '')
+            }
+            if (m && cm) {
+              detected = true
+              checked = cm[1].toLowerCase() === 'x'
+              // 去掉正文里的 [ ] 前缀（渲染用 children，故改 children[0]）
+              t.children[0].content = t.children[0].content.slice(cm[0].length)
+              t.content = (t.content || '').slice(m[0].length)
+            }
+            break
+          }
+          k++
+        }
+        if (detected) anyTask = true
+        checkedFlags.push(checked)
+      }
+      if (anyTask) {
+        tokens[i].attrSet('data-type', 'taskList')
+        itemOpens.forEach((io, idx) => {
+          tokens[io].attrSet('data-type', 'taskItem')
+          tokens[io].attrSet('data-checked', checkedFlags[idx] ? 'true' : 'false')
+        })
+      }
+    }
+  })
 }
 
 // ————————————————————————————————————————————————————————————————
@@ -203,6 +263,31 @@ turndownService.addRule('wikilink', {
     const head = page + (anchor ? '#' + anchor : '')
     if (alias && alias !== page) return '[[' + head + '|' + alias + ']]'
     return '[[' + head + ']]'
+  }
+})
+// 统一覆盖 turndown 默认的 listItem（其硬编码 bulletListMarker + '   ' 三空格缩进，
+// 且完全忽略 listItemIndent 选项）。本规则：普通项用「- 」单空格，有序项用「N. 」单空格，
+// 并支持 GFM 任务列表 <li data-type="taskItem"> → - [ ] / - [x]。
+turndownService.addRule('listItem', {
+  filter: 'li',
+  replacement: (content, node, options) => {
+    let prefix
+    if (node.getAttribute('data-type') === 'taskItem') {
+      const checked = node.getAttribute('data-checked') === 'true' || node.getAttribute('data-checked') === ''
+      prefix = '- ' + (checked ? '[x] ' : '[ ] ')
+    } else {
+      prefix = options.bulletListMarker + ' '
+      const parent = node.parentNode
+      if (parent && parent.nodeName === 'OL') {
+        const start = parent.getAttribute('start')
+        const index = Array.prototype.indexOf.call(parent.children, node)
+        prefix = (start ? Number(start) + index : index + 1) + '. '
+      }
+    }
+    const isParagraph = /\n$/.test(content)
+    content = content.replace(/^\n+/, '').replace(/\n+$/, '') + (isParagraph ? '\n' : '')
+    content = content.replace(/\n/gm, '\n' + ' '.repeat(prefix.length))
+    return prefix + content + (node.nextSibling ? '\n' : '')
   }
 })
 
@@ -388,8 +473,12 @@ const autocompletePlugin = new Plugin({
 // ————————————————————————————————————————————————————————————————
 //  自动配对 / 自动补全语法符号（引号、括号、单方括号、双方括号等）
 // ————————————————————————————————————————————————————————————————
-// Markdown common syntax auto-pair: backtick(code) / asterisk(emphasis) / tilde(strike) / bracket(link) / paren(url) / brace(ext) / quote
-const pairMap = { '`': '`', '*': '*', '~': '~', '[': ']', '(': ')', '{': '}', '"': '"', "'": "'" }
+// Markdown common syntax auto-pair for symbols TipTap does NOT auto-pair natively:
+//   [ / [[ / ]]  (wikilink & link brackets), ( ) { } " '  (grouping/quotes).
+// Note: * ~ ` are intentionally NOT handled here — TipTap StarterKit's native input
+// rules already convert **bold** / *italic* / ~~strike~~ / `code` correctly; a custom
+// re-pair previously scrambled emphasis text (typing **bold** produced **bold***).
+const pairMap = { '[': ']', '(': ')', '{': '}', '"': '"', "'": "'" }
 const autoPairKey = new PluginKey('autoPair')
 const autoPairPlugin = new Plugin({
   key: autoPairKey,
@@ -449,49 +538,11 @@ const autoPairPlugin = new Plugin({
         }
         return false
       }
-      // 5) 反引号 ` → 行内代码 `code`；第二次敲 ` 跳过闭合符，在已有 ` 后敲 ` 则单插（便于敲出 ``` 围栏块）
-      if (text === '`') {
-        if (after1 === '`') {
-          const tr = state.tr.setSelection(TextSelection.create(state.doc, to + 1))
-          view.dispatch(tr)
-          return true
-        }
-        if (before === '`') {
-          const tr = state.tr.insertText('`', from)
-          tr.setSelection(TextSelection.create(tr.doc, to + 1))
-          view.dispatch(tr.scrollIntoView())
-          return true
-        }
-        const tr = state.tr.insertText('``', from)
-        tr.setSelection(TextSelection.create(tr.doc, from + 1))
-        view.dispatch(tr.scrollIntoView())
-        return true
-      }
-      // 6) 星号 * → 强调 ** / 斜体 *；第二次敲 * 跳过闭合符
-      if (text === '*') {
-        if (after1 === '*') {
-          const tr = state.tr.setSelection(TextSelection.create(state.doc, to + 1))
-          view.dispatch(tr)
-          return true
-        }
-        const tr = state.tr.insertText('**', from)
-        tr.setSelection(TextSelection.create(tr.doc, from + 1))
-        view.dispatch(tr.scrollIntoView())
-        return true
-      }
-      // 7) 波浪号 ~ → 删除线 ~~；第二次敲 ~ 跳过闭合符
-      if (text === '~') {
-        if (after1 === '~') {
-          const tr = state.tr.setSelection(TextSelection.create(state.doc, to + 1))
-          view.dispatch(tr)
-          return true
-        }
-        const tr = state.tr.insertText('~~', from)
-        tr.setSelection(TextSelection.create(tr.doc, from + 1))
-        view.dispatch(tr.scrollIntoView())
-        return true
-      }
-      // 8) 其余成对符号（" ' ( { ）
+      // 5) * ~ ` 已不再由本插件处理：这些符号由 TipTap StarterKit 的原生 input rule
+      //    正确转换（**bold** / *italic* / ~~strike~~ / `code`）。之前在自定义插件里
+      //    重新配对它们，会导致输入 **bold** 时多插入一个 **，表现为"加粗识别错乱"。
+      //    （占位分支已删除，避免误加；如需扩展请只在原生未覆盖的符号上扩展 pairMap。）
+      // 6) 其余成对符号（" ' ( { ）——TipTap 不自动配对，由本插件处理
       if (pairMap[text]) {
         const close = pairMap[text]
         const tr = state.tr.insertText(text + close, from)
@@ -504,7 +555,7 @@ const autoPairPlugin = new Plugin({
     // 输入右符号且光标后已是其配对字符时，直接跳过后跳过（不重复插入）
     handleKeyDown(view, event) {
       if (!view.editable) return false
-      const skip = { ')': ')', ']': ']', '}': '}', '"': '"', "'": "'", '`': '`', '*': '*', '~': '~' }
+      const skip = { ')': ')', ']': ']', '}': '}', '"': '"', "'": "'" }
       if (skip[event.key]) {
         const { state } = view
         const sel = state.selection
@@ -632,6 +683,8 @@ function buildEditor(editable) {
       TableRow,
       TableHeader,
       TableCell,
+      TaskList,
+      TaskItem.configure({ nested: true }),
       BubbleMenu.configure({
         element: getBubbleMenuEl(),
         shouldShow: ({ editor, from, to }) => from !== to && !editor.isActive('wikilink')

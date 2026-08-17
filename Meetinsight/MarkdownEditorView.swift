@@ -664,6 +664,14 @@ fileprivate enum TipTapEditorHTML {
       .ProseMirror h4 { font-size: 1.02em; font-weight: 600; }
       .ProseMirror ul, .ProseMirror ol { padding-left: 1.5em; }
       .ProseMirror li { margin: 0.15em 0; }
+      /* 任务列表（GFM - [ ] / - [x]）可勾选 checkbox */
+      .ProseMirror ul[data-type="taskList"] { list-style: none; padding-left: 0.4em; }
+      .ProseMirror ul[data-type="taskList"] li { display: flex; align-items: flex-start; }
+      .ProseMirror ul[data-type="taskList"] li > label {
+        margin-right: 0.5em; margin-top: 0.2em; flex: 0 0 auto; user-select: none;
+      }
+      .ProseMirror ul[data-type="taskList"] li > div { flex: 1 1 auto; min-width: 0; }
+      .ProseMirror ul[data-type="taskList"] input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; }
       .ProseMirror blockquote {
         border-left: 3px solid #cfcfd6; margin-left: 0; padding: 2px 0 2px 14px; color: #555;
       }
