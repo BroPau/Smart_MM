@@ -2,15 +2,19 @@
 //  MinutesViewController.swift
 //  Meetinsight
 //
-//  「会议纪要」分页（默认首页，已合并原「纪要生成」）：
+//  「会议纪要」分页（默认首页，已合并原「纪要生成」）——严格两列式（方案 B）：
+//  布局骨架（显式约束，非 StackView 包裹，保证两列撑满窗口）：
+//      顶部工具栏（固定高） / NSSplitView 两列主体（撑满剩余高度） / 底部状态条（固定高）
 //  - 顶部工具栏：刷新 / 打开文件夹 / 导出 ▾（Markdown·Word·PDF·HTML·纯文本）/ 删除选中。
-//  - 左侧栏（自上而下）：
-//      ① 生成卡片（常驻）：拖放音频 / 选择音频文件 / 开始生成 / 取消 / 进度（进度在卡片内刷新）/ 处理日志；
-//      ② 会议纪要列表（「📋 会议纪要汇总」置顶，其余为 003_Meeting_Minutes 下的 .md，含导入的纪要子目录）；
-//         · 区分「生成的纪要」与「导入的纪要」（导入项以 📥 标记）；
-//         · 列表时间使用短格式（当天 → HH:mm；当年非当天 → M月d日；跨年 → yyyy年M月d日）；
-//         · 双击名称即可改名（与 macOS Finder 一致）。
-//      ③ 列表底部「📥 导入会议纪要」按钮（复用 --import-docs 流程）。
+//  - 左栏（宽 280–520，默认 320，分界可拖动并持久化）自上而下：
+//      ① 生成卡片（薄卡片常驻）：46pt 拖放区 + 选择音频… / 开始生成（运行时才出现「取消」）；
+//         运行中卡片内展开进度条 + 状态 + 精简日志（进度就在左栏刷新），空闲时收起保持薄身；
+//      ② 会议纪要列表（占据左栏主要高度，macOS 侧栏风格：无表头、单列、名称左 + 短日期右）；
+//         · 「📋 会议纪要汇总」置顶，其余为 003_Meeting_Minutes 下的 .md（含导入子目录）；
+//         · 导入的纪要带「导入」小徽标，与生成的纪要区分（名称本身不含前缀，改名干净）；
+//         · 短日期：当天 → HH:mm；当年非当天 → M月d日；跨年 → yyyy年M月d日（按时间倒序即按年分组）；
+//         · 双击行进入行内改名（Finder 逻辑，回车提交 / Esc 取消），改名即 rename 磁盘文件。
+//      ③ 列表底部贴底「📥 导入会议纪要」按钮（复用 --import-docs 流程）。
 //  - 右侧：
 //      · 选中「汇总」→ 以汇总表格呈现所有纪要（名称 / 更新 / 大小），点击行打开对应纪要；
 //      · 选中某纪要 → MarkdownEditorView 预览/编辑（点击进入编辑、保存写回 .md）。
@@ -35,7 +39,8 @@ private struct MinuteItem {
 private enum ExportFormat { case md, docx, pdf, html, txt }
 
 final class MinutesViewController: NSViewController,
-                                    NSTableViewDataSource, NSTableViewDelegate {
+                                    NSTableViewDataSource, NSTableViewDelegate,
+                                    NSTextFieldDelegate {
 
     // MARK: - 顶部工具栏
     private let refreshBtn = NSButton(title: "刷新", target: nil, action: nil)
@@ -60,8 +65,11 @@ final class MinutesViewController: NSViewController,
     // MARK: - 左侧：列表 + 导入按钮
     private let tableView = NSTableView()
     private let nameColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
-    private let dateColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("date"))
     private let importBtn = NSButton(title: "📥 导入会议纪要", target: nil, action: nil)
+
+    // MARK: - 两列容器
+    private let splitView = NSSplitView()
+    private var didSetInitialSplit = false
 
     // MARK: - 右侧容器
     private let editor = MarkdownEditorView()
@@ -135,50 +143,63 @@ final class MinutesViewController: NSViewController,
         toolbar.distribution = .fill
         toolbar.translatesAutoresizingMaskIntoConstraints = false
 
-        // —— 左侧：生成卡片 ——
+        // —— 左侧：生成卡片（薄卡片，进度/日志仅运行时展开）——
         buildGenCard()
 
-        // —— 左侧：列表 ——
-        nameColumn.title = "会议纪要"; nameColumn.width = 220
-        dateColumn.title = "更新"; dateColumn.width = 110
-        nameColumn.isEditable = true          // 支持双击改名
-        dateColumn.isEditable = false
+        // —— 左侧：纪要列表（macOS 侧栏风格：无表头、单列、名称 + 右侧短日期）——
+        nameColumn.title = "会议纪要"
+        nameColumn.isEditable = false
+        nameColumn.resizingMask = .autoresizingMask
         tableView.addTableColumn(nameColumn)
-        tableView.addTableColumn(dateColumn)
         tableView.dataSource = self
         tableView.delegate = self
-        tableView.headerView = NSTableHeaderView()
+        tableView.headerView = nil                 // 侧栏不显示表头
+        tableView.style = .inset
+        tableView.rowHeight = 28
+        tableView.intercellSpacing = NSSize(width: 0, height: 2)
+        tableView.usesAlternatingRowBackgroundColors = false
+        tableView.backgroundColor = .clear
         tableView.allowsEmptySelection = true
-        tableView.allowsMultipleSelection = true
+        tableView.allowsMultipleSelection = false
         tableView.allowsColumnReordering = false
-        tableView.allowsColumnResizing = true
+        tableView.allowsColumnResizing = false
+        tableView.target = self
+        tableView.doubleAction = #selector(listRowDoubleClicked)
         let listScroll = NSScrollView()
         listScroll.hasVerticalScroller = true
+        listScroll.borderType = .noBorder
+        listScroll.drawsBackground = false
         listScroll.documentView = tableView
-        listScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
+        listScroll.translatesAutoresizingMaskIntoConstraints = false
 
         importBtn.bezelStyle = .rounded
         importBtn.target = self
         importBtn.action = #selector(importMinutesAction)
-        importBtn.heightAnchor.constraint(equalToConstant: 28).isActive = true
 
-        // 左侧栏：生成卡片（上）/ 列表（中，撑开）/ 导入按钮（下）
+        // 左侧栏：生成卡片（上）/ 列表（中，撑开占据主要高度）/ 导入按钮（贴底）
         let leftSidebar = NSView()
         leftSidebar.translatesAutoresizingMaskIntoConstraints = false
-        leftSidebar.wantsLayer = true
         leftSidebar.addSubview(genCard)
         leftSidebar.addSubview(listScroll)
         leftSidebar.addSubview(importBtn)
+        importBtn.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
+            leftSidebar.widthAnchor.constraint(greaterThanOrEqualToConstant: 280),
+            leftSidebar.widthAnchor.constraint(lessThanOrEqualToConstant: 520),
+
             genCard.topAnchor.constraint(equalTo: leftSidebar.topAnchor),
             genCard.leadingAnchor.constraint(equalTo: leftSidebar.leadingAnchor),
-            genCard.trailingAnchor.constraint(equalTo: leftSidebar.trailingAnchor),
+            genCard.trailingAnchor.constraint(equalTo: leftSidebar.trailingAnchor, constant: -1),
+
             listScroll.topAnchor.constraint(equalTo: genCard.bottomAnchor, constant: 10),
             listScroll.leadingAnchor.constraint(equalTo: leftSidebar.leadingAnchor),
-            listScroll.trailingAnchor.constraint(equalTo: leftSidebar.trailingAnchor),
-            listScroll.bottomAnchor.constraint(equalTo: importBtn.topAnchor, constant: -10),
+            listScroll.trailingAnchor.constraint(equalTo: leftSidebar.trailingAnchor, constant: -1),
+            listScroll.bottomAnchor.constraint(equalTo: importBtn.topAnchor, constant: -8),
+            listScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 180),
+
             importBtn.leadingAnchor.constraint(equalTo: leftSidebar.leadingAnchor),
-            importBtn.trailingAnchor.constraint(equalTo: leftSidebar.trailingAnchor),
+            importBtn.trailingAnchor.constraint(equalTo: leftSidebar.trailingAnchor, constant: -1),
+            importBtn.heightAnchor.constraint(equalToConstant: 30),
             importBtn.bottomAnchor.constraint(equalTo: leftSidebar.bottomAnchor)
         ])
 
@@ -205,37 +226,50 @@ final class MinutesViewController: NSViewController,
         summaryScroll.isHidden = true
         editor.isHidden = false
 
-        // —— 左右可拖动分界 ——
-        let split = NSSplitView()
-        split.isVertical = true
-        split.dividerStyle = .thin
-        split.autosaveName = "MinutesSplitPosition"
-        split.setContentHuggingPriority(.defaultLow, for: .vertical)
-        split.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        split.addSubview(leftSidebar)
-        split.addSubview(rightContainer)
-        split.setPosition(360, ofDividerAt: 0)
+        // —— 两列主体：左栏 | 右栏，可拖动分界，撑满窗口 ——
+        splitView.isVertical = true
+        splitView.dividerStyle = .thin
+        splitView.autosaveName = "MinutesSplitPosition2"
+        splitView.translatesAutoresizingMaskIntoConstraints = false
+        splitView.addArrangedSubview(leftSidebar)
+        splitView.addArrangedSubview(rightContainer)
+        // 左栏保持宽度、右栏吸收窗口变化
+        splitView.setHoldingPriority(NSLayoutConstraint.Priority(260), forSubviewAt: 0)
+        splitView.setHoldingPriority(NSLayoutConstraint.Priority(250), forSubviewAt: 1)
 
-        let bottomRow = NSStackView(views: [statusLabel])
-        bottomRow.orientation = .horizontal
-        bottomRow.spacing = 8
-        bottomRow.alignment = .centerY
-        bottomRow.translatesAutoresizingMaskIntoConstraints = false
+        statusLabel.font = NSFont.systemFont(ofSize: 11)
+        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        let stack = NSStackView(views: [toolbar, split, bottomRow])
-        stack.orientation = .vertical
-        stack.spacing = 12
-        stack.alignment = .leading
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.setHuggingPriority(.defaultLow, for: .vertical)
-        view.addSubview(stack)
+        // 顶部工具栏（固定高）｜ 两列主体（撑满剩余）｜ 底部状态条（固定高）
+        view.addSubview(toolbar)
+        view.addSubview(splitView)
+        view.addSubview(statusLabel)
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: pad),
-            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: pad),
-            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -pad),
-            stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -pad),
-            split.widthAnchor.constraint(equalTo: stack.widthAnchor)
+            toolbar.topAnchor.constraint(equalTo: view.topAnchor, constant: pad),
+            toolbar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: pad),
+            toolbar.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -pad),
+
+            splitView.topAnchor.constraint(equalTo: toolbar.bottomAnchor, constant: 12),
+            splitView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: pad),
+            splitView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -pad),
+
+            statusLabel.topAnchor.constraint(equalTo: splitView.bottomAnchor, constant: 8),
+            statusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: pad),
+            statusLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -pad),
+            statusLabel.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -pad)
         ])
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        // 首次出现时给出默认分栏位置（autosave 已保存过则沿用用户拖动结果）
+        guard !didSetInitialSplit else { return }
+        didSetInitialSplit = true
+        if splitView.subviews.first?.frame.width ?? 0 < 260 {
+            splitView.setPosition(320, ofDividerAt: 0)
+        }
     }
 
     // MARK: - 生成卡片
@@ -251,26 +285,31 @@ final class MinutesViewController: NSViewController,
         genTitle.translatesAutoresizingMaskIntoConstraints = false
 
         dropView.translatesAutoresizingMaskIntoConstraints = false
-        dropView.heightAnchor.constraint(equalToConstant: 60).isActive = true
+        dropView.heightAnchor.constraint(equalToConstant: 46).isActive = true
         dropView.onAudioDropped = { [weak self] url in self?.setAudio(url) }
 
-        audioField.preferredMaxLayoutWidth = 240
+        audioField.font = NSFont.systemFont(ofSize: 11)
+        audioField.textColor = .secondaryLabelColor
         audioField.lineBreakMode = .byTruncatingMiddle
         audioField.translatesAutoresizingMaskIntoConstraints = false
 
         [pickBtn, runBtn, cancelBtn].forEach { b in
             b.bezelStyle = .rounded
             b.alignment = .center
-            b.widthAnchor.constraint(greaterThanOrEqualToConstant: 92).isActive = true
+            b.font = NSFont.systemFont(ofSize: 12)
         }
-        pickBtn.target = self; pickBtn.action = #selector(pickAudio)
+        pickBtn.title = "选择音频…"
+        runBtn.title = "开始生成"
+        runBtn.keyEquivalent = ""
+        pickBtn.target = self;  pickBtn.action = #selector(pickAudio)
         runBtn.target = self;   runBtn.action = #selector(runPipeline)
         cancelBtn.target = self; cancelBtn.action = #selector(cancelRun)
         cancelBtn.isEnabled = false
+        cancelBtn.isHidden = true       // 仅运行时出现
 
         let controlRow = NSStackView(views: [pickBtn, runBtn, cancelBtn])
         controlRow.orientation = .horizontal
-        controlRow.spacing = 8
+        controlRow.spacing = 6
         controlRow.alignment = .centerY
         controlRow.distribution = .fillEqually
         controlRow.translatesAutoresizingMaskIntoConstraints = false
@@ -280,47 +319,65 @@ final class MinutesViewController: NSViewController,
         genProgressBar.maxValue = 100
         genProgressBar.doubleValue = 0
         genProgressBar.isIndeterminate = false
+        genProgressBar.controlSize = .small
+        genProgressBar.isHidden = true   // 仅运行时出现
         genProgressBar.translatesAutoresizingMaskIntoConstraints = false
 
-        genStatusLabel.font = NSFont.systemFont(ofSize: 12)
+        genStatusLabel.font = NSFont.systemFont(ofSize: 11)
         genStatusLabel.textColor = .secondaryLabelColor
+        genStatusLabel.lineBreakMode = .byTruncatingTail
         genStatusLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        genLogTitle.font = NSFont.boldSystemFont(ofSize: 11)
-        genLogTitle.textColor = .tertiaryLabelColor
+        genLogTitle.isHidden = true      // 合并进日志区，默认收起
         genLogTitle.translatesAutoresizingMaskIntoConstraints = false
 
         genLogView.isEditable = false
         genLogView.isSelectable = true
-        genLogView.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        genLogView.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
         genLogView.backgroundColor = NSColor.textBackgroundColor
         genLogScroll.hasVerticalScroller = true
+        genLogScroll.borderType = .noBorder
         genLogScroll.translatesAutoresizingMaskIntoConstraints = false
         genLogScroll.documentView = genLogView
-        genLogScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 70).isActive = true
+        genLogScroll.heightAnchor.constraint(equalToConstant: 62).isActive = true
+        genLogScroll.isHidden = true      // 仅运行时出现
 
         let genStack = NSStackView(views: [
             genTitle, dropView, audioField, controlRow,
-            genProgressBar, genStatusLabel, genLogTitle, genLogScroll
+            genProgressBar, genStatusLabel, genLogScroll
         ])
         genStack.orientation = .vertical
-        genStack.spacing = 8
+        genStack.spacing = 6
         genStack.alignment = .leading
         genStack.distribution = .fill
         genStack.translatesAutoresizingMaskIntoConstraints = false
-        genStack.setHuggingPriority(.defaultHigh, for: .vertical)
+        genStack.setHuggingPriority(.required, for: .vertical)
 
         genCard.addSubview(genStack)
         NSLayoutConstraint.activate([
-            genStack.topAnchor.constraint(equalTo: genCard.topAnchor, constant: 12),
-            genStack.leadingAnchor.constraint(equalTo: genCard.leadingAnchor, constant: 12),
-            genStack.trailingAnchor.constraint(equalTo: genCard.trailingAnchor, constant: -12),
-            genStack.bottomAnchor.constraint(equalTo: genCard.bottomAnchor, constant: -12),
+            genStack.topAnchor.constraint(equalTo: genCard.topAnchor, constant: 10),
+            genStack.leadingAnchor.constraint(equalTo: genCard.leadingAnchor, constant: 10),
+            genStack.trailingAnchor.constraint(equalTo: genCard.trailingAnchor, constant: -10),
+            genStack.bottomAnchor.constraint(equalTo: genCard.bottomAnchor, constant: -10),
             dropView.widthAnchor.constraint(equalTo: genStack.widthAnchor),
+            audioField.widthAnchor.constraint(equalTo: genStack.widthAnchor),
             controlRow.widthAnchor.constraint(equalTo: genStack.widthAnchor),
             genProgressBar.widthAnchor.constraint(equalTo: genStack.widthAnchor),
+            genStatusLabel.widthAnchor.constraint(equalTo: genStack.widthAnchor),
             genLogScroll.widthAnchor.constraint(equalTo: genStack.widthAnchor)
         ])
+    }
+
+    /// 运行态切换：进度条 / 状态 / 日志仅在跑流程时展开，空闲时卡片保持薄身。
+    private func setRunningUI(_ on: Bool) {
+        running = on
+        runBtn.isEnabled = !on
+        pickBtn.isEnabled = !on
+        cancelBtn.isHidden = !on
+        cancelBtn.isEnabled = on
+        genProgressBar.isHidden = !on
+        // 运行中必显；结束后若有日志则保留可读，空日志则收起
+        genLogScroll.isHidden = !on && genLogView.string.isEmpty
     }
 
     // MARK: - 加载纪要列表
@@ -661,12 +718,10 @@ final class MinutesViewController: NSViewController,
             return
         }
 
-        running = true
-        runBtn.isEnabled = false
-        cancelBtn.isEnabled = true
+        genLogView.string = ""
+        setRunningUI(true)
         genProgressBar.doubleValue = 0
         genStatusLabel.stringValue = "启动中…"
-        genLogView.string = ""
         appendLog("开始生成：\(audio.lastPathComponent)")
 
         PipelineRunner.shared.run(
@@ -683,9 +738,7 @@ final class MinutesViewController: NSViewController,
     }
 
     private func handleCompletion(_ result: PipelineResult) {
-        running = false
-        runBtn.isEnabled = true
-        cancelBtn.isEnabled = false
+        setRunningUI(false)
 
         if let error = result.error {
             appendLog("❌ 失败：\(error.localizedDescription)")
@@ -889,52 +942,48 @@ final class MinutesViewController: NSViewController,
             cell.lineBreakMode = .byTruncatingTail
             return cell
         }
-        // 左侧列表
+        // 左侧侧栏：单列自绘行（名称 +「导入」标记 + 右侧短日期）
+        let cell = MinuteRowView()
         if row == 0 {
-            let cell = NSTextField(labelWithString: "📋 会议纪要汇总")
-            cell.font = NSFont.boldSystemFont(ofSize: 13)
+            cell.configureSummary(count: items.count)
             return cell
         }
         guard row - 1 < items.count else { return nil }
         let item = items[row - 1]
-        if tableColumn === nameColumn {
-            let cellView = NSTableCellView()
-            let prefix = (item.kind == .bookImported) ? "📥 " : ""
-            let tf = NSTextField()
-            tf.stringValue = prefix + item.name
-            tf.isEditable = true
-            tf.isBordered = false
-            tf.drawsBackground = false
-            tf.font = NSFont.systemFont(ofSize: 13)
-            tf.lineBreakMode = .byTruncatingTail
-            cellView.addSubview(tf)
-            tf.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                tf.leadingAnchor.constraint(equalTo: cellView.leadingAnchor),
-                tf.trailingAnchor.constraint(equalTo: cellView.trailingAnchor),
-                tf.centerYAnchor.constraint(equalTo: cellView.centerYAnchor)
-            ])
-            cellView.textField = tf
-            return cellView
-        } else {
-            let cell = NSTextField(labelWithString: formatDateShort(item.updated))
-            cell.lineBreakMode = .byTruncatingTail
-            return cell
-        }
+        cell.configure(name: item.name,
+                       date: formatDateShort(item.updated),
+                       imported: item.kind == .bookImported)
+        cell.nameField.delegate = self
+        cell.nameField.tag = row          // tag 记录行号，供改名回调定位
+        return cell
     }
 
-    /// 提交改名（双击名称编辑结束后由 NSTableView 回调）。
-    func tableView(_ tableView: NSTableView, setObjectValue object: Any?, for tableColumn: NSTableColumn?, row: Int) {
-        guard tableView === self.tableView,
-              let col = tableColumn, col === nameColumn,
-              row > 0 else { return }
-        let idx = row - 1
+    /// 双击行 → 进入改名（与 macOS Finder 一致：双击名称即可编辑，回车提交、Esc 取消）。
+    @objc private func listRowDoubleClicked() {
+        let row = tableView.clickedRow
+        guard row > 0 else { return }
+        guard let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? MinuteRowView else { return }
+        cell.beginRename()
+    }
+
+    /// 提交改名。
+    func controlTextDidEndEditing(_ obj: Notification) {
+        guard let tf = obj.object as? NSTextField, tf.tag > 0 else { return }
+        (tf.superview as? MinuteRowView)?.endRename()
+        let idx = tf.tag - 1
         guard idx < items.count else { return }
         let item = items[idx]
-        var newName = (object as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if newName.isEmpty { tableView.reloadData(); return }
+        var newName = tf.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         if newName.lowercased().hasSuffix(".md") { newName = String(newName.dropLast(3)) }
-        if newName.isEmpty { tableView.reloadData(); return }
+        guard !newName.isEmpty, newName != item.name else {
+            tf.stringValue = item.name
+            return
+        }
+        if newName.contains("/") || newName.contains(":") {
+            tf.stringValue = item.name
+            showAlert("名称中不能包含「/」或「:」。")
+            return
+        }
         renameItem(item, to: newName)
     }
 
@@ -1002,11 +1051,107 @@ extension MinutesViewController: MarkdownEditorViewDelegate, SaveablePage {
     func markdownEditorPreviewForWikilink(_ editor: MarkdownEditorView, name: String) -> String? { nil }
 }
 
+// MARK: - 侧栏行视图：名称 +「导入」标记 + 右侧短日期，双击可改名
+fileprivate final class MinuteRowView: NSTableCellView {
+
+    let nameField = NSTextField()
+    private let badge = NSTextField(labelWithString: "导入")
+    private let dateField = NSTextField(labelWithString: "")
+
+    override init(frame frameRect: NSRect) { super.init(frame: frameRect); setup() }
+    required init?(coder: NSCoder) { super.init(coder: coder); setup() }
+
+    private func setup() {
+        nameField.isEditable = false
+        nameField.isSelectable = false
+        nameField.isBordered = false
+        nameField.drawsBackground = false
+        nameField.focusRingType = .none
+        nameField.font = NSFont.systemFont(ofSize: 13)
+        nameField.lineBreakMode = .byTruncatingTail
+        nameField.translatesAutoresizingMaskIntoConstraints = false
+        nameField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        badge.font = NSFont.systemFont(ofSize: 9, weight: .medium)
+        badge.textColor = .secondaryLabelColor
+        badge.alignment = .center
+        badge.wantsLayer = true
+        badge.layer?.cornerRadius = 3
+        badge.layer?.borderWidth = 1
+        badge.layer?.borderColor = NSColor.separatorColor.cgColor
+        badge.translatesAutoresizingMaskIntoConstraints = false
+
+        dateField.font = NSFont.systemFont(ofSize: 11)
+        dateField.textColor = .tertiaryLabelColor
+        dateField.alignment = .right
+        dateField.translatesAutoresizingMaskIntoConstraints = false
+        dateField.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        addSubview(nameField)
+        addSubview(badge)
+        addSubview(dateField)
+        textField = nameField
+        NSLayoutConstraint.activate([
+            nameField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            nameField.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            badge.leadingAnchor.constraint(equalTo: nameField.trailingAnchor, constant: 5),
+            badge.centerYAnchor.constraint(equalTo: centerYAnchor),
+            badge.widthAnchor.constraint(equalToConstant: 28),
+            badge.heightAnchor.constraint(equalToConstant: 14),
+
+            dateField.leadingAnchor.constraint(greaterThanOrEqualTo: badge.trailingAnchor, constant: 6),
+            dateField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            dateField.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+    }
+
+    func configure(name: String, date: String, imported: Bool) {
+        nameField.stringValue = name
+        nameField.font = NSFont.systemFont(ofSize: 13)
+        nameField.textColor = .labelColor
+        dateField.stringValue = date
+        dateField.isHidden = false
+        badge.isHidden = !imported
+        endRename()
+    }
+
+    func configureSummary(count: Int) {
+        nameField.stringValue = "📋 会议纪要汇总"
+        nameField.font = NSFont.boldSystemFont(ofSize: 13)
+        nameField.textColor = .labelColor
+        nameField.tag = 0
+        nameField.delegate = nil
+        dateField.stringValue = count > 0 ? "\(count)" : ""
+        badge.isHidden = true
+        endRename()
+    }
+
+    /// 进入行内改名（选中全部文本，回车提交 / Esc 取消）。
+    func beginRename() {
+        guard nameField.tag > 0 else { return }
+        nameField.isEditable = true
+        nameField.isSelectable = true
+        nameField.isBordered = true
+        nameField.bezelStyle = .roundedBezel
+        nameField.drawsBackground = true
+        window?.makeFirstResponder(nameField)
+        nameField.selectText(nil)
+    }
+
+    func endRename() {
+        nameField.isEditable = false
+        nameField.isSelectable = false
+        nameField.isBordered = false
+        nameField.drawsBackground = false
+    }
+}
+
 // MARK: - 拖放区（合并后迁移到本文件）
 fileprivate final class DropView: NSView {
     var onAudioDropped: ((URL) -> Void)?
 
-    private let label = NSTextField(labelWithString: "🎙 拖放音频文件到此处（或点「选择音频文件…」）")
+    private let label = NSTextField(labelWithString: "🎙 拖放音频到此处")
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
