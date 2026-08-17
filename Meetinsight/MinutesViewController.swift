@@ -14,7 +14,9 @@
 //         · 导入的纪要带「导入」小徽标，与生成的纪要区分（名称本身不含前缀，改名干净）；
 //         · 短日期：当天 → HH:mm；当年非当天 → M月d日；跨年 → yyyy年M月d日（按时间倒序即按年分组）；
 //         · 双击行进入行内改名（Finder 逻辑，回车提交 / Esc 取消），改名即 rename 磁盘文件。
-//      ③ 列表底部贴底「📥 导入会议纪要」按钮（复用 --import-docs 流程）。
+//      ③ 紧贴列表底部的「📥 导入会议纪要」按钮（复用 --import-docs 流程）；
+//         列表按内容自适应高度（min 180 / max 320 封顶），不再撑满剩余空间，
+//         避免「列表项数少时按钮被甩到左栏最底、与列表之间出现大段空白」的不协调感。
 //  - 右侧：
 //      · 选中「汇总」→ 以汇总表格呈现所有纪要（名称 / 更新 / 大小），点击行打开对应纪要；
 //      · 选中某纪要 → MarkdownEditorView 预览/编辑（点击进入编辑、保存写回 .md）。
@@ -171,7 +173,11 @@ final class MinutesViewController: NSViewController,
         importBtn.target = self
         importBtn.action = #selector(importMinutesAction)
 
-        // 左侧栏：生成卡片（上）/ 列表（中，撑开占据主要高度）/ 导入按钮（贴底）
+        // 左侧栏：生成卡片（上）/ 列表（中，按内容自适应高度，最小 180 / 最大 320 封顶）/ 导入按钮（紧贴列表下方）
+        //   [v2.2.18 修订] 之前是「列表撑开占满剩余高度 / 按钮钉在 sidebar 底」，列表项数少时
+        //   列表和按钮之间出现大段空白，导入按钮被孤零零甩到左栏底，看起来不协调。
+        //   改为列表按内容自适应（封顶 320，多了滚动），按钮紧贴列表下方（8pt 间隔），
+        //   空余空间留在「按钮↔sidebar 底」之间，视觉上按钮与列表贴在一起。
         let leftSidebar = NSView()
         leftSidebar.translatesAutoresizingMaskIntoConstraints = false
         leftSidebar.addSubview(genCard)
@@ -189,13 +195,14 @@ final class MinutesViewController: NSViewController,
             listScroll.topAnchor.constraint(equalTo: genCard.bottomAnchor, constant: 10),
             listScroll.leadingAnchor.constraint(equalTo: leftSidebar.leadingAnchor),
             listScroll.trailingAnchor.constraint(equalTo: leftSidebar.trailingAnchor, constant: -1),
-            listScroll.bottomAnchor.constraint(equalTo: importBtn.topAnchor, constant: -8),
             listScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 180),
+            listScroll.heightAnchor.constraint(lessThanOrEqualToConstant: 320),    // 封顶，避免列表项少时把按钮挤到 sidebar 底
 
             importBtn.leadingAnchor.constraint(equalTo: leftSidebar.leadingAnchor),
             importBtn.trailingAnchor.constraint(equalTo: leftSidebar.trailingAnchor, constant: -1),
             importBtn.heightAnchor.constraint(equalToConstant: 30),
-            importBtn.bottomAnchor.constraint(equalTo: leftSidebar.bottomAnchor)
+            importBtn.topAnchor.constraint(equalTo: listScroll.bottomAnchor, constant: 8),   // 紧贴列表下方（而非钉在 sidebar 底）
+            importBtn.bottomAnchor.constraint(lessThanOrEqualTo: leftSidebar.bottomAnchor, constant: -8)  // 软上限，万一 sidebar 太矮不溢出
         ])
 
         // —— 右侧：MarkdownEditorView（汇总以 markdown 分类表格呈现，单独纪要以原文呈现）——
