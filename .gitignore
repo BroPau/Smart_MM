@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# Xcode user-specific data & build output
+xcuserdata/
+*.xcuserstate
+DerivedData/
+build/
+*.xcarchive
+
+# Node (tiptap_src dev deps — only source is committed)
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor / tooling
+.workbuddy/
