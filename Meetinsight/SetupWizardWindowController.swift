@@ -2,7 +2,7 @@
 //  SetupWizardWindowController.swift
 //  Meetinsight
 //
-//  安装向导窗口：承载 4 步视图，负责「上一步 / 下一步 / 完成」导航与步骤指示。
+//  安装向导窗口：承载 6 步视图，负责「上一步 / 下一步 / 完成」导航与步骤指示。
 //  完成（或关闭）时发出 .setupWizardDidFinish 通知，供 AppDelegate 接管后续。
 //
 
@@ -23,10 +23,11 @@ final class SetupWizardWindowController: NSWindowController {
 
     init() {
         // Swift 两阶段初始化：所有 let 存储属性必须在调用 super.init 之前赋值完毕。
-        steps = [Step1RuntimeView(), Step2ModelView(), Step3DirectoryView(), Step4LLMView()]
+        steps = [Step1RuntimeView(), Step2ModelView(), StepPythonEngineView(),
+                 StepEmbeddingModelView(), Step3DirectoryView(), Step4LLMView()]
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 640, height: 540),
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 600),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false

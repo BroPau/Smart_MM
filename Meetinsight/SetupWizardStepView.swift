@@ -2,11 +2,13 @@
 //  SetupWizardStepView.swift
 //  Meetinsight
 //
-//  安装向导的四步视图（对应 Swift_Python_Interface_Contract.md §7）：
-//   Step1RuntimeView  —— whisper.cpp 二进制定位 / 下载构建
-//   Step2ModelView    —— whisper 模型下载（6 档，带进度）
-//   Step3DirectoryView—— 工作目录选择（MM_BASE_DIR，创建标准子目录）
-//   Step4LLMView      —— 大模型供应商 + API Key（Keychain）
+//  安装向导的六步视图（对应 Swift_Python_Interface_Contract.md §7）：
+//   Step1RuntimeView        —— whisper.cpp 二进制定位 / 下载构建
+//   Step2ModelView          —— whisper 模型下载（6 档，带进度，可浏览本机已有 .bin）
+//   StepPythonEngineView    —— Python 3.11+ 定位 + 依赖安装（numpy/pypinyin/sentence-transformers/google-genai/openai）
+//   StepEmbeddingModelView  —— bge-small-zh-v1.5 嵌入模型：下载（本地 RAG）或跳过
+//   Step3DirectoryView      —— 工作目录选择（MM_BASE_DIR，创建标准子目录）
+//   Step4LLMView            —— 大模型供应商 + API Key（Keychain）
 //
 //  基类 WizardStepView 负责嵌入容器、标题、校验钩子。每个子类在 buildUI() 中拼接控件。
 //
@@ -88,6 +90,28 @@ fileprivate func formRow(_ label: String, _ control: NSView) -> NSStackView {
     h.addArrangedSubview(lab)
     h.addArrangedSubview(control)
     return h
+}
+
+/// 同步运行一个子进程并合并 stdout+stderr 输出。用于向导内的快速检测（如 python --version / import 检查）。
+/// 注意：会阻塞调用线程，仅适合在后台线程（DispatchQueue.global）中调用耗时很短的命令。
+fileprivate func runProcess(_ executable: String, _ args: [String]) -> (exitCode: Int32, output: String) {
+    let proc = Process()
+    proc.executableURL = URL(fileURLWithPath: executable)
+    proc.arguments = args
+    let out = Pipe()
+    let err = Pipe()
+    proc.standardOutput = out
+    proc.standardError = err
+    do {
+        try proc.run()
+        proc.waitUntilExit()
+    } catch {
+        return (-1, "启动失败: \(error.localizedDescription)")
+    }
+    let o = out.fileHandleForReading.readDataToEndOfFile()
+    let e = err.fileHandleForReading.readDataToEndOfFile()
+    let str = (String(data: o, encoding: .utf8) ?? "") + (String(data: e, encoding: .utf8) ?? "")
+    return (proc.terminationStatus, str.trimmingCharacters(in: .whitespacesAndNewlines))
 }
 
 // MARK: - Step 1：whisper.cpp 二进制
@@ -673,6 +697,268 @@ final class Step4LLMView: WizardStepView {
             informative: "API Key 已写入系统钥匙串（\(cfg.llmProvider.rawValue)）。",
             icon: .save
         )
+    }
+
+    private func presentError(_ msg: String) {
+        AppAlert.show(message: "无法继续", informative: msg, icon: .error)
+    }
+}
+
+// MARK: - Step 5：Python 引擎（定位 + 依赖安装）
+
+final class StepPythonEngineView: WizardStepView {
+
+    override var title: String { "Python 引擎" }
+    override var subtitle: String { "定位 Python 3.11+ 并安装纪要依赖（numpy / pypinyin / sentence-transformers / google-genai / openai）" }
+
+    private let pathField = NSTextField(labelWithString: "")
+    private let versionLabel = NSTextField(labelWithString: "")
+    private let depsLabel = NSTextField(labelWithString: "")
+    private let logView = NSTextView()
+    private let scroll = NSScrollView()
+    private var installProcess: Process?
+    private var depsOK = false
+
+    override func buildUI() {
+        contentStack.addArrangedSubview(makeLabel(
+            "Meetinsight 的纪要后处理（脱敏 / 向量检索 / 大模型调用）由 Python 引擎完成。向导会检测本机 Python 与依赖；若缺失，可点「浏览」指定，或点「安装依赖」自动 pip 安装。", size: 12))
+
+        pathField.stringValue = AppConfig.shared.pythonExecutable.path
+        pathField.lineBreakMode = .byTruncatingMiddle
+        pathField.preferredMaxLayoutWidth = 480
+        contentStack.addArrangedSubview(formRow("Python", pathField))
+
+        contentStack.addArrangedSubview(versionLabel)
+        contentStack.addArrangedSubview(depsLabel)
+
+        let browse = makeButton("浏览 Python…", target: self, action: #selector(browsePython))
+        let install = makeButton("安装依赖", target: self, action: #selector(installDeps))
+        let h = NSStackView(views: [browse, install])
+        h.spacing = 10
+        contentStack.addArrangedSubview(h)
+
+        scroll.hasVerticalScroller = true
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        logView.isEditable = false
+        logView.isSelectable = true
+        logView.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        logView.backgroundColor = NSColor.textBackgroundColor
+        scroll.documentView = logView
+        contentStack.addArrangedSubview(scroll)
+        NSLayoutConstraint.activate([
+            scroll.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
+            scroll.heightAnchor.constraint(equalToConstant: 120)
+        ])
+
+        validate = { [weak self] in self?.depsOK ?? false }
+        showValidationError = { [weak self] in
+            self?.presentError("Python 依赖未就绪。请点击「安装依赖」自动安装，或确认本机 Python 3.11+ 已含 numpy / sentence-transformers / google-genai / openai / pypinyin。")
+        }
+
+        detect()
+    }
+
+    private func appendLog(_ text: String) {
+        DispatchQueue.main.async {
+            self.logView.string += text + "\n"
+            self.logView.scrollToEndOfDocument(nil)
+        }
+    }
+
+    /// 后台检测 Python 版本与核心依赖是否齐全。
+    private func detect() {
+        versionLabel.stringValue = "检测中…"
+        depsLabel.stringValue = ""
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let py = AppConfig.shared.pythonExecutable.path
+            let (c1, o1) = runProcess(py, ["--version"])
+            let ver = c1 == 0 ? o1 : "未找到（退出码 \(c1)）"
+            let (c2, o2) = runProcess(py, ["-c", "import numpy, pypinyin, sentence_transformers, google.genai, openai; print('OK')"])
+            let ok = (c2 == 0)
+            DispatchQueue.main.async {
+                self?.depsOK = ok
+                self?.versionLabel.stringValue = "版本：\(ver)"
+                self?.depsLabel.stringValue = ok
+                    ? "✅ 核心依赖已就绪（numpy / pypinyin / sentence-transformers / google-genai / openai）"
+                    : "⚠️ 依赖缺失：\(o2.isEmpty ? "请点击「安装依赖」" : o2)"
+                self?.depsLabel.textColor = ok ? .systemGreen : .secondaryLabelColor
+            }
+        }
+    }
+
+    @objc private func browsePython() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsOtherFileTypes = true
+        panel.begin { [weak self] resp in
+            guard resp == .OK, let url = panel.url else { return }
+            AppConfig.shared.pythonExecutable = url
+            self?.pathField.stringValue = url.path
+            self?.detect()
+        }
+    }
+
+    @objc private func installDeps() {
+        let py = AppConfig.shared.pythonExecutable.path
+        let req = AppConfig.shared.pipelineScript
+            .deletingLastPathComponent().appendingPathComponent("requirements.txt").path
+        guard FileManager.default.fileExists(atPath: req) else {
+            appendLog("⚠️ 未找到 requirements.txt：\(req)")
+            return
+        }
+        appendLog("将执行：\(py) -m pip install -r \(req)")
+        let script = "\(py) -m pip install -r '\(req)'"
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+        proc.arguments = ["-c", script]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = pipe
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] h in
+            guard let data = h.availableData.nonEmpty, let s = String(data: data, encoding: .utf8) else { return }
+            self?.appendLog(s.trimmingCharacters(in: .newlines))
+        }
+        proc.terminationHandler = { [weak self] p in
+            DispatchQueue.main.async {
+                if p.terminationStatus == 0 {
+                    self?.appendLog("✅ 依赖安装完成。")
+                } else {
+                    self?.appendLog("❌ 安装失败，退出码 \(p.terminationStatus)。")
+                }
+                self?.detect()
+            }
+        }
+        installProcess = proc
+        try? proc.run()
+    }
+
+    private func presentError(_ msg: String) {
+        AppAlert.show(message: "无法继续", informative: msg, icon: .error)
+    }
+}
+
+// MARK: - Step 6：bge-small-zh-v1.5 嵌入模型
+
+final class StepEmbeddingModelView: WizardStepView {
+
+    override var title: String { "嵌入模型 · RAG 语义检索" }
+    override var subtitle: String { "会议纪要的 Wiki 知识库用 bge-small-zh-v1.5 做语义向量；可现在下载（约 90MB，存本机），或跳过（不使用 RAG，Wiki 检索降级为关键词匹配）" }
+
+    private let statusLabel = NSTextField(labelWithString: "")
+    private let progressLabel = NSTextField(labelWithString: "")
+    private let logView = NSTextView()
+    private let scroll = NSScrollView()
+    private var downloadProcess: Process?
+    private var modelReady = false
+    private var skipped = false
+
+    private let modelID = "BAAI/bge-small-zh-v1.5"
+    private let cacheDir: URL = {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cache/huggingface/hub/models--BAAI--bge-small-zh-v1.5")
+    }()
+
+    override func buildUI() {
+        contentStack.addArrangedSubview(makeLabel(
+            "该模型仅用于本地语义检索（把 Wiki 知识库切成向量，会议时按语义匹配背景资料），不会上传。向导会先检测本机是否已有缓存。", size: 12))
+
+        contentStack.addArrangedSubview(statusLabel)
+        contentStack.addArrangedSubview(progressLabel)
+
+        let download = makeButton("下载模型", target: self, action: #selector(downloadModel))
+        let skip = makeButton("跳过（不使用 RAG）", target: self, action: #selector(skipModel))
+        let h = NSStackView(views: [download, skip])
+        h.spacing = 10
+        contentStack.addArrangedSubview(h)
+
+        scroll.hasVerticalScroller = true
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        logView.isEditable = false
+        logView.isSelectable = true
+        logView.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        logView.backgroundColor = NSColor.textBackgroundColor
+        scroll.documentView = logView
+        contentStack.addArrangedSubview(scroll)
+        NSLayoutConstraint.activate([
+            scroll.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
+            scroll.heightAnchor.constraint(equalToConstant: 120)
+        ])
+
+        // 本步骤不强制：模型已就绪 或 用户选择跳过 均可前进
+        validate = { [weak self] in (self?.modelReady ?? false) || (self?.skipped ?? false) }
+        showValidationError = { [weak self] in
+            self?.presentError("请先「下载模型」，或点击「跳过（不使用 RAG）」。")
+        }
+
+        detect()
+    }
+
+    private func appendLog(_ text: String) {
+        DispatchQueue.main.async {
+            self.logView.string += text + "\n"
+            self.logView.scrollToEndOfDocument(nil)
+        }
+    }
+
+    private func detect() {
+        let exists = FileManager.default.fileExists(atPath: cacheDir.path)
+        modelReady = exists
+        if exists {
+            statusLabel.stringValue = "✅ 已在本机发现 bge-small-zh-v1.5 缓存（\(humanCacheSize())）。"
+            statusLabel.textColor = .systemGreen
+            progressLabel.stringValue = "可直接进入下一步；若不打算用 RAG，也可点「跳过」。"
+        } else {
+            statusLabel.stringValue = "🔍 未检测到 bge-small-zh-v1.5 缓存。"
+            statusLabel.textColor = .secondaryLabelColor
+            progressLabel.stringValue = "点击「下载模型」获取（约 90MB）；或点「跳过」。"
+        }
+    }
+
+    private func humanCacheSize() -> String {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: cacheDir.path),
+              let size = (attrs[.size] as? NSNumber)?.int64Value else { return "未知大小" }
+        let mb = Double(size) / 1_048_576
+        if mb >= 1024 { return String(format: "%.2f GB", mb / 1024) }
+        return String(format: "%.0f MB", mb)
+    }
+
+    @objc private func downloadModel() {
+        let py = AppConfig.shared.pythonExecutable.path
+        appendLog("将下载 \(modelID)（首次需联网，约 90MB）…")
+        progressLabel.stringValue = "下载中…（进度见日志）"
+        let script = "\(py) -c \"from sentence_transformers import SentenceTransformer; SentenceTransformer('\(modelID)')\""
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+        proc.arguments = ["-c", script]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = pipe
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] h in
+            guard let data = h.availableData.nonEmpty, let s = String(data: data, encoding: .utf8) else { return }
+            self?.appendLog(s.trimmingCharacters(in: .newlines))
+        }
+        proc.terminationHandler = { [weak self] p in
+            DispatchQueue.main.async {
+                if p.terminationStatus == 0 {
+                    self?.appendLog("✅ 模型已下载并缓存。")
+                    self?.skipped = false
+                    self?.detect()
+                } else {
+                    self?.appendLog("❌ 下载失败，退出码 \(p.terminationStatus)。可重试，或点「跳过」。")
+                }
+            }
+        }
+        downloadProcess = proc
+        try? proc.run()
+    }
+
+    @objc private func skipModel() {
+        skipped = true
+        AppConfig.shared.embeddingModelSkipped = true
+        statusLabel.stringValue = "⏭️ 已跳过嵌入模型；RAG 语义检索将停用（Wiki 检索降级为关键词匹配）。"
+        statusLabel.textColor = .systemOrange
+        progressLabel.stringValue = "可继续下一步。"
     }
 
     private func presentError(_ msg: String) {

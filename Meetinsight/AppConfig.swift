@@ -55,11 +55,22 @@ final class AppConfig {
     ///    sentence-transformers/google-genai，**pipeline 要求的最低运行环境**，见 requirements.txt）。
     /// 注意：绝不可回退到 /usr/bin/python3（macOS 自带 3.9.6，无 numpy，会导致 import 失败、退出码 1）。
     var pythonExecutable: URL {
-        if let p = defaults.string(forKey: "PYTHON_EXECUTABLE") { return URL(fileURLWithPath: p) }
-        let venv = URL(fileURLWithPath:
-            "/Users/weilu/Downloads/ShareFolder/Meetinsight/PythonEngine/app/_deps_venv/bin/python3")
-        if FileManager.default.fileExists(atPath: venv.path) { return venv }
-        return URL(fileURLWithPath: "/usr/local/bin/python3")
+        get {
+            if let p = defaults.string(forKey: "PYTHON_EXECUTABLE") { return URL(fileURLWithPath: p) }
+            let venv = URL(fileURLWithPath:
+                "/Users/weilu/Downloads/ShareFolder/Meetinsight/PythonEngine/app/_deps_venv/bin/python3")
+            if FileManager.default.fileExists(atPath: venv.path) { return venv }
+            return URL(fileURLWithPath: "/usr/local/bin/python3")
+        }
+        /// 由向导「浏览 Python…」写入（UserDefaults: PYTHON_EXECUTABLE），优先级最高。
+        set { defaults.set(newValue.path, forKey: "PYTHON_EXECUTABLE") }
+    }
+
+    /// 是否跳过嵌入模型（不使用 RAG 语义检索）。由向导「跳过（不使用 RAG）」设置；
+    /// pipeline 读取 MM_EMBEDDING_SKIP=1 后禁用语义 RAG，Wiki 检索降级为关键词匹配。
+    var embeddingModelSkipped: Bool {
+        get { defaults.bool(forKey: "MM_EMBEDDING_SKIP") }
+        set { defaults.set(newValue, forKey: "MM_EMBEDDING_SKIP") }
     }
 
     /// pipeline.py 脚本路径。
@@ -147,6 +158,14 @@ final class AppConfig {
         env["MM_WHISPER_ENGINE"] = "cli"
         if let prompt = customSystemPrompt, !prompt.isEmpty {
             env["MM_LLM_SYSTEM_PROMPT"] = prompt
+        }
+        // .app 内嵌资源（ffmpeg 回退二进制所在：Contents/Resources）
+        if let res = Bundle.main.resourceURL?.path {
+            env["MM_APP_RESOURCES"] = res
+        }
+        // 用户选择跳过嵌入模型 → 停用语义 RAG
+        if embeddingModelSkipped {
+            env["MM_EMBEDDING_SKIP"] = "1"
         }
         return env
     }
