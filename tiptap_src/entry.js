@@ -178,16 +178,33 @@ function fmListItems(v) {
   if (!s) return []
   return s.split(/[,，、]/).map(x => x.trim()).filter(Boolean)
 }
-// 反向链接 → 只读 pill HTML（兼容数组 / 字符串 / [[..|..]] 语法）；无内容返回 ''
+// 把标量 / 长文本值里的 [[Page]] / [[Page|alias]] 渲染成可点击双向链接（只读展示用）
+function renderWikiText(s) {
+  if (!s) return ''
+  const esc = escapeHtml(s)
+  return esc.replace(/\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]/g, (m, p, a) => {
+    const page = (p || '').trim()
+    const alias = (a || '').trim()
+    if (!page) return m
+    return '<a class="wikilink" data-wikilink data-page="' + escapeAttr(page) + '"' +
+      (alias ? ' data-alias="' + escapeAttr(alias) + '"' : '') + '>' + escapeHtml(alias || page) + '</a>'
+  })
+}
+// 反向链接 → 可点击双向链接（兼容数组 / 字符串 / [[..|..]] 语法）；无内容返回 ''
 function renderBacklinks(bl) {
   if (!bl) return ''
   let items = Array.isArray(bl) ? bl.slice() : String(bl).split(/[,，、]/)
   items = items.map(s => String(s).trim()).filter(Boolean)
   if (!items.length) return ''
-  items = items.map(s => s.replace(/^\[\[/, '').replace(/\]\]$/, '').replace(/\|/g, ' · '))
-  return '<span class="fm-backlinks">' +
-    items.map(s => '<span class="fm-backlink-pill">' + escapeHtml(s) + '</span>').join(' ') +
-    '</span>'
+  // 反向链接以 Obsidian 式双链呈现（点击跳转对应笔记，双向可达）
+  return items.map(s => {
+    const m = s.match(/^\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]$/)
+    let page, alias
+    if (m) { page = (m[1] || '').trim(); alias = (m[2] || '').trim() } else { page = s; alias = '' }
+    if (!page) return escapeHtml(s)
+    return '<a class="wikilink" data-wikilink data-page="' + escapeAttr(page) + '"' +
+      (alias ? ' data-alias="' + escapeAttr(alias) + '"' : '') + '>' + escapeHtml(alias || page) + '</a>'
+  }).join(' ')
 }
 
 // 只读 banner（Obsidian 风格）：遍历 page 实际键全部显示；列表→chip、日期→日历、backlinks→只读
@@ -214,15 +231,16 @@ function renderFrontmatterBanner(fm) {
       rows.push(fmRowHtml(icon, label, '<span class="fm-date-val">' + escapeHtml(dv) + '</span>'))
     } else if (t === 'longtext') {
       const dv = (fm[k] == null ? '' : String(fm[k])).trim()
-      // 长文本即使为空也保留一行「（空）」占位，确保该字段始终在 banner 中可见、可被定位
+      // 长文本与其他字段同列对齐（不再跨整行顶格）；值内的 [[Page]] 渲染为可点击双链
       const inner = dv
-        ? '<div class="fm-longtext-val">' + escapeHtml(dv) + '</div>'
+        ? '<div class="fm-longtext-val">' + renderWikiText(dv) + '</div>'
         : '<div class="fm-longtext-val fm-empty">（空）</div>'
-      rows.push(fmRowHtml(icon, label, inner, { long: true }))
+      rows.push(fmRowHtml(icon, label, inner))
     } else {
       const dv = fmDisplay(fm[k])
       if (!dv) return
-      rows.push(fmRowHtml(icon, label, '<span class="fm-scalar-val">' + escapeHtml(dv) + '</span>'))
+      // 标量值内的 [[Page]] 同样渲染为可点击双链（双向链接）
+      rows.push(fmRowHtml(icon, label, '<span class="fm-scalar-val">' + renderWikiText(dv) + '</span>'))
     }
   })
   if (rows.length === 0) return ''
@@ -960,6 +978,22 @@ function wireEditorDom() {
       }
     }
   })
+  // 顶部属性 banner（只读态反向链接、标量 / 长文本值，以及编辑态字段值）内的双链点击：
+  // 委托到持久存在的 #fmBanner 容器，统一路由到宿主跳转（与正文双链同机制）
+  const banner = document.getElementById('fmBanner')
+  if (banner) {
+    banner.addEventListener('click', e => {
+      const el = e.target.closest && e.target.closest('a.wikilink')
+      if (el) {
+        e.preventDefault()
+        const name = el.getAttribute('data-page')
+        const anchor = el.getAttribute('data-anchor') || ''
+        if (name && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.editorBridge) {
+          window.webkit.messageHandlers.editorBridge.postMessage({ type: 'wikilink', name: name, anchor: anchor })
+        }
+      }
+    })
+  }
 }
 
 // ————————————————————————————————————————————————————————————————
@@ -1135,12 +1169,18 @@ function wireBannerForm(root) {
       })
     }
   })
-  root.querySelectorAll('[data-addtype]').forEach(btn => {
-    btn.addEventListener('click', () => {
+  // 类型「新增自定义类型」：内联输入框，回车 / 失焦直接新增（不再弹窗）
+  root.querySelectorAll('[data-addtype-input]').forEach(inp => {
+    const addType = () => {
+      const name = inp.value.trim()
+      if (!name) return
       if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.editorBridge) {
-        window.webkit.messageHandlers.editorBridge.postMessage({ type: 'addCustomType' })
+        window.webkit.messageHandlers.editorBridge.postMessage({ type: 'addCustomType', name: name })
       }
-    })
+      inp.value = ''
+    }
+    inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addType() } })
+    inp.addEventListener('blur', addType)
   })
   // 列表字段：chip × 删除
   root.querySelectorAll('[data-remove-chip]').forEach(btn => {
@@ -1219,14 +1259,21 @@ function renderBannerEditForm(fm) {
       const base = TYPES.slice()
       if (rawType && !base.includes(rawType)) base.push(rawType)
       const opts = base.concat(CUSTOM_TYPES.filter(x => !base.includes(x)))
-      valHtml = '<div class="fm-type-row"><select data-fm="type" data-kind="scalar" class="fm-select">' +
-        opts.map(o => '<option value="' + escapeAttr(o) + '"' + (rawType === o ? ' selected' : '') + '>' + escapeHtml(o) + '</option>').join('') + '</select>' +
-        '<button type="button" data-addtype="1" class="fm-addtype" title="新增自定义类型（共享到所有 WiKi 页）">＋</button></div>'
+      // 类型下拉与其他属性输入框同宽同高（不再内嵌 ＋ 按钮）
+      valHtml = '<select data-fm="type" data-kind="scalar" class="fm-select">' +
+        opts.map(o => '<option value="' + escapeAttr(o) + '"' + (rawType === o ? ' selected' : '') + '>' + escapeHtml(o) + '</option>').join('') + '</select>'
+      html += fmRowHtml(icon, label, valHtml)
+      // 「新增自定义类型」另起一行，统一使用 .fm-add-input 风格
+      html += '<div class="fm-add-row"><input type="text" class="fm-add-input" data-addtype-input="1" placeholder="＋ 新增自定义类型（共享到所有 WiKi 页）"></div>'
+      return
     } else if (t === 'list') {
       const items = fmListItems(fm[k])
+      // 列表字段：chips 仅展示 + 删除；新增输入另起一行，风格与其他「添加」框一致
       valHtml = '<div class="fm-chips" data-list="' + escapeAttr(k) + '">' +
-        items.map(it => '<span class="fm-chip" data-val="' + escapeAttr(it) + '"><span>' + escapeHtml(it) + '</span><button type="button" class="fm-chip-x" data-remove-chip="' + escapeAttr(k) + '" data-val="' + escapeAttr(it) + '">×</button></span>').join('') +
-        '<input type="text" class="fm-chip-add" data-add-chip="' + escapeAttr(k) + '" placeholder="添加…"></div>'
+        items.map(it => '<span class="fm-chip" data-val="' + escapeAttr(it) + '"><span>' + escapeHtml(it) + '</span><button type="button" class="fm-chip-x" data-remove-chip="' + escapeAttr(k) + '" data-val="' + escapeAttr(it) + '">×</button></span>').join('') + '</div>'
+      html += fmRowHtml(icon, label, valHtml)
+      html += '<div class="fm-add-row"><input type="text" class="fm-add-input" data-add-chip="' + escapeAttr(k) + '" placeholder="添加…"></div>'
+      return
     } else if (t === 'date') {
       const dv = (fm[k] || '').toString().trim()
       valHtml = '<input type="date" data-fm="' + escapeAttr(k) + '" data-kind="scalar" value="' + escapeAttr(dv) + '" class="fm-date">'
@@ -1234,9 +1281,9 @@ function renderBannerEditForm(fm) {
       const blHtml = renderBacklinks(fm[k])
       valHtml = '<div class="fm-readonly">' + (blHtml || '<span class="fm-empty">（空）</span>') + '</div>'
     } else if (t === 'longtext') {
-      // 长文本：textarea 跨整行（label 一行 + value 一行），不挤压到右侧窄列
+      // 长文本与其他属性同列对齐（不再跨整行顶格），编辑框宽度/高度与下方其余输入框一致
       valHtml = '<textarea data-fm="' + escapeAttr(k) + '" data-kind="scalar" class="fm-textarea" placeholder="（空）" rows="3">' + escapeHtml(fm[k] == null ? '' : String(fm[k])) + '</textarea>'
-      html += fmRowHtml(icon, label, valHtml, { long: true })
+      html += fmRowHtml(icon, label, valHtml)
       return  // 跳到下一次 forEach（已写入）
     } else {
       valHtml = '<input type="text" data-fm="' + escapeAttr(k) + '" data-kind="scalar" value="' + escapeAttr(fm[k] == null ? '' : String(fm[k])) + '" class="fm-text">'

@@ -221,7 +221,13 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
                 self?.webView.evaluateJavaScript("MMEditor.setCustomTypes(\(arrLit))")
             }
         case "addCustomType":
-            // 用户在内联属性表单点「＋」：弹输入对话框 → 持久化 → 刷新下拉并选中新类型
+            // 优先「内联直接新增」：entry.js 类型新增输入框回车 / 失焦时带 name 过来
+            if let name = message["name"] as? String, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                DispatchQueue.main.async { [weak self] in
+                    self?.addCustomTypeInline(trimmed)
+                }
+            } else {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 let alert = NSAlert()
@@ -257,9 +263,33 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
                     self.webView.evaluateJavaScript(js)
                 }
             }
+            }
         default:
             break
         }
+    }
+
+    // 内联直接新增自定义类型：校验 → 去重 → 持久化 → 刷新下拉并选中
+    private func addCustomTypeInline(_ name: String) {
+        let illegal = CharacterSet(charactersIn: "():#\"'[]{}|,>%@!&*?/\\=+\n")
+        guard name.rangeOfCharacter(from: illegal) == nil else {
+            let a = NSAlert()
+            a.messageText = "类型名称含非法字符"
+            a.informativeText = "请勿使用括号、冒号、井号、引号、斜杠等特殊符号，以免破坏 WiKi 文件。"
+            a.addButton(withTitle: "知道了")
+            if let win = webView.window { a.beginSheetModal(for: win) { _ in } }
+            return
+        }
+        var list = WikiPropertySheet.loadCustomTypes()
+        if (WikiPropertySheet.allTypes + list).contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) {
+            // 已存在：直接刷新并选中，不重复添加
+        } else {
+            list.append(name)
+            WikiPropertySheet.saveCustomTypes(list)
+        }
+        let arrLit: String = (try? JSONSerialization.data(withJSONObject: list)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        let js = "MMEditor.setCustomTypes(\(arrLit), \(jsString(name)))"
+        webView.evaluateJavaScript(js)
     }
 
     /// 当前编辑引擎：默认 TipTap（真·WYSIWYG）。
@@ -715,6 +745,15 @@ fileprivate enum TipTapEditorHTML {
       .fm-chip-x { border: none; background: transparent; color: inherit; cursor: pointer; font-size: 13px; line-height: 1; padding: 0 2px; opacity: 0.65; }
       .fm-chip-x:hover { opacity: 1; }
       .fm-chip-add { flex: 1 1 60px; min-width: 60px; width: auto !important; border: 1px dashed #c8d6f5 !important; background: transparent !important; color: #6b6b75 !important; font-size: 12px; padding: 2px 4px !important; border-radius: 4px !important; }
+      /* 统一「添加」输入框风格：类型新增 / 别名 / 标签新增 均使用 .fm-add-input，另起一行、全宽、虚线边框 */
+      .fm-add-input {
+        font-family: inherit; font-size: 13px; padding: 4px 8px; border: 1px dashed #c8d6f5;
+        border-radius: 6px; background: transparent; color: #6b6b75; width: 100%; box-sizing: border-box; display: block;
+      }
+      .fm-add-input:focus { outline: none; border-color: #2f6fdb; background: #fff; color: #1c1c1e; }
+      /* banner 内双链（反向链接 / 标量 / 长文本值）：蓝色可点击，与 banner 主色调一致 */
+      #fmBanner .wikilink { color: #2f6fdb; border-bottom: 1px solid rgba(47,111,219,0.5); text-decoration: none; }
+      #fmBanner .wikilink:hover { background: rgba(47,111,219,0.10); }
       /* 长文本字段：跨整列单独成行；标签独占一行、值独占一行（标签上方对齐 textarea 顶部） */
       .fm-row-long > .fm-row-label { padding-top: 4px; align-self: start; }
       .fm-row-long > .fm-row-value { grid-column: 1 / -1; padding-top: 0; padding-bottom: 4px; }
@@ -852,6 +891,10 @@ fileprivate enum TipTapEditorHTML {
         .fm-addtype:hover { background: #3a3a52; }
         .fm-chip { background: rgba(116,177,255,0.15); color: #74b1ff; border: 1px solid #3a4a5e; }
         .fm-chip-add { border: 1px dashed #3a4a5e !important; background: transparent !important; color: #b8b8c0 !important; }
+        .fm-add-input { border: 1px dashed #3a4a5e; background: transparent; color: #b8b8c0; width: 100%; box-sizing: border-box; display: block; padding: 4px 8px; font-family: inherit; font-size: 13px; border-radius: 6px; }
+        .fm-add-input:focus { outline: none; border-color: #74b1ff; background: #2c2c32; color: #ebebf0; }
+        #fmBanner .wikilink { color: #74b1ff; border-bottom-color: rgba(116,177,255,0.55); }
+        #fmBanner .wikilink:hover { background: rgba(116,177,255,0.14); }
         .fm-chips { background: #2c2c32; border-color: #4a4a52; }
         .fm-date-val, .fm-scalar-val, .fm-longtext-val { color: #ebebf0; }
         .fm-readonly { font-size: 13px; color: #ebebf0; line-height: 1.9; padding: 6px 0; }
