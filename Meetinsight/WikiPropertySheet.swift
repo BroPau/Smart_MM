@@ -13,14 +13,14 @@ import Cocoa
 /// 提交到 pipeline.py 的全量 spec。所有字段都存在，未填者为空字符串。
 struct WikiPageSpec {
     var name: String                       // canonical_name
-    var type: String                       // person / company / chip / ...
+    var type: String                       // Person / Company / Chip …（首字母大写）
     var aliases: [String]
     var tags: [String]
     var updated: String                    // YYYY-MM-DD，空则用今日
     var backlinks: [String]                // [[双链]] 列表
-    var summary: String
 
     // person 专属
+    var chineseName: String                // 中文名
     var company: String
     var jobTitle: String                   // frontmatter `title`
     var role: String                       // frontmatter `职能范围`
@@ -43,6 +43,9 @@ extension WikiPageSpec {
     /// 兜底默认值（与 pipeline.py PLACEHOLDER 保持一致）。
     static let placeholder = "（待补全）"
 
+    /// 类型 token 集合（首字母大写），用于 tags 同步时剔除旧类型标签。
+    static let typeTokens = ["Person", "Company", "Chip", "Project", "Topic", "Method"]
+
     func asDictForPython() -> [String: Any] {
         var d: [String: Any] = [
             "type": type,
@@ -50,19 +53,19 @@ extension WikiPageSpec {
             "aliases": aliases,
             "tags": tags,
             "updated": updated,
-            "backlinks": backlinks,
-            "summary": summary
+            "backlinks": backlinks
         ]
         switch type {
-        case "person":
+        case "Person":
+            d["中文名"]    = chineseName
             d["company"]   = company
             d["title"]     = jobTitle
             d["职能范围"]  = role
-        case "company":
+        case "Company":
             d["公司类型"]  = companyType
             d["所属行业"]  = industry
             d["公司简介"]  = companyIntro
-        case "chip":
+        case "Chip":
             d["品牌"]      = brand
             d["具体型号"]  = model
             d["类别"]      = category
@@ -230,10 +233,10 @@ final class WikiPropertySheet: NSViewController {
     private var tagsField: TagFieldView!
     private var updatedField: NSTextField!
     private var backlinksView: NSTextView!
-    private var summaryView: NSTextView!
 
     // person 字段
     private var personRows: NSStackView!
+    private var chineseNameField: NSTextField!
     private var companyField: NSTextField!
     private var jobTitleField: NSTextField!
     private var roleField: NSTextField!
@@ -256,7 +259,7 @@ final class WikiPropertySheet: NSViewController {
     private var confirmBtn: NSButton!
     private var cancelBtn: NSButton!
 
-    static let allTypes = ["person", "company", "chip", "project", "topic", "method"]
+    static let allTypes = ["Person", "Company", "Chip", "Project", "Topic", "Method"]
 
     // 自定义类型：持久化到 baseDir/005_LLMWiKi/custom_types.json，
     // 加载后会出现在「所有」Wiki 页属性面板的类型下拉中（跨页面、跨会话共享）。
@@ -292,7 +295,7 @@ final class WikiPropertySheet: NSViewController {
             backing: .buffered,
             defer: false
         )
-        panel.title = initial == nil ? "新增 Wiki 页" : "编辑 Wiki 页"
+        panel.title = initial == nil ? "新增 WiKi 页" : "编辑 WiKi 页"
         panel.contentViewController = vc
         // 关键：把 panel 的 delegate 设为 vc，使无论通过「确定/取消」按钮，还是直接点
         // 红色关闭按钮（traffic-light）关闭窗口，都能触发 windowWillClose → NSApp.stopModal()，
@@ -340,6 +343,10 @@ final class WikiPropertySheet: NSViewController {
         super.viewDidLoad()
         buildUI()
         populate(initial)
+        if initial == nil {
+            // 新页面默认带 wiki + 当前类型标签（与 pipeline 渲染产物一致）
+            tagsField.setTags(["wiki", currentType()])
+        }
         syncTypeSpecificVisibility()
     }
 
@@ -392,7 +399,7 @@ final class WikiPropertySheet: NSViewController {
         typePopup.heightAnchor.constraint(equalToConstant: 22).isActive = true
 
         addTypeBtn = NSButton(title: "+", target: self, action: #selector(addCustomType))
-        addTypeBtn.toolTip = "新增自定义类型（将共享到所有 Wiki 页的类型下拉）"
+        addTypeBtn.toolTip = "新增自定义类型（将共享到所有 WiKi 页的类型下拉）"
         addTypeBtn.bezelStyle = .rounded
         addTypeBtn.font = .systemFont(ofSize: 12)
         addTypeBtn.translatesAutoresizingMaskIntoConstraints = false
@@ -403,14 +410,15 @@ final class WikiPropertySheet: NSViewController {
         tagsField.translatesAutoresizingMaskIntoConstraints = false
         updatedField = makeTF(placeholder: "YYYY-MM-DD（留空 = 今日）")
         backlinksView = makeMultilineTV(minHeight: 64)
-        summaryView = makeMultilineTV(minHeight: 72)
 
         // —— person 字段 ——
+        chineseNameField = makeTF(placeholder: "（待补全）")
         companyField  = makeTF(placeholder: "（待补全）")
         jobTitleField = makeTF(placeholder: "（待补全）")
         roleField     = makeTF(placeholder: "（待补全）")
 
         personRows = NSStackView(views: [
+            makeFieldRow(label: "中文名", control: chineseNameField),
             makeFieldRow(label: "公司", control: companyField),
             makeFieldRow(label: "职位", control: jobTitleField),
             makeFieldRow(label: "职能范围", control: roleField)
@@ -477,8 +485,7 @@ final class WikiPropertySheet: NSViewController {
             chipRows,
             makeFieldRow(label: "标签",   control: tagsField),
             makeFieldRow(label: "更新",   control: updatedField),
-            makeFieldRow(label: "反向链接", control: withScroll(backlinksView, height: 72)),
-            makeFieldRow(label: "概要",   control: withScroll(summaryView, height: 92))
+            makeFieldRow(label: "反向链接", control: withScroll(backlinksView, height: 72))
         ])
         mainStack.orientation = .vertical
         mainStack.spacing = 6
@@ -546,17 +553,17 @@ final class WikiPropertySheet: NSViewController {
             let stripped = inside.dropLast()  // remove ")"
             return String(stripped)
         }
-        return "person"
+        return "Person"
     }
 
     private func label(forType t: String) -> String {
         switch t {
-        case "person":  return "👤 人名 (person)"
-        case "company": return "🏢 公司 (company)"
-        case "chip":    return "🔌 芯片 (chip)"
-        case "project": return "📦 项目 (project)"
-        case "topic":   return "📚 主题 (topic)"
-        case "method":  return "🛠 方法 (method)"
+        case "Person":  return "👤 人名 (Person)"
+        case "Company": return "🏢 公司 (Company)"
+        case "Chip":    return "🔌 芯片 (Chip)"
+        case "Project": return "📦 项目 (Project)"
+        case "Topic":   return "📚 主题 (Topic)"
+        case "Method":  return "🛠 方法 (Method)"
         default:        return "\(t) (\(t))"
         }
     }
@@ -567,15 +574,20 @@ final class WikiPropertySheet: NSViewController {
 
     private func syncTypeSpecificVisibility() {
         let t = currentType()
-        personRows.isHidden  = (t != "person")
-        companyRows.isHidden = (t != "company")
-        chipRows.isHidden    = (t != "chip")
+        personRows.isHidden  = (t != "Person")
+        companyRows.isHidden = (t != "Company")
+        chipRows.isHidden    = (t != "Chip")
+        // 同步 tags 里的「类型 token」：始终保留 wiki + 当前类型，避免切换类型后残留旧类型标签
+        var tg = tagsField.tags
+        tg = tg.filter { !WikiPageSpec.typeTokens.contains($0) }
+        if !tg.contains(t) { tg.append(t) }
+        tagsField.setTags(tg)
         // 切换类型会改变可见字段数 → 重新按内容高度自适应窗口尺寸
         refit()
     }
 
     private func currentType() -> String {
-        typeFromLabel(typePopup.titleOfSelectedItem ?? "person")
+        typeFromLabel(typePopup.titleOfSelectedItem ?? "Person")
     }
 
     // MARK: - 自定义类型录入
@@ -583,7 +595,7 @@ final class WikiPropertySheet: NSViewController {
     @objc private func addCustomType() {
         let alert = NSAlert()
         alert.messageText = "新增自定义类型"
-        alert.informativeText = "输入类型名称，将自动加入所有 Wiki 页「类型」下拉菜单（持久保存）。"
+        alert.informativeText = "输入类型名称，将自动加入所有 WiKi 页「类型」下拉菜单（持久保存）。"
         let tf = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
         tf.placeholderString = "例如：客户 / 供应商 / 竞品"
         tf.bezelStyle = .roundedBezel
@@ -608,7 +620,7 @@ final class WikiPropertySheet: NSViewController {
         if name.rangeOfCharacter(from: illegal) != nil || name.contains("\n") {
             let a = NSAlert()
             a.messageText = "类型名称含非法字符"
-            a.informativeText = "请勿使用括号、冒号、井号、引号、斜杠等特殊符号，以免破坏 Wiki 文件。"
+            a.informativeText = "请勿使用括号、冒号、井号、引号、斜杠等特殊符号，以免破坏 WiKi 文件。"
             a.addButton(withTitle: "知道了")
             if let win = view.window { a.beginSheetModal(for: win) { _ in } }
             return
@@ -642,7 +654,7 @@ final class WikiPropertySheet: NSViewController {
         tagsField.setTags(s.tags)
         updatedField.stringValue = s.updated
         backlinksView.string = s.backlinks.joined(separator: "\n")
-        summaryView.string = s.summary
+        chineseNameField.stringValue = s.chineseName
         companyField.stringValue   = s.company
         jobTitleField.stringValue  = s.jobTitle
         roleField.stringValue      = s.role
@@ -670,7 +682,7 @@ final class WikiPropertySheet: NSViewController {
             tags: tagsField.tags,
             updated: updatedField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             backlinks: backlinks,
-            summary: summaryView.string.trimmingCharacters(in: .whitespacesAndNewlines),
+            chineseName: chineseNameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             company: companyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             jobTitle: jobTitleField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             role: roleField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),

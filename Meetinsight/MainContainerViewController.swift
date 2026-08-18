@@ -3,9 +3,9 @@
 //  Meetinsight
 //
 //  单窗口分页容器（无弹出窗口）：
-//  - 顶部横向 tab 切换三个分页：会议纪要（含生成）/ LLM Wiki / 设置。
+//  - 顶部横向 tab 切换三个分页：会议纪要（含生成）/ LLM WiKi / 设置。
 //  - 默认选中「会议纪要」页（生成流程已合并进该页，见 v2.2.15）。
-//  - 顶部工具栏右侧「保存」按钮：对当前可保存分页（会议纪要 / LLM Wiki）触发保存。
+//  - 顶部工具栏右侧「保存」按钮：对当前可保存分页（会议纪要 / LLM WiKi）触发保存。
 //  - 对外暴露 selectTab(_:) / rebuildWiki() 供 AppDelegate 菜单调用。
 //
 
@@ -55,7 +55,7 @@ final class MainContainerViewController: NSViewController {
         // 创建 3 个 tab 按钮（会议纪要默认置顶）
         let tabDefs: [(MainTab, String)] = [
             (.minutes, "📝 会议纪要"),
-            (.wiki, "📚 LLM Wiki"),
+            (.wiki, "📚 LLM WiKi"),
             (.settings, "⚙️ 设置")
         ]
         for (tab, title) in tabDefs {
@@ -189,10 +189,10 @@ final class MainContainerViewController: NSViewController {
 
     // MARK: - 供菜单调用
 
-    /// 切到 LLM Wiki 分页。
+    /// 切到 LLM WiKi 分页。
     func showWikiTab() { selectTab(.wiki) }
 
-    /// 触发 LLM Wiki 重建。
+    /// 触发 LLM WiKi 重建。
     func rebuildWiki() { wikiVC.rebuildWikiFromExternal() }
 
     /// 由「会议纪要」页双链点击路由而来：切到 Wiki 分页并尝试打开对应页（未命中则提示新建）。

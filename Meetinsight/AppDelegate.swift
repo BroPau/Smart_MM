@@ -56,12 +56,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// 显示主窗口（单窗口分页：纪要生成 / LLM Wiki / 设置）。
+    /// 显示主窗口（单窗口分页：纪要生成 / LLM WiKi / 设置）。
     private func showMainWindow() {
         // 确保对工作目录的 sandbox 授权已激活（重复调用由 AppConfig 内部 isBaseDirAccessing 守卫）。
         AppConfig.shared.startAccessingBaseDir()
         if mainWindow == nil {
-            // 默认窗口大小：以「能完整显示 Wiki 首页左右式预览」为目标；
+            // 默认窗口大小：以「能完整显示 WiKi 首页左右式预览」为目标；
             // 用户调整过的尺寸会写入 UserDefaults,下次启动沿用。
             let defaults = UserDefaults.standard
             let width  = CGFloat((defaults.object(forKey: "MM_WINDOW_WIDTH")  as? Double) ?? 1280)
@@ -157,8 +157,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 知识库菜单
         let wikiSub = NSMenu(title: "知识库")
-        let openItem = NSMenuItem(title: "打开 LLM Wiki", action: #selector(openWikiTab), keyEquivalent: "")
-        let rebuildItem = NSMenuItem(title: "重建 Wiki", action: #selector(rebuildWikiFromMenu), keyEquivalent: "")
+        let openItem = NSMenuItem(title: "打开 LLM WiKi", action: #selector(openWikiTab), keyEquivalent: "")
+        let rebuildItem = NSMenuItem(title: "重建 WiKi", action: #selector(rebuildWikiFromMenu), keyEquivalent: "")
         [openItem, rebuildItem].forEach { $0.target = self }
         wikiSub.addItem(openItem)
         wikiSub.addItem(rebuildItem)

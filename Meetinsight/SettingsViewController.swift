@@ -48,7 +48,7 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
     private let baseDirField = NSTextField(labelWithString: "")
     private let resetBaseDirBtn = NSButton(title: "重设工作目录…", target: nil, action: nil)
     private let baseDirHint = NSTextField(labelWithString:
-        "App 重启后若 Wiki / 纪要报「Operation not permitted」，点此重新选择同一目录即可恢复授权（无需重装）。")
+        "App 重启后若 WiKi / 纪要报「Operation not permitted」，点此重新选择同一目录即可恢复授权（无需重装）。")
 
     // MARK: - 恢复默认
     private let restoreBtn = NSButton(title: "恢复默认", target: nil, action: nil)
@@ -88,7 +88,7 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
             self?.refreshBaseDir()
             AppAlert.show(
                 message: "已重设工作目录",
-                informative: "工作目录已更新为：\n\(url.path)\n\n对该目录的访问授权已恢复，可重新打开 LLM Wiki 验证。",
+                informative: "工作目录已更新为：\n\(url.path)\n\n对该目录的访问授权已恢复，可重新打开 LLM WiKi 验证。",
                 icon: .save
             )
         }

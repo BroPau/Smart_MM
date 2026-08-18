@@ -853,7 +853,7 @@ final class StepPythonEngineView: WizardStepView {
 final class StepEmbeddingModelView: WizardStepView {
 
     override var title: String { "嵌入模型 · RAG 语义检索" }
-    override var subtitle: String { "会议纪要的 Wiki 知识库用 bge-small-zh-v1.5 做语义向量；可现在下载（约 90MB，存本机），或跳过（不使用 RAG，Wiki 检索降级为关键词匹配）；如本机已有模型文件夹，也可直接「浏览本机嵌入模型…」指定。" }
+    override var subtitle: String { "会议纪要的 WiKi 知识库用 bge-small-zh-v1.5 做语义向量；可现在下载（约 90MB，存本机），或跳过（不使用 RAG，WiKi 检索降级为关键词匹配）；如本机已有模型文件夹，也可直接「浏览本机嵌入模型…」指定。" }
 
     private let statusLabel = NSTextField(labelWithString: "")
     private let progressLabel = NSTextField(labelWithString: "")
@@ -874,7 +874,7 @@ final class StepEmbeddingModelView: WizardStepView {
 
     override func buildUI() {
         contentStack.addArrangedSubview(makeLabel(
-            "该模型仅用于本地语义检索（把 Wiki 知识库切成向量，会议时按语义匹配背景资料），不会上传。向导会先检测本机是否已有缓存。", size: 12))
+            "该模型仅用于本地语义检索（把 WiKi 知识库切成向量，会议时按语义匹配背景资料），不会上传。向导会先检测本机是否已有缓存。", size: 12))
 
         // 科学上网 / 国内镜像提示（关键：用户截图反馈默认走 HF 直连会失败）
         let notice = makeLabel(
@@ -1079,7 +1079,7 @@ print("LOCAL_DIR=" + p)
         AppConfig.shared.embeddingModelSkipped = true
         // 同时清掉本机路径，避免 pipeline 同时拿到两边信号
         AppConfig.shared.embeddingModelPath = nil
-        statusLabel.stringValue = "⏭️ 已跳过嵌入模型；RAG 语义检索将停用（Wiki 检索降级为关键词匹配）。"
+        statusLabel.stringValue = "⏭️ 已跳过嵌入模型；RAG 语义检索将停用（WiKi 检索降级为关键词匹配）。"
         statusLabel.textColor = .systemOrange
         progressLabel.stringValue = "可继续下一步。"
     }

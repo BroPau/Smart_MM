@@ -27,12 +27,11 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
 
     // MARK: - UI 组件
     private let searchField = NSSearchField()
-    private let homeBtn = NSButton(title: "🏠 Wiki 首页", target: nil, action: nil)
-    private let rebuildBtn = NSButton(title: "重建 Wiki", target: nil, action: nil)
+    private let homeBtn = NSButton(title: "🏠 WiKi 首页", target: nil, action: nil)
+    private let rebuildBtn = NSButton(title: "重建 WiKi", target: nil, action: nil)
     private let refreshBtn = NSButton(title: "刷新索引", target: nil, action: nil)
     private let folderBtn = NSButton(title: "打开文件夹", target: nil, action: nil)
     private let addBtn = NSButton(title: "＋ 新增", target: nil, action: nil)
-    private let importBtn = NSButton(title: "📥 导入会议纪要", target: nil, action: nil)
     /// 「删除选中」按钮——多选模式下批量删除。
     private let deleteSelBtn = NSButton(title: "🗑 删除选中", target: nil, action: nil)
 
@@ -59,7 +58,7 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
 
     private var wikiDir: URL { AppConfig.shared.baseDir.appendingPathComponent("005_LLMWiKi") }
     private var wikiPagesDir: URL { wikiDir.appendingPathComponent("wiki_pages") }
-    private var homeFile: URL { wikiDir.appendingPathComponent("Wiki_首页.md") }
+    private var homeFile: URL { wikiDir.appendingPathComponent("WiKi首页.md") }
     private var wikiScriptsDir: URL {
         // ① Bundle 内嵌 PythonEngine/005_LLMWiKi（v2.2.12+ 推荐路径，sandbox 友好）。
         // ② 回退到 `pipelineScript` 所在目录的 005_LLMWiKi/ 子目录（兼容开发期把脚本放在
@@ -90,13 +89,13 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
     private func setupUI() {
         let pad: CGFloat = 16
 
-        searchField.placeholderString = "搜索 Wiki（本地检索，不出网）"
+        searchField.placeholderString = "搜索 WiKi（本地检索，不出网）"
         searchField.recentsAutosaveName = "WikiSearchRecents"
         searchField.target = self
         searchField.action = #selector(runSearch)
         searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
 
-        [homeBtn, rebuildBtn, refreshBtn, folderBtn, addBtn, importBtn, deleteSelBtn].forEach { b in
+        [homeBtn, rebuildBtn, refreshBtn, folderBtn, addBtn, deleteSelBtn].forEach { b in
             b.target = self
             b.bezelStyle = .rounded
         }
@@ -105,17 +104,16 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         refreshBtn.action = #selector(refreshIndex)
         folderBtn.action = #selector(openFolder)
         addBtn.action = #selector(addPage)
-        importBtn.action = #selector(importMinutes)
         deleteSelBtn.action = #selector(deleteSelected)
         deleteSelBtn.isEnabled = false   // 有选中才启用
 
-        let toolbar = NSStackView(views: [searchField, homeBtn, rebuildBtn, refreshBtn, folderBtn, addBtn, importBtn, deleteSelBtn])
+        let toolbar = NSStackView(views: [searchField, homeBtn, rebuildBtn, refreshBtn, folderBtn, addBtn, deleteSelBtn])
         toolbar.orientation = .horizontal
         toolbar.spacing = 10
         toolbar.alignment = .centerY
         toolbar.distribution = .fill
         searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        [homeBtn, rebuildBtn, refreshBtn, folderBtn, addBtn, importBtn, deleteSelBtn].forEach {
+        [homeBtn, rebuildBtn, refreshBtn, folderBtn, addBtn, deleteSelBtn].forEach {
             $0.setContentHuggingPriority(.required, for: .horizontal)
         }
 
@@ -213,7 +211,7 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
             guard let self else { return }
             if let err = result.error {
                 self.setBusy(false, status: "读取失败")
-                let msg = "无法读取 Wiki 页面列表：\(err.localizedDescription)"
+                let msg = "无法读取 WiKi 页面列表：\(err.localizedDescription)"
                 // 授权失效（EPERM）时引导重设；其余错误（如 Python 缺失）走普通提示。
                 if err.localizedDescription.contains("Operation not permitted") {
                     self.presentBaseDirAccessReset(message: msg)
@@ -228,7 +226,7 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
                 return
             }
             var list: [WikiPage] = [
-                WikiPage(name: "Wiki 首页", type: "home", aliases: [], file: "Wiki_首页.md", isHome: true)
+                WikiPage(name: "WiKi 首页", type: "home", aliases: [], file: "WiKi首页.md", isHome: true)
             ]
             for d in arr {
                 guard let name = d["name"] as? String,
@@ -263,7 +261,7 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
             editor.isHidden = false
             if let text = try? String(contentsOf: homeFile, encoding: .utf8) {
                 editor.load(markdown: text, editable: true)
-                statusLabel.stringValue = "Wiki 首页"
+                statusLabel.stringValue = "WiKi 首页"
             } else {
                 editor.load(markdown: "（无法读取文件：\(homeFile.path)）", editable: false)
                 presentBaseDirAccessReset(message: "无法读取文件：\(homeFile.path)")
@@ -276,7 +274,7 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         let url = wikiPagesDir.appendingPathComponent(page.file)
         if let text = try? String(contentsOf: url, encoding: .utf8) {
             editor.load(markdown: text, editable: true)
-            statusLabel.stringValue = "\(page.name)（\(page.type)）"
+            statusLabel.stringValue = "\(page.name)（\(page.type.capitalized)）"
         } else {
             editor.load(markdown: "（无法读取文件：\(url.path)）", editable: false)
             // v2.2.13：读取失败多半是 App 重启后丢失对 sandbox 外目录的授权（EPERM）。
@@ -316,14 +314,14 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
     @objc func rebuildWikiFromExternal() { rebuildWiki() }
 
     @objc private func rebuildWiki() {
-        setBusy(true, status: "重建 Wiki 首页（MOC）中…")
+        setBusy(true, status: "重建 WiKi 首页（MOC）中…")
         // 仅重建 Wiki 首页导航页（--build-index）：纯本地、无出网、不触发 RAG 向量重建。
         // Wiki 页生成 与 RAG 索引是两回事——重建首页不会重跑 LLM 页面组织，也不会重建向量库。
         PipelineRunner.shared.run(script: nil, arguments: ["--build-index"]) { _ in }
         completion: { [weak self] result in
             guard let self else { return }
             self.setBusy(false, status: result.error == nil ? "首页已重建" : "重建失败")
-            if let err = result.error { self.showAlert("Wiki 首页重建失败：\(err.localizedDescription)") }
+            if let err = result.error { self.showAlert("WiKi 首页重建失败：\(err.localizedDescription)") }
             self.loadPages()
         }
     }
@@ -351,7 +349,7 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         if FileManager.default.fileExists(atPath: wikiPagesDir.path) {
             NSWorkspace.shared.open(wikiPagesDir)
         } else {
-            showAlert("Wiki 页面目录不存在：\(wikiPagesDir.path)")
+            showAlert("WiKi 页面目录不存在：\(wikiPagesDir.path)")
         }
     }
 
@@ -384,7 +382,7 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         completion: { [weak self] result in
             guard let self else { return }
             self.setBusy(false, status: result.error == nil ? "已保存" : "保存失败")
-            if let err = result.error { self.showAlert("Wiki 页操作失败：\(err.localizedDescription)") }
+            if let err = result.error { self.showAlert("WiKi 页操作失败：\(err.localizedDescription)") }
             self.loadPages()
         }
     }
@@ -398,7 +396,7 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
     }
 
     private func showAlert(_ msg: String) {
-        AppAlert.show(message: "LLM Wiki", informative: msg, icon: .wiki)
+        AppAlert.show(message: "LLM WiKi", informative: msg, icon: .wiki)
     }
 
     // MARK: - 工作目录授权失效兜底（v2.2.13）
@@ -444,7 +442,7 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard row < pages.count else { return nil }
         let page = pages[row]
-        let value = (tableColumn == nameColumn) ? page.name : page.type
+        let value = (tableColumn == nameColumn) ? page.name : page.type.capitalized
         let cell = NSTextField(labelWithString: value)
         cell.lineBreakMode = .byTruncatingTail
         return cell
@@ -489,71 +487,6 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         }
     }
 
-    // MARK: - 导入会议纪要（从原 GenerateViewController 迁过来）
-    @objc private func importMinutes() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = true
-        var allowed: [UTType] = [.data, .plainText, .pdf, .commaSeparatedText,
-                                UTType("org.openxmlformats.wordprocessingml.document"),
-                                UTType("public.msword"),
-                                UTType("org.openxmlformats.spreadsheetml.sheet"),
-                                UTType("com.microsoft.excel"),
-                                UTType("org.openxmlformats.email")].compactMap { $0 }
-        allowed.append(.text)
-        panel.allowedContentTypes = allowed
-        panel.prompt = "导入到 RAG"
-        panel.message = "选择一个或多个文档（或一个文件夹）。支持: .md/.txt/.csv/.doc/.docx/.pdf/.eml/.xls/.xlsx"
-        panel.begin { [weak self] resp in
-            guard resp == .OK, !panel.urls.isEmpty else { return }
-            self?.runImportMinutes(urls: panel.urls)
-        }
-    }
-
-    private func runImportMinutes(urls: [URL]) {
-        let targetPath: String
-        if urls.count == 1 {
-            targetPath = urls[0].path
-        } else {
-            let stash = FileManager.default.temporaryDirectory
-                .appendingPathComponent("smm_rag_import_\(Int(Date().timeIntervalSince1970))")
-            try? FileManager.default.createDirectory(at: stash, withIntermediateDirectories: true)
-            for u in urls {
-                let dest = stash.appendingPathComponent(u.lastPathComponent)
-                try? FileManager.default.copyItem(at: u, to: dest)
-            }
-            targetPath = stash.path
-        }
-        setBusy(true, status: "正在导入文档…")
-        statusLabel.stringValue = "正在导入…"
-        progressIndicator.startAnimation(nil)
-        importBtn.isEnabled = false
-
-        PipelineRunner.shared.run(
-            arguments: ["--json-log", "--import-docs", targetPath],
-            progress: { [weak self] p in
-                self?.statusLabel.stringValue = p.message
-            },
-            completion: { [weak self] result in
-                guard let self else { return }
-                self.progressIndicator.stopAnimation(nil)
-                self.importBtn.isEnabled = true
-                self.setBusy(false, status: result.error == nil ? "导入完成" : "导入失败")
-                if let err = result.error {
-                    self.showAlert("导入失败：\(err.localizedDescription)")
-                    return
-                }
-                if let j = result.finalJSON {
-                    let total = j["total"] as? Int ?? 0
-                    let suc   = (j["succeeded"] as? [String])?.count ?? 0
-                    let fail  = (j["failed"] as? [String])?.count ?? 0
-                    self.statusLabel.stringValue = "导入成功 \(suc)/\(total)，失败 \(fail)"
-                }
-            }
-        )
-    }
-
     // MARK: - 删除选中（多选 / ⌘+Backspace / 右键菜单）
     @objc private func deleteSelected() {
         let rows = tableView.selectedRowIndexes
@@ -562,12 +495,12 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
             .filter { $0 > 0 && $0 < pages.count && !pages[$0].isHome }
             .sorted()
         if deleteable.isEmpty {
-            showAlert("当前没有可删除的 Wiki 页（首页不可删）。")
+            showAlert("当前没有可删除的 WiKi 页（首页不可删）。")
             return
         }
         let names = deleteable.map { pages[$0].name }
         let alert = NSAlert()
-        alert.messageText = "确认删除 \(deleteable.count) 个 Wiki 页？"
+        alert.messageText = "确认删除 \(deleteable.count) 个 WiKi 页？"
         alert.informativeText = "将永久删除以下页面（不可恢复）：\n• " + names.joined(separator: "\n• ")
         alert.alertStyle = .warning
         alert.icon = AppAlertIcon.warning.image
@@ -590,7 +523,7 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
     private func setBusy(_ b: Bool, status: String) {
         busy = b
         statusLabel.stringValue = status
-        [rebuildBtn, refreshBtn, folderBtn, addBtn, homeBtn, importBtn, deleteSelBtn, searchField].forEach { $0.isEnabled = !b }
+        [rebuildBtn, refreshBtn, folderBtn, addBtn, homeBtn, deleteSelBtn, searchField].forEach { $0.isEnabled = !b }
         if !b {
             // 重新启用删除按钮的前提是已有选中
             deleteSelBtn.isEnabled = (tableView.selectedRowIndexes.count > 0)
@@ -729,8 +662,8 @@ extension WikiViewController: MarkdownEditorViewDelegate, SaveablePage {
         }
         // 没找到：礼貌给出 ⌘N 新建候选页的提示（带图标，避免破图）
         if AppAlert.show(
-            message: "未找到 Wiki 页面",
-            informative: "「\(name)」未在当前列表中。可能是尚未生成，或名称与现有页不一致。\n\n是否按此名称新建一个 Wiki 页？",
+            message: "未找到 WiKi 页面",
+            informative: "「\(name)」未在当前列表中。可能是尚未生成，或名称与现有页不一致。\n\n是否按此名称新建一个 WiKi 页？",
             icon: .question,
             style: .informational,
             buttons: ["新建", "取消"]
@@ -743,15 +676,15 @@ extension WikiViewController: MarkdownEditorViewDelegate, SaveablePage {
     private func showCreateWikiPagePrompt(_ name: String) {
         // 预填：规范名 = [[双链]] 目标名，类型默认 person
         var prefill = WikiPageSpec(
-            name: name, type: "person",
+            name: name, type: "Person",
             aliases: [], tags: [], updated: "", backlinks: [],
-            summary: "",
+            chineseName: "",
             company: "", jobTitle: "", role: "",
             companyType: "", industry: "", companyIntro: "",
             brand: "", model: "", category: "",
             functionDesc: "", status: "", replacement: ""
         )
-        prefill.tags = ["wiki", "person"]
+        prefill.tags = ["wiki", "Person"]
         WikiPropertySheet.present(initial: prefill) { [weak self] spec in
             guard let self, let spec = spec else { return }
             self.submitPageCommand(arguments: [
@@ -767,7 +700,7 @@ extension WikiViewController: MarkdownEditorViewDelegate, SaveablePage {
         if pages.isEmpty {
             pendingOpenWikiName = name
             pendingOpenWikiAnchor = anchor
-            setBusy(true, status: "加载 Wiki 索引…")
+            setBusy(true, status: "加载 WiKi 索引…")
             loadPages()
             return
         }
@@ -801,9 +734,9 @@ extension WikiViewController: MarkdownEditorViewDelegate, SaveablePage {
         let lines = md.replacingOccurrences(of: "\r\n", with: "\n").split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         guard let first = lines.first?.trimmingCharacters(in: .whitespaces), first == "---" else {
             return WikiPageSpec(
-                name: fallbackName, type: "person",
+                name: fallbackName, type: "Person",
                 aliases: [], tags: [], updated: "", backlinks: [],
-                summary: "",
+                chineseName: "",
                 company: "", jobTitle: "", role: "",
                 companyType: "", industry: "", companyIntro: "",
                 brand: "", model: "", category: "",
@@ -814,17 +747,17 @@ extension WikiViewController: MarkdownEditorViewDelegate, SaveablePage {
         while j < lines.count && lines[j].trimmingCharacters(in: .whitespaces) != "---" { j += 1 }
         let fmLines: [String] = (j < lines.count) ? Array(lines[1..<j]) : []
         let dict = parseFrontmatterDict(fmLines)
-        let t = (dict["type"] as? String ?? "person").lowercased()
-        let name = (dict["canonical_name"] as? String) ?? fallbackName
-        let aliases = (dict["aliases"] as? [String]) ?? []
-        var tags = (dict["tags"] as? [String]) ?? []
-        // 去掉内务标签，只保留人工标签给 UI 展示
-        tags = tags.filter { $0 != "wiki" && $0 != t }
-        let updated = (dict["updated"] as? String) ?? ""
-        let backlinks = (dict["backlinks"] as? [String]) ?? []
-        let summary = (dict["summary"] as? String) ?? ""
-        let company = (dict["company"] as? String) ?? ""
-        let jobTitle = (dict["title"] as? String) ?? ""
+        let t = (dict["Type"] as? String) ?? "Person"
+        let name = (dict["CanonicalName"] as? String) ?? fallbackName
+        let aliases = (dict["Aliases"] as? [String]) ?? []
+        var tags = (dict["Tags"] as? [String]) ?? []
+        // 去掉内务标签，只保留人工标签给 UI 展示（类型 token 大小写不敏感）
+        tags = tags.filter { $0.lowercased() != "wiki" && $0.lowercased() != t.lowercased() }
+        let updated = (dict["Updated"] as? String) ?? ""
+        let backlinks = (dict["Backlinks"] as? [String]) ?? []
+        let chineseName = (dict["中文名"] as? String) ?? ""
+        let company = (dict["Company"] as? String) ?? ""
+        let jobTitle = (dict["Title"] as? String) ?? ""
         let role = (dict["职能范围"] as? String) ?? ""
         let companyType = (dict["公司类型"] as? String) ?? ""
         let industry = (dict["所属行业"] as? String) ?? ""
@@ -837,7 +770,7 @@ extension WikiViewController: MarkdownEditorViewDelegate, SaveablePage {
         let replacement = (dict["替代料"] as? String) ?? ""
         return WikiPageSpec(
             name: name, type: t,
-            aliases: aliases, tags: tags, updated: updated, backlinks: backlinks, summary: summary,
+            aliases: aliases, tags: tags, updated: updated, backlinks: backlinks, chineseName: chineseName,
             company: company, jobTitle: jobTitle, role: role,
             companyType: companyType, industry: industry, companyIntro: companyIntro,
             brand: brand, model: model, category: category,

@@ -221,7 +221,7 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
                 guard let self else { return }
                 let alert = NSAlert()
                 alert.messageText = "新增自定义类型"
-                alert.informativeText = "输入类型名称（将共享到所有 Wiki 页的类型下拉）："
+                alert.informativeText = "输入类型名称（将共享到所有 WiKi 页的类型下拉）："
                 alert.addButton(withTitle: "添加")
                 alert.addButton(withTitle: "取消")
                 let tf = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
@@ -235,7 +235,7 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
                     if name.rangeOfCharacter(from: illegal) != nil {
                         let a = NSAlert()
                         a.messageText = "类型名称含非法字符"
-                        a.informativeText = "请勿使用括号、冒号、井号、引号、斜杠等特殊符号，以免破坏 Wiki 文件。"
+                        a.informativeText = "请勿使用括号、冒号、井号、引号、斜杠等特殊符号，以免破坏 WiKi 文件。"
                         a.addButton(withTitle: "知道了")
                         if let win = self.webView.window { a.beginSheetModal(for: win) { _ in } }
                         return
@@ -409,30 +409,39 @@ fileprivate enum EditorHTML {
     }
     function renderFrontmatterBanner(fm){
       if (!fm || Object.keys(fm).length === 0) return '';
-      var SKIP = {'backlinks': 1, 'wiki_首页': 1};
+      var SKIP = {'Backlinks': 1, 'SuspectedAliasOf': 1};
       var rows = [];
       function addRow(label, value){
-        if (!value) return;
+        if (value === undefined || value === null) return;
         var v = Array.isArray(value) ? value.join('、') : String(value);
         v = v.replace(/^[\\[\\(](.*)[\\]\\)]$/, '$1').replace(/^[\"“”']|[\"“”']$/g, '');
         if (!v || v === '(空)') return;
         rows.push('<tr><th>'+esc(label)+'</th><td>'+esc(v)+'</td></tr>');
       }
-      var TYPE_LABEL = {'person':'👤 人名','company':'🏢 公司','chip':'🔌 芯片','project':'📦 项目','product':'📦 产品','topic':'📚 主题'};
-      var tRaw = (fm['type']||'').toLowerCase();
+      var TYPE_LABEL = {'Person':'👤 人名','Company':'🏢 公司','Chip':'🔌 芯片','Project':'📦 项目','Topic':'📚 主题','Method':'🛠 方法'};
+      var tRaw = (fm['Type']||'').toString().trim();
       var tLabel = TYPE_LABEL[tRaw] || tRaw || '—';
       addRow('类型', tLabel);
-      var cn = (fm['canonical_name']||'').toString().trim();
+      var cn = (fm['CanonicalName']||'').toString().trim();
       if (cn) addRow('规范名', cn);
-      addRow('别名', fm['aliases']); addRow('公司', fm['company']); addRow('职位', fm['title']);
-      addRow('公司类型', fm['公司类型']); addRow('所属行业', fm['所属行业']); addRow('中文名', fm['中文名']);
-      addRow('来源', fm['source']); addRow('概要', fm['summary']);
-      var tags = fm['tags'];
+      addRow('别名', fm['Aliases']);
+      // 按类型自适应展示专属字段（仿 Obsidian 属性面板：person / company / chip 各自一套）
+      if (tRaw === 'Person') {
+        addRow('中文名', fm['中文名']); addRow('公司', fm['Company']); addRow('职位', fm['Title']); addRow('职能范围', fm['职能范围']);
+      } else if (tRaw === 'Company') {
+        addRow('公司类型', fm['公司类型']); addRow('所属行业', fm['所属行业']); addRow('公司简介', fm['公司简介']);
+      } else if (tRaw === 'Chip') {
+        addRow('品牌', fm['品牌']); addRow('具体型号', fm['具体型号']); addRow('类别', fm['类别']);
+        addRow('功能简述', fm['功能简述']); addRow('状态', fm['状态']); addRow('替代料', fm['替代料']);
+      }
+      var tags = fm['Tags'];
       if (Array.isArray(tags)) tags = tags.filter(function(x){ return x && x!=='wiki' && x.toLowerCase()!==tRaw.toLowerCase(); });
-      addRow('标签', tags); addRow('更新', fm['updated']);
+      addRow('标签', tags); addRow('更新', fm['Updated']);
+      // 兜底：未在上方显式列出的其它字段（含自定义类型字段）也不遗漏
+      var KNOWN = ['Type','CanonicalName','Aliases','中文名','Company','Title','职能范围','公司类型','所属行业','公司简介','品牌','具体型号','类别','功能简述','状态','替代料','Tags','Updated','Backlinks','SuspectedAliasOf'];
       Object.keys(fm).forEach(function(k){
-        if (SKIP[k.toLowerCase()]) return;
-        if (['type','canonical_name','aliases','company','title','公司类型','所属行业','中文名','source','summary','tags','updated'].indexOf(k)>=0) return;
+        if (SKIP[k]) return;
+        if (KNOWN.indexOf(k) >= 0) return;
         addRow(k, fm[k]);
       });
       if (rows.length === 0) return '';

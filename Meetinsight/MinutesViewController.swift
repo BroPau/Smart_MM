@@ -1020,7 +1020,7 @@ extension MinutesViewController: MarkdownEditorViewDelegate, SaveablePage {
             showItem(item)
             return
         }
-        // 否则路由到 LLM Wiki 页（容器负责切到 Wiki 分页并打开；未命中则提示新建）
+        // 否则路由到 LLM WiKi 页（容器负责切到 WiKi 分页并打开；未命中则提示新建）
         (self.parent as? MainContainerViewController)?.openWikiPage(name, anchor: anchor)
     }
 

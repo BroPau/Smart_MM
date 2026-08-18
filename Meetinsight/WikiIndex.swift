@@ -2,8 +2,8 @@
 //  WikiIndex.swift
 //  Meetinsight
 //
-//  共享的 Wiki 页面索引：缓存 `pipeline.py --list-wiki-pages` 的结果，
-//  供「会议纪要」页与「LLM Wiki」页复用，实现「纪要名词 → Wiki 页」联动跳转与自动双链。
+//  共享的 WiKi 页面索引：缓存 `pipeline.py --list-wiki-pages` 的结果，
+//  供「会议纪要」页与「LLM WiKi」页复用，实现「纪要名词 → WiKi 页」联动跳转与自动双链。
 //  复用 WikiViewController 中导出的 WikiPage / normalizeForWikiMatch / extractWikiShortName / resolveWikiPage。
 //
 
@@ -38,7 +38,7 @@ final class WikiIndex {
                 return
             }
             var list: [WikiPage] = [
-                WikiPage(name: "Wiki 首页", type: "home", aliases: [], file: "Wiki_首页.md", isHome: true)
+                WikiPage(name: "WiKi 首页", type: "home", aliases: [], file: "WiKi首页.md", isHome: true)
             ]
             for d in arr {
                 guard let name = d["name"] as? String,
