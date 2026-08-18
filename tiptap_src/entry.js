@@ -111,15 +111,16 @@ function fmNormalize(fm) {
 //  frontmatter 属性 banner（数据驱动：读 page 实际 frontmatter 键 → 全部显示 → 仅做键名→中文翻译）
 // ————————————————————————————————————————————————————————————————
 // 已知键的展示顺序；page 中出现的未知键保持原顺序追加到末尾（backlinks 固定最后）
-// 顺序约定（用户要求，v2.2.29）：
-//   - 最上方固定为「类型」(type)
-//   - 公司类型 / 所属行业 / 公司简介 放在 aliases 与 tags 之间
-//   - 其余已知字段维持原有相对次序
+// 顺序约定（用户要求 v2.2.30，v2.2.33 与 WikiPropertySheet 完全对齐）：
+//   1) 标识/链接类在最前：类型 → 规范名 → 别名
+//   2) 描述类（按 type 动态出现，person→中文名/公司/职位/职能范围；company→公司类型/所属行业/公司简介；chip→品牌/...）放在 aliases 与 tags 之间
+//   3) 元信息收尾：标签 → 更新时间 → 反向链接
 const FM_ORDER = [
-  'type', 'canonical_name', '中文名', 'company', 'title', '职能范围',
+  'type', 'canonical_name', 'aliases',
+  '中文名', 'company', 'title', '职能范围',
+  '公司类型', '所属行业', '公司简介',
   '品牌', '具体型号', '类别', '功能简述', '状态', '替代料',
-  'aliases', '公司类型', '所属行业', '公司简介', 'tags',
-  'updated', 'backlinks'
+  'tags', 'updated', 'backlinks'
 ]
 // 内部标记键，不展示（如 MOC 首页的 wiki_首页 标志）
 const FM_SKIP = { wiki_首页: 1 }

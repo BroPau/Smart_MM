@@ -12,8 +12,37 @@
 //  独立 NSWindow 模态弹窗，自带 type 切换时字段显隐、aliases/tags 标签 pill 增删。
 //  自定义类型（持久化到 custom_types.json）只会显示通用字段。
 //
+//  v2.2.33 升级：
+//   - 「功能简述」「公司简介」「反向链接」等多行字段高度统一为 24px（与其他单行输入框纵向对齐），
+//     内部 NSTextView 嵌在 NSScrollView 里，可纵向滚动输入多行；
+//   - 「类型」栏宽度撑满 outerStack-100，高度统一 24px（与其他输入栏视觉一致）；
+//   - 「别名」「标签」TagFieldView 改造：pill 行在上、「+ 添加」独立行在下；
+//   - 所有文本字段（14 个 NSTextField + 3 个 NSTextView）替换为 WikiLinkTextField / WikiLinkTextView，
+//     实时扫描 `[[Page]]` / `[[Page|alias]]` / `[[Page#anchor]]`，渲染为蓝色超链接+下划线，
+//     点击跳转通知 WikiLinkRouter.openWikiPage；
+//   - 「新增自定义类型」NSAlert 输入框不替换（一次性 dialog，无需双链渲染）。
+//
 
 import Cocoa
+
+// MARK: - 全局双链跳转路由（v2.2.33）
+//
+// 任何地方点 [[Page]] 都通过 Notification 派发到 WikiViewController.openWikiPageResolved(name,anchor)。
+// WikiPropertySheet 与 MarkdownEditorView（已存在）共用同一条跳转通道，避免重复实现。
+extension Notification.Name {
+    static let openWikiPage = Notification.Name("com.weilu.meetinsight.openWikiPage")
+}
+
+/// 派发「打开 Wiki 页」请求。订阅方由 WikiViewController 注入（见 WikiViewController.viewDidLoad）。
+enum WikiLinkRouter {
+    static func open(name: String, anchor: String? = nil) {
+        var userInfo: [String: Any] = ["name": name]
+        if let a = anchor, !a.isEmpty { userInfo["anchor"] = a }
+        NotificationCenter.default.post(name: .openWikiPage, object: nil, userInfo: userInfo)
+    }
+}
+
+// MARK: - WikiPageSpec（v2.2.33 未变）
 
 /// 提交到 pipeline.py 的全量 spec。所有字段都存在，未填者为空字符串。
 struct WikiPageSpec {
@@ -53,18 +82,18 @@ extension WikiPageSpec {
 
     func asDictForPython() -> [String: Any] {
         var d: [String: Any] = [
-            "type": type,
-            "canonical_name": name,
-            "aliases": aliases,
-            "tags": tags,
-            "updated": updated,
-            "backlinks": backlinks
+            "类型": type,
+            "规范名": name,
+            "别名": aliases,
+            "标签": tags,
+            "更新时间": updated,
+            "反向链接": backlinks
         ]
         switch type {
         case "Person":
             d["中文名"]    = chineseName
-            d["company"]   = company
-            d["title"]     = jobTitle
+            d["公司"]      = company
+            d["职位"]      = jobTitle
             d["职能范围"]  = role
         case "Company":
             d["公司类型"]  = companyType
@@ -83,12 +112,241 @@ extension WikiPageSpec {
     }
 }
 
-// MARK: - TagFieldView（标签 pill 输入框：× 删除 / + 添加 / Enter 添加）
+// MARK: - WikiLinkTextField（v2.2.33 新增，替代 NSTextField）
+//
+// 单行文本输入控件，高度 24px（与 NSTextField 等同），可识别 `[[Page]]` 显示为蓝色超链接。
+// 实现策略：内嵌一个 NSTextView 用 NSScrollView 包起来（isHorizontallyResizable=false → 自动单行折行），
+// 在 textDidChange 时扫描 [[...]] 子串替换为带 .link 属性的 NSAttributedString。
+// 点击超链接 → WikiLinkRouter.open(name:anchor:)。
+final class WikiLinkTextField: NSView, NSTextViewDelegate {
+    private let scroll = NSScrollView()
+    let textView = NSTextView()
+    var onChange: (() -> Void)?
+    var stringValue: String { textView.string }
 
-/// 仿 Obsidian 笔记属性的多标签输入控件。一行显示所有 pill，末尾 + 输入框。
+    func setStringValue(_ s: String) {
+        textView.string = s
+        highlightWikiLinks()
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        // 与 NSTextField 视觉一致：roundedBezel 风格边框
+        layer?.borderColor = NSColor.separatorColor.cgColor
+        layer?.borderWidth = 1
+        layer?.cornerRadius = 5
+        layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
+
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.hasVerticalScroller = false
+        scroll.hasHorizontalScroller = false
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
+        scroll.autohidesScrollers = true
+        addSubview(scroll)
+
+        let tv = textView
+        tv.font = .systemFont(ofSize: 12)
+        tv.isEditable = true
+        tv.isSelectable = true
+        tv.isRichText = true  // 启用 attributed string 以支持超链接
+        tv.allowsUndo = true
+        tv.isHorizontallyResizable = false
+        tv.isVerticallyResizable = false
+        tv.textContainerInset = NSSize(width: 4, height: 3)
+        tv.textContainer?.widthTracksTextView = true
+        tv.textContainer?.heightTracksTextView = false
+        tv.textContainer?.lineFragmentPadding = 0
+        tv.delegate = self
+        scroll.documentView = tv
+
+        NSLayoutConstraint.activate([
+            scroll.topAnchor.constraint(equalTo: topAnchor),
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+            heightAnchor.constraint(equalToConstant: 24)
+        ])
+    }
+    required init?(coder: NSCoder) { nil }
+
+    func textDidChange(_ notification: Notification) {
+        highlightWikiLinks()
+        onChange?()
+    }
+
+    /// 扫描 `[[Page]]` / `[[Page|alias]]` / `[[Page#anchor]]`，转成蓝色超链接。
+    /// 不修改用户输入字符，只在显示层加属性。
+    private func highlightWikiLinks() {
+        let raw = textView.string
+        let attr = NSMutableAttributedString()
+        let baseAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 12),
+            .foregroundColor: NSColor.labelColor
+        ]
+        attr.append(NSAttributedString(string: raw, attributes: baseAttrs))
+        // 正则匹配 `[[Page]]` / `[[Page|alias]]` / `[[Page#anchor]]`
+        let pattern = "\\[\\[([^\\]\\n]+?)\\]\\]"
+        guard let re = try? NSRegularExpression(pattern: pattern) else { return }
+        let nsStr = raw as NSString
+        let matches = re.matches(in: raw, range: NSRange(location: 0, length: nsStr.length))
+        for m in matches {
+            let r = m.range(at: 1)  // 内容（不含 [[ ]]）
+            let content = nsStr.substring(with: r)
+            let pageName = content.components(separatedBy: "|").first ?? content
+            let page = pageName.components(separatedBy: "#").first ?? pageName
+            // 用 meetinsight:// 协议避免被当作系统 URL
+            let urlStr = "meetinsight://open-wiki/\(page.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? page)"
+            if let url = URL(string: urlStr) {
+                let linkAttrs: [NSAttributedString.Key: Any] = [
+                    .font: NSFont.systemFont(ofSize: 12),
+                    .foregroundColor: NSColor.controlAccentColor,
+                    .underlineStyle: NSUnderlineStyle.single.rawValue,
+                    .link: url
+                ]
+                attr.addAttributes(linkAttrs, range: m.range)
+            }
+        }
+        // 替换不打断光标：用 NSTextStorage 替换并维护选中区间
+        let selRanges = textView.selectedRanges
+        if let storage = textView.textStorage {
+            storage.beginEditing()
+            storage.setAttributedString(attr)
+            storage.endEditing()
+        }
+        textView.selectedRanges = selRanges
+    }
+}
+
+// MARK: - WikiLinkTextView（v2.2.33 新增，替代多行 NSTextView）
+//
+// 多行版本，高度 24px（纵向对齐单行字段），内部 NSScrollView 提供纵向滚动。
+// 同样的 [[Page]] 高亮 + 点击跳转。
+final class WikiLinkTextView: NSView, NSTextViewDelegate {
+    private let scroll = NSScrollView()
+    let textView = NSTextView()
+    var onChange: (() -> Void)?
+    var stringValue: String { textView.string }
+
+    func setStringValue(_ s: String) {
+        textView.string = s
+        highlightWikiLinks()
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.borderColor = NSColor.separatorColor.cgColor
+        layer?.borderWidth = 1
+        layer?.cornerRadius = 5
+        layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
+
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
+        scroll.autohidesScrollers = true
+        addSubview(scroll)
+
+        let tv = textView
+        tv.font = .systemFont(ofSize: 11)
+        tv.isEditable = true
+        tv.isSelectable = true
+        tv.isRichText = true
+        tv.allowsUndo = true
+        tv.textContainerInset = NSSize(width: 4, height: 3)
+        tv.textContainer?.widthTracksTextView = true
+        tv.textContainer?.heightTracksTextView = false
+        tv.textContainer?.lineFragmentPadding = 0
+        tv.isHorizontallyResizable = false
+        tv.isVerticallyResizable = true
+        tv.autoresizingMask = [.width]
+        tv.delegate = self
+        scroll.documentView = tv
+
+        NSLayoutConstraint.activate([
+            scroll.topAnchor.constraint(equalTo: topAnchor),
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+            heightAnchor.constraint(equalToConstant: 24)
+        ])
+    }
+    required init?(coder: NSCoder) { nil }
+
+    func textDidChange(_ notification: Notification) {
+        highlightWikiLinks()
+        onChange?()
+    }
+
+    private func highlightWikiLinks() {
+        let raw = textView.string
+        let attr = NSMutableAttributedString()
+        let baseAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11),
+            .foregroundColor: NSColor.labelColor
+        ]
+        attr.append(NSAttributedString(string: raw, attributes: baseAttrs))
+        let pattern = "\\[\\[([^\\]\\n]+?)\\]\\]"
+        guard let re = try? NSRegularExpression(pattern: pattern) else { return }
+        let nsStr = raw as NSString
+        let matches = re.matches(in: raw, range: NSRange(location: 0, length: nsStr.length))
+        for m in matches {
+            let r = m.range(at: 1)
+            let content = nsStr.substring(with: r)
+            let pageName = content.components(separatedBy: "|").first ?? content
+            let page = pageName.components(separatedBy: "#").first ?? pageName
+            let urlStr = "meetinsight://open-wiki/\(page.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? page)"
+            if let url = URL(string: urlStr) {
+                let linkAttrs: [NSAttributedString.Key: Any] = [
+                    .font: NSFont.systemFont(ofSize: 11),
+                    .foregroundColor: NSColor.controlAccentColor,
+                    .underlineStyle: NSUnderlineStyle.single.rawValue,
+                    .link: url
+                ]
+                attr.addAttributes(linkAttrs, range: m.range)
+            }
+        }
+        let selRanges = textView.selectedRanges
+        if let storage = textView.textStorage {
+            storage.beginEditing()
+            storage.setAttributedString(attr)
+            storage.endEditing()
+        }
+        textView.selectedRanges = selRanges
+    }
+}
+
+// MARK: - 全站拦截超链接点击 → WikiLinkRouter
+//
+// 任何 NSTextView 触发 url 委派时（点击 meetinsight://open-wiki/Page）调用此处。
+// 既适用于 WikiLinkTextField/View，也适用于迁移期间系统后台弹出的页内 wikilink。
+class WikiLinkClickRouter: NSObject, NSTextViewDelegate {
+    weak var origDelegate: NSTextViewDelegate?
+    func textView(_ textView: NSTextView, clickedOnLink url: URL, at charIndex: Int) -> Bool {
+        if url.scheme == "meetinsight" {
+            // 解析 host=open-wiki, path=/PageName
+            let page = url.host == "open-wiki" ? url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")) :
+                url.absoluteString.replacingOccurrences(of: "meetinsight://open-wiki/", with: "")
+            if !page.isEmpty {
+                WikiLinkRouter.open(name: page)
+            }
+            return true
+        }
+        return origDelegate?.textView?(textView, clickedOnLink: url, at: charIndex) ?? true
+    }
+}
+
+// MARK: - TagFieldView（v2.2.33 改造：pill 行 + addField 独立下行）
+//
+// 仿 Obsidian 笔记属性的多标签输入控件。
+// - 上行（高 24）：pill 区，NSScrollView 容纳，多了横向滚动；末尾可显示「+ 添加」placeholder。
+// - 下行（高 24）：独立的 NSTextField，Enter 添加 pill。
 final class TagFieldView: NSView {
-    private let scrollView = NSScrollView()
-    private let container = NSStackView()
+    private let pillScroll = NSScrollView()
+    private let pillContainer = NSStackView()
     private let addField = NSTextField()
     private var pills: [String] = []
     var onChange: (() -> Void)?
@@ -97,79 +355,74 @@ final class TagFieldView: NSView {
 
     func setTags(_ tags: [String]) {
         pills = tags.filter { !$0.isEmpty }
-        rebuild()
+        rebuildPills()
     }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.cornerRadius = 5
-        layer?.borderWidth = 0.5
-        layer?.borderColor = NSColor.separatorColor.cgColor
-        layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
 
-        scrollView.hasVerticalScroller = false
-        scrollView.hasHorizontalScroller = false
-        scrollView.borderType = .noBorder
-        scrollView.drawsBackground = false
-        scrollView.autohidesScrollers = true
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(scrollView)
+        // 上行 pill 区
+        pillScroll.translatesAutoresizingMaskIntoConstraints = false
+        pillScroll.hasVerticalScroller = false
+        pillScroll.hasHorizontalScroller = true
+        pillScroll.borderType = .noBorder
+        pillScroll.drawsBackground = false
+        pillScroll.autohidesScrollers = true
+        addSubview(pillScroll)
 
-        container.orientation = .horizontal
-        container.spacing = 3
-        container.alignment = .centerY
-        container.distribution = .fill
-        container.translatesAutoresizingMaskIntoConstraints = false
+        pillContainer.orientation = .horizontal
+        pillContainer.spacing = 3
+        pillContainer.alignment = .centerY
+        pillContainer.translatesAutoresizingMaskIntoConstraints = false
 
-        let doc = NSView()
-        doc.translatesAutoresizingMaskIntoConstraints = false
-        doc.addSubview(container)
-        scrollView.documentView = doc
+        let pillDoc = NSView()
+        pillDoc.translatesAutoresizingMaskIntoConstraints = false
+        pillDoc.addSubview(pillContainer)
+        pillScroll.documentView = pillDoc
 
-        addField.placeholderString = "+ 添加"
-        addField.isBordered = false
-        addField.drawsBackground = false
-        addField.font = .systemFont(ofSize: 11)
-        addField.target = self
-        addField.action = #selector(addPill)
+        // 下行 addField
         addField.translatesAutoresizingMaskIntoConstraints = false
-        addField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        addField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        addField.widthAnchor.constraint(greaterThanOrEqualToConstant: 60).isActive = true
-        doc.addSubview(addField)
+        addField.placeholderString = "+ 添加（按 Enter）"
+        addField.font = .systemFont(ofSize: 12)
+        addField.bezelStyle = .roundedBezel
+        addField.target = self
+        addField.action = #selector(commitAdd)
+        addSubview(addField)
 
         NSLayoutConstraint.activate([
-            scrollView.topAnchor.constraint(equalTo: topAnchor),
-            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
-            scrollView.heightAnchor.constraint(equalToConstant: 24),
-            container.topAnchor.constraint(equalTo: doc.topAnchor, constant: 3),
-            container.leadingAnchor.constraint(equalTo: doc.leadingAnchor, constant: 5),
-            container.trailingAnchor.constraint(lessThanOrEqualTo: doc.trailingAnchor, constant: -5),
-            container.bottomAnchor.constraint(equalTo: doc.bottomAnchor, constant: -3),
-            addField.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            addField.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            doc.heightAnchor.constraint(equalTo: scrollView.heightAnchor)
+            pillScroll.topAnchor.constraint(equalTo: topAnchor),
+            pillScroll.leadingAnchor.constraint(equalTo: leadingAnchor),
+            pillScroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            pillScroll.heightAnchor.constraint(equalToConstant: 24),
+
+            addField.topAnchor.constraint(equalTo: pillScroll.bottomAnchor, constant: 4),
+            addField.leadingAnchor.constraint(equalTo: leadingAnchor),
+            addField.trailingAnchor.constraint(equalTo: trailingAnchor),
+            addField.bottomAnchor.constraint(equalTo: bottomAnchor),
+            addField.heightAnchor.constraint(equalToConstant: 24),
+
+            pillContainer.topAnchor.constraint(equalTo: pillDoc.topAnchor, constant: 3),
+            pillContainer.leadingAnchor.constraint(equalTo: pillDoc.leadingAnchor, constant: 5),
+            pillContainer.trailingAnchor.constraint(lessThanOrEqualTo: pillDoc.trailingAnchor, constant: -5),
+            pillContainer.bottomAnchor.constraint(equalTo: pillDoc.bottomAnchor, constant: -3),
+            pillDoc.heightAnchor.constraint(equalTo: pillScroll.heightAnchor),
+            pillDoc.widthAnchor.constraint(greaterThanOrEqualTo: pillScroll.widthAnchor)
         ])
-        rebuild()
+        rebuildPills()
     }
     required init?(coder: NSCoder) { nil }
 
-    private func rebuild() {
-        // 清掉旧 pill（保留 addField 不动；它不是 container 子视图）
-        for v in container.arrangedSubviews { v.removeFromSuperview() }
+    private func rebuildPills() {
+        for v in pillContainer.arrangedSubviews { v.removeFromSuperview() }
         for (i, tag) in pills.enumerated() {
             let pill = makePill(tag: tag, idx: i)
-            container.addArrangedSubview(pill)
+            pillContainer.addArrangedSubview(pill)
             pill.setContentHuggingPriority(.required, for: .horizontal)
         }
-        // spacer 把 addField 推到 pill 之后
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        container.addArrangedSubview(spacer)
-        container.addArrangedSubview(addField)
+        pillContainer.addArrangedSubview(spacer)
     }
 
     private func makePill(tag: String, idx: Int) -> NSView {
@@ -202,14 +455,13 @@ final class TagFieldView: NSView {
         return pill
     }
 
-    @objc private func addPill() {
+    @objc private func commitAdd() {
         let raw = addField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        // 也允许一次粘贴 "a,b,c" 一次加多个
         let parts = raw.split(whereSeparator: { $0 == "," || $0 == "，" }).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
         guard !parts.isEmpty else { return }
         for p in parts where !pills.contains(p) { pills.append(p) }
         addField.stringValue = ""
-        rebuild()
+        rebuildPills()
         onChange?()
     }
 
@@ -217,12 +469,76 @@ final class TagFieldView: NSView {
         let idx = sender.tag
         guard idx >= 0, idx < pills.count else { return }
         pills.remove(at: idx)
-        rebuild()
+        rebuildPills()
         onChange?()
     }
 }
 
-// MARK: - WikiPropertySheet
+// MARK: - TypeFieldView（v2.2.33 新增，与 TagFieldView 样式一致）
+//
+// 「类型」字段：popup 显示当前类型（撑满 outerStack.width - 100） + 下行独立的「+ 新建类型」按钮。
+// popup 高度 24 与 WikiLinkTextField 等同，下行按钮 24，整体与 TagFieldView 视觉一致。
+final class TypeFieldView: NSView {
+    private let popup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let addBtn = NSButton(title: "+ 新建类型", target: nil, action: nil)
+    var onChange: (() -> Void)?
+    var onAddNew: (() -> Void)?
+
+    var popupButton: NSPopUpButton { popup }
+    var addButton: NSButton { addBtn }
+
+    var items: [String] {
+        (popup.itemArray as? [NSMenuItem])?.compactMap { $0.title } ?? []
+    }
+
+    func setItems(_ titles: [String]) {
+        popup.removeAllItems()
+        popup.addItems(withTitles: titles)
+    }
+
+    func selectTitle(_ title: String) {
+        popup.selectItem(withTitle: title)
+    }
+
+    var selectedTitle: String? { popup.titleOfSelectedItem }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+
+        popup.translatesAutoresizingMaskIntoConstraints = false
+        popup.font = .systemFont(ofSize: 12)
+        popup.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        popup.target = self
+        popup.action = #selector(popupChanged)
+        addSubview(popup)
+
+        addBtn.translatesAutoresizingMaskIntoConstraints = false
+        addBtn.bezelStyle = .rounded
+        addBtn.font = .systemFont(ofSize: 11)
+        addBtn.target = self
+        addBtn.action = #selector(addTapped)
+        addSubview(addBtn)
+
+        NSLayoutConstraint.activate([
+            popup.topAnchor.constraint(equalTo: topAnchor),
+            popup.leadingAnchor.constraint(equalTo: leadingAnchor),
+            popup.trailingAnchor.constraint(equalTo: trailingAnchor),
+            popup.heightAnchor.constraint(equalToConstant: 24),
+
+            addBtn.topAnchor.constraint(equalTo: popup.bottomAnchor, constant: 4),
+            addBtn.trailingAnchor.constraint(equalTo: trailingAnchor),
+            addBtn.bottomAnchor.constraint(equalTo: bottomAnchor),
+            addBtn.heightAnchor.constraint(equalToConstant: 24)
+        ])
+    }
+    required init?(coder: NSCoder) { nil }
+
+    @objc private func popupChanged() { onChange?() }
+    @objc private func addTapped() { onAddNew?() }
+}
+
+// MARK: - WikiPropertySheet（v2.2.33 全面升级）
 
 /// 「新增 Wiki 页」全量属性表单 —— 模态 NSWindow。
 final class WikiPropertySheet: NSViewController {
@@ -230,36 +546,35 @@ final class WikiPropertySheet: NSViewController {
     private var initial: WikiPageSpec?
 
     // 通用字段
-    private var nameField: NSTextField!
-    private var typePopup: NSPopUpButton!
-    private var addTypeBtn: NSButton!
+    private var nameField: WikiLinkTextField!
+    private var typeField: TypeFieldView!
     private var customTypes: [String] = []
     private var aliasesField: TagFieldView!
     private var tagsField: TagFieldView!
-    private var updatedField: NSTextField!
-    private var backlinksView: NSTextView!
+    private var updatedField: WikiLinkTextField!
+    private var backlinksView: WikiLinkTextView!
 
     // person 字段
     private var personRows: NSStackView!
-    private var chineseNameField: NSTextField!
-    private var companyField: NSTextField!
-    private var jobTitleField: NSTextField!
-    private var roleField: NSTextField!
+    private var chineseNameField: WikiLinkTextField!
+    private var companyField: WikiLinkTextField!
+    private var jobTitleField: WikiLinkTextField!
+    private var roleField: WikiLinkTextField!
 
     // company 字段
     private var companyRows: NSStackView!
-    private var companyTypeField: NSTextField!
-    private var industryField: NSTextField!
-    private var companyIntroView: NSTextView!
+    private var companyTypeField: WikiLinkTextField!
+    private var industryField: WikiLinkTextField!
+    private var companyIntroView: WikiLinkTextView!
 
     // chip 字段
     private var chipRows: NSStackView!
-    private var brandField: NSTextField!
-    private var modelField: NSTextField!
-    private var categoryField: NSTextField!
-    private var functionView: NSTextView!
-    private var statusField: NSTextField!
-    private var replacementField: NSTextField!
+    private var brandField: WikiLinkTextField!
+    private var modelField: WikiLinkTextField!
+    private var categoryField: WikiLinkTextField!
+    private var functionView: WikiLinkTextView!
+    private var statusField: WikiLinkTextField!
+    private var replacementField: WikiLinkTextField!
 
     private var confirmBtn: NSButton!
     private var cancelBtn: NSButton!
@@ -311,7 +626,6 @@ final class WikiPropertySheet: NSViewController {
         panel.hidesOnDeactivate = false
         // 窗口尺寸按内容自适应（避免固定 780 高导致中部大片空白）；
         // 内容超高时由内部 NSScrollView 滚动，绝不裁剪。
-        // 访问 vc.view 即可触发 loadView（macOS 的 NSViewController 自动加载），无需 loadViewIfNeeded()（仅 14+）
         _ = vc.view
         // 先把宽度定为最终 620，让 scroll 内容宽度 = 592，再测量内容自然高度才准确
         panel.setContentSize(NSSize(width: 620, height: 560))
@@ -372,55 +686,37 @@ final class WikiPropertySheet: NSViewController {
             control.setContentHuggingPriority(.defaultLow, for: .horizontal)
             return row
         }
-        func makeTF(placeholder: String) -> NSTextField {
-            let tf = NSTextField()
-            tf.placeholderString = placeholder
-            tf.bezelStyle = .roundedBezel
-            tf.font = .systemFont(ofSize: 12)
-            tf.translatesAutoresizingMaskIntoConstraints = false
-            tf.heightAnchor.constraint(equalToConstant: 24).isActive = true
-            return tf
-        }
-        func makeMultilineTV(minHeight: CGFloat = 64) -> NSTextView {
-            let tv = NSTextView()
-            tv.isEditable = true
-            tv.isSelectable = true
-            tv.font = .systemFont(ofSize: 11)
-            tv.textContainerInset = NSSize(width: 4, height: 3)
-            tv.translatesAutoresizingMaskIntoConstraints = false
-            tv.heightAnchor.constraint(greaterThanOrEqualToConstant: minHeight).isActive = true
-            return tv
-        }
 
         // —— 通用字段 ——
-        nameField  = makeTF(placeholder: "规范名（必填）")
-        typePopup  = NSPopUpButton(frame: .zero, pullsDown: false)
-        typePopup.translatesAutoresizingMaskIntoConstraints = false
-        typePopup.font = .systemFont(ofSize: 12)
-        customTypes = Self.loadCustomTypes()
-        typePopup.addItems(withTitles: (Self.allTypes + customTypes).map { label(forType: $0) })
-        typePopup.target = self
-        typePopup.action = #selector(typeChanged)
-        typePopup.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        nameField = WikiLinkTextField(frame: .zero)
+        nameField.translatesAutoresizingMaskIntoConstraints = false
+        nameField.onChange = { [weak self] in self?.nameField.layer?.borderColor = NSColor.separatorColor.cgColor }
 
-        addTypeBtn = NSButton(title: "+", target: self, action: #selector(addCustomType))
-        addTypeBtn.toolTip = "新增自定义类型（将共享到所有 WiKi 页的类型下拉）"
-        addTypeBtn.bezelStyle = .rounded
-        addTypeBtn.font = .systemFont(ofSize: 12)
-        addTypeBtn.translatesAutoresizingMaskIntoConstraints = false
+        typeField = TypeFieldView(frame: .zero)
+        typeField.translatesAutoresizingMaskIntoConstraints = false
+        customTypes = Self.loadCustomTypes()
+        typeField.setItems((Self.allTypes + customTypes).map { label(forType: $0) })
+        typeField.onChange = { [weak self] in self?.syncTypeSpecificVisibility() }
+        typeField.onAddNew = { [weak self] in self?.addCustomType() }
+
         aliasesField = TagFieldView(frame: .zero)
         aliasesField.translatesAutoresizingMaskIntoConstraints = false
         aliasesField.onChange = { [weak self] in self?.aliasesField.layer?.borderColor = NSColor.separatorColor.cgColor }
+
         tagsField = TagFieldView(frame: .zero)
         tagsField.translatesAutoresizingMaskIntoConstraints = false
-        updatedField = makeTF(placeholder: "YYYY-MM-DD（留空 = 今日）")
-        backlinksView = makeMultilineTV(minHeight: 64)
+
+        updatedField = WikiLinkTextField(frame: .zero)
+        updatedField.translatesAutoresizingMaskIntoConstraints = false
+
+        backlinksView = WikiLinkTextView(frame: .zero)
+        backlinksView.translatesAutoresizingMaskIntoConstraints = false
 
         // —— person 字段 ——
-        chineseNameField = makeTF(placeholder: "（待补全）")
-        companyField  = makeTF(placeholder: "（待补全）")
-        jobTitleField = makeTF(placeholder: "（待补全）")
-        roleField     = makeTF(placeholder: "（待补全）")
+        chineseNameField = WikiLinkTextField(frame: .zero); chineseNameField.translatesAutoresizingMaskIntoConstraints = false
+        companyField  = WikiLinkTextField(frame: .zero); companyField.translatesAutoresizingMaskIntoConstraints = false
+        jobTitleField = WikiLinkTextField(frame: .zero); jobTitleField.translatesAutoresizingMaskIntoConstraints = false
+        roleField     = WikiLinkTextField(frame: .zero); roleField.translatesAutoresizingMaskIntoConstraints = false
 
         personRows = NSStackView(views: [
             makeFieldRow(label: "中文名", control: chineseNameField),
@@ -433,32 +729,32 @@ final class WikiPropertySheet: NSViewController {
         personRows.translatesAutoresizingMaskIntoConstraints = false
 
         // —— company 字段 ——
-        companyTypeField = makeTF(placeholder: "（待补全）")
-        industryField    = makeTF(placeholder: "（待补全）")
-        companyIntroView = makeMultilineTV(minHeight: 60)
+        companyTypeField = WikiLinkTextField(frame: .zero); companyTypeField.translatesAutoresizingMaskIntoConstraints = false
+        industryField    = WikiLinkTextField(frame: .zero); industryField.translatesAutoresizingMaskIntoConstraints = false
+        companyIntroView = WikiLinkTextView(frame: .zero);  companyIntroView.translatesAutoresizingMaskIntoConstraints = false
 
         companyRows = NSStackView(views: [
             makeFieldRow(label: "公司类型", control: companyTypeField),
             makeFieldRow(label: "所属行业", control: industryField),
-            makeFieldRow(label: "公司简介", control: withScroll(companyIntroView, height: 70))
+            makeFieldRow(label: "公司简介", control: companyIntroView)
         ])
         companyRows.orientation = .vertical
         companyRows.spacing = 4
         companyRows.translatesAutoresizingMaskIntoConstraints = false
 
         // —— chip 字段 ——
-        brandField       = makeTF(placeholder: "（待补全）")
-        modelField       = makeTF(placeholder: "（待补全）")
-        categoryField    = makeTF(placeholder: "（待补全）")
-        functionView     = makeMultilineTV(minHeight: 60)
-        statusField      = makeTF(placeholder: "（待补全）")
-        replacementField = makeTF(placeholder: "（待补全）")
+        brandField       = WikiLinkTextField(frame: .zero); brandField.translatesAutoresizingMaskIntoConstraints = false
+        modelField       = WikiLinkTextField(frame: .zero); modelField.translatesAutoresizingMaskIntoConstraints = false
+        categoryField    = WikiLinkTextField(frame: .zero); categoryField.translatesAutoresizingMaskIntoConstraints = false
+        functionView     = WikiLinkTextView(frame: .zero);  functionView.translatesAutoresizingMaskIntoConstraints = false
+        statusField      = WikiLinkTextField(frame: .zero); statusField.translatesAutoresizingMaskIntoConstraints = false
+        replacementField = WikiLinkTextField(frame: .zero); replacementField.translatesAutoresizingMaskIntoConstraints = false
 
         chipRows = NSStackView(views: [
             makeFieldRow(label: "品牌", control: brandField),
             makeFieldRow(label: "具体型号", control: modelField),
             makeFieldRow(label: "类别", control: categoryField),
-            makeFieldRow(label: "功能简述", control: withScroll(functionView, height: 70)),
+            makeFieldRow(label: "功能简述", control: functionView),
             makeFieldRow(label: "状态", control: statusField),
             makeFieldRow(label: "替代料", control: replacementField)
         ])
@@ -467,26 +763,8 @@ final class WikiPropertySheet: NSViewController {
         chipRows.translatesAutoresizingMaskIntoConstraints = false
 
         // —— 主布局 ——
-        // 用一个垂直 NSStackView 把所有字段串起来，不再嵌在 NSScrollView 里。
-        // 老版本使用 ScrollView + autolayout documentView 时，主栈只约束到
-        // documentView 顶部/底部，但 documentView 没有显式高度约束，会导致
-        // Auto Layout 把内容整体下推到 documentView 下半部、上半部留下大段
-        // 空白（典型症状：「新增 Wiki 页」对话框上半屏漆黑一片、字段全挤在底部）。
-        // 改为单一 stackView 后，所有字段按顺序从顶部开始排列，溢出靠外层
-        // dialog 尺寸自适应（panel height 已在 present() 中设为 700，正常足够）。
-        let typeRowStack = NSStackView(views: [typePopup, addTypeBtn])
-        typeRowStack.orientation = .horizontal
-        typeRowStack.spacing = 6
-        typeRowStack.alignment = .centerY
-        typeRowStack.distribution = .fill
-        typeRowStack.translatesAutoresizingMaskIntoConstraints = false
-        addTypeBtn.setContentHuggingPriority(.required, for: .horizontal)
-        // 顺序约定（用户要求，v2.2.30；与 entry.js FM_ORDER 完全一致）：
-        //   1) 标识/链接类在最前：类型 → 规范名 → 别名
-        //   2) 描述类按 type 动态展开（仅匹配 type 时显示，detachesHiddenViews 保证不占空白）
-        //   3) 元信息收尾：标签 → 更新 → 反向链接
         let mainStack = NSStackView(views: [
-            makeFieldRow(label: "类型",       control: typeRowStack),
+            makeFieldRow(label: "类型",       control: typeField),
             makeFieldRow(label: "规范名",     control: nameField),
             makeFieldRow(label: "别名",       control: aliasesField),
             personRows,    // 中文名 / 公司 / 职位 / 职能范围（仅 type=Person 时显示）
@@ -494,15 +772,13 @@ final class WikiPropertySheet: NSViewController {
             chipRows,      // 品牌 / 具体型号 / 类别 / 功能简述 / 状态 / 替代料（仅 type=Chip 时显示）
             makeFieldRow(label: "标签",       control: tagsField),
             makeFieldRow(label: "更新",       control: updatedField),
-            makeFieldRow(label: "反向链接",   control: withScroll(backlinksView, height: 72))
+            makeFieldRow(label: "反向链接",   control: backlinksView)
         ])
         mainStack.orientation = .vertical
         mainStack.spacing = 6
         mainStack.alignment = .leading
         mainStack.translatesAutoresizingMaskIntoConstraints = false
         // 关键：让 person/company/chipRows 被 isHidden=true 时**真正折叠**（不留空白）。
-        // NSStackView 的 detachesHiddenViews 默认 false，会让被隐藏的 arrangedSubview
-        // 仍然占据布局空间 —— 这就是之前「类型选 Company 时还是看到一大片 Person/Chip 空字段」的根因。
         mainStack.detachesHiddenViews = true
 
         // —— 底部按钮 ——
@@ -524,9 +800,6 @@ final class WikiPropertySheet: NSViewController {
         buttonRow.translatesAutoresizingMaskIntoConstraints = false
         buttonRow.arrangedSubviews[0].setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        // —— 总布局：单一外层垂直栈 = [mainStack, buttonRow]，直接放进 view ——
-        // 窗口高度在 present() / refit() 里按内容 fittingSize 自适应，不再写死 780 高；
-        // 面板高度 = 内容高 → 无中部空白、各类型字段（含 chip 6 行）均落在 380–680 上限内不外溢。
         outerStack = NSStackView(views: [mainStack, buttonRow])
         outerStack.orientation = .vertical
         outerStack.spacing = 12
@@ -540,33 +813,34 @@ final class WikiPropertySheet: NSViewController {
             outerStack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -14),
             // 通用字段宽度（= 内容宽 - 100，左侧 14 标签 + 8 间距）
             nameField.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -100),
-            typePopup.widthAnchor.constraint(equalToConstant: 180),
+            typeField.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -100),
             aliasesField.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -100),
             tagsField.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -100),
-            updatedField.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -100)
+            updatedField.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -100),
+            backlinksView.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -100),
+            // person / company / chip 子字段同宽
+            chineseNameField.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -100),
+            companyField.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -100),
+            jobTitleField.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -100),
+            roleField.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -100),
+            companyTypeField.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -100),
+            industryField.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -100),
+            companyIntroView.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -100),
+            brandField.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -100),
+            modelField.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -100),
+            categoryField.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -100),
+            functionView.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -100),
+            statusField.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -100),
+            replacementField.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -100)
         ])
-    }
-
-    /// 把 NSTextView 嵌进 NSScrollView，返回可放入 NSStackView 的容器。
-    private func withScroll(_ tv: NSTextView, height: CGFloat) -> NSView {
-        let scroll = NSScrollView()
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.hasVerticalScroller = true
-        scroll.borderType = .bezelBorder
-        scroll.documentView = tv
-        scroll.heightAnchor.constraint(equalToConstant: height).isActive = true
-        return scroll
     }
 
     /// 把 popup 的 display title 翻译回内部 type 值（TitleCase token）。
     private func typeFromLabel(_ label: String) -> String {
-        // 新格式："👤 Person" / "🏢 Company" / ... —— 去掉开头 emoji 与前导空格即可。
-        // 同时兼容历史格式 "👤 人名 (Person)"（去掉括号内部）和自定义类型 "📄 FooBar"。
         if let l = label.range(of: "(")?.lowerBound,
            let r = label.range(of: ")", range: l..<label.endIndex) {
             return String(label[label.index(after: l)..<r.lowerBound])
         }
-        // 去掉 emoji（粗略：去掉首个 token 前的空格分界，截取第二段；并去掉尾部空格）。
         if let sp = label.firstIndex(of: " ") {
             return String(label[label.index(after: sp)...]).trimmingCharacters(in: .whitespaces)
         }
@@ -574,7 +848,6 @@ final class WikiPropertySheet: NSViewController {
     }
 
     private func label(forType t: String) -> String {
-        // 严格 TitleCase（如用户要求「类型用首字母大写」），emoji 保持辨识度。
         switch t {
         case "Person":  return "👤 Person"
         case "Company": return "🏢 Company"
@@ -586,31 +859,26 @@ final class WikiPropertySheet: NSViewController {
         }
     }
 
-    @objc private func typeChanged() {
-        syncTypeSpecificVisibility()
-    }
-
     private func syncTypeSpecificVisibility() {
         let t = currentType()
         personRows.isHidden  = (t != "Person")
         companyRows.isHidden = (t != "Company")
         chipRows.isHidden    = (t != "Chip")
-        // 同步 tags 里的「类型 token」：始终保留 wiki + 当前类型，避免切换类型后残留旧类型标签
+        // 同步 tags 里的「类型 token」：始终保留 wiki + 当前类型
         var tg = tagsField.tags
         tg = tg.filter { !WikiPageSpec.typeTokens.contains($0) }
         if !tg.contains(t) { tg.append(t) }
         tagsField.setTags(tg)
-        // 切换类型会改变可见字段数 → 重新按内容高度自适应窗口尺寸
         refit()
     }
 
     private func currentType() -> String {
-        typeFromLabel(typePopup.titleOfSelectedItem ?? "Person")
+        typeFromLabel(typeField.selectedTitle ?? "Person")
     }
 
     // MARK: - 自定义类型录入
 
-    @objc private func addCustomType() {
+    private func addCustomType() {
         let alert = NSAlert()
         alert.messageText = "新增自定义类型"
         alert.informativeText = "输入类型名称，将自动加入所有 WiKi 页「类型」下拉菜单（持久保存）。"
@@ -633,7 +901,6 @@ final class WikiPropertySheet: NSViewController {
     private func commitCustomType(_ raw: String) {
         let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return }
-        // 禁止特殊字符，避免破坏 YAML frontmatter 的 type 字段
         let illegal = CharacterSet(charactersIn: "():#\"'[]{}|,>%@!&*?/\\=+")
         if name.rangeOfCharacter(from: illegal) != nil || name.contains("\n") {
             let a = NSAlert()
@@ -643,53 +910,53 @@ final class WikiPropertySheet: NSViewController {
             if let win = view.window { a.beginSheetModal(for: win) { _ in } }
             return
         }
-        // 与内置类型、已有自定义类型去重（忽略大小写）
         let existing = Self.allTypes + customTypes
         if existing.contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) {
-            typePopup.selectItem(withTitle: label(forType: name))
+            typeField.selectTitle(label(forType: name))
             syncTypeSpecificVisibility()
             return
         }
         customTypes.append(name)
         Self.saveCustomTypes(customTypes)
         let title = label(forType: name)
-        typePopup.addItem(withTitle: title)
-        typePopup.selectItem(withTitle: title)
+        typeField.setItems((Self.allTypes + customTypes).map { label(forType: $0) })
+        typeField.selectTitle(title)
         syncTypeSpecificVisibility()
     }
 
     private func populate(_ s: WikiPageSpec?) {
         guard let s = s else { return }
-        nameField.stringValue = s.name
+        nameField.setStringValue(s.name)
         let title = label(forType: s.type)
-        if typePopup.item(withTitle: title) != nil {
-            typePopup.selectItem(withTitle: title)
+        if (typeField.items).contains(title) {
+            typeField.selectTitle(title)
         } else {
-            typePopup.addItem(withTitle: title)
-            typePopup.selectItem(withTitle: title)
+            // 自定义类型也要能加载
+            typeField.setItems((Self.allTypes + customTypes).map { label(forType: $0) })
+            typeField.selectTitle(title)
         }
         aliasesField.setTags(s.aliases)
         tagsField.setTags(s.tags)
-        updatedField.stringValue = s.updated
-        backlinksView.string = s.backlinks.joined(separator: "\n")
-        chineseNameField.stringValue = s.chineseName
-        companyField.stringValue   = s.company
-        jobTitleField.stringValue  = s.jobTitle
-        roleField.stringValue      = s.role
-        companyTypeField.stringValue = s.companyType
-        industryField.stringValue    = s.industry
-        companyIntroView.string      = s.companyIntro
-        brandField.stringValue       = s.brand
-        modelField.stringValue       = s.model
-        categoryField.stringValue    = s.category
-        functionView.string          = s.functionDesc
-        statusField.stringValue      = s.status
-        replacementField.stringValue = s.replacement
+        updatedField.setStringValue(s.updated)
+        backlinksView.setStringValue(s.backlinks.joined(separator: "\n"))
+        chineseNameField.setStringValue(s.chineseName)
+        companyField.setStringValue(s.company)
+        jobTitleField.setStringValue(s.jobTitle)
+        roleField.setStringValue(s.role)
+        companyTypeField.setStringValue(s.companyType)
+        industryField.setStringValue(s.industry)
+        companyIntroView.setStringValue(s.companyIntro)
+        brandField.setStringValue(s.brand)
+        modelField.setStringValue(s.model)
+        categoryField.setStringValue(s.category)
+        functionView.setStringValue(s.functionDesc)
+        statusField.setStringValue(s.status)
+        replacementField.setStringValue(s.replacement)
     }
 
     private func gather() -> WikiPageSpec {
         let type = currentType()
-        let backlinks = backlinksView.string
+        let backlinks = backlinksView.stringValue
             .split(whereSeparator: \.isNewline)
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -706,11 +973,11 @@ final class WikiPropertySheet: NSViewController {
             role: roleField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             companyType: companyTypeField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             industry: industryField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
-            companyIntro: companyIntroView.string.trimmingCharacters(in: .whitespacesAndNewlines),
+            companyIntro: companyIntroView.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             brand: brandField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             model: modelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             category: categoryField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
-            functionDesc: functionView.string.trimmingCharacters(in: .whitespacesAndNewlines),
+            functionDesc: functionView.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             status: statusField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             replacement: replacementField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         )
@@ -722,7 +989,7 @@ final class WikiPropertySheet: NSViewController {
             NSSound.beep()
             nameField.layer?.borderColor = NSColor.systemRed.cgColor
             nameField.layer?.borderWidth = 1
-            nameField.becomeFirstResponder()
+            view.window?.makeFirstResponder(nameField.textView)
             return
         }
         pendingResult = s

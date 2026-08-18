@@ -82,7 +82,22 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         super.viewDidLoad()
         setupUI()
         editor.delegate = self
+        // v2.2.33: 订阅全局双链跳转通知（来自 WikiPropertySheet 等任意 NSTextView click on link）
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleOpenWikiPageNotification(_:)),
+            name: .openWikiPage, object: nil)
         loadPages()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func handleOpenWikiPageNotification(_ note: Notification) {
+        guard let name = note.userInfo?["name"] as? String, !name.isEmpty else { return }
+        let anchor = note.userInfo?["anchor"] as? String
+        openWikiPageResolved(name, anchor: anchor)
     }
 
     // MARK: - UI 布局
