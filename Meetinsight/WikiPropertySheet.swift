@@ -481,16 +481,20 @@ final class WikiPropertySheet: NSViewController {
         typeRowStack.distribution = .fill
         typeRowStack.translatesAutoresizingMaskIntoConstraints = false
         addTypeBtn.setContentHuggingPriority(.required, for: .horizontal)
+        // 顺序约定（用户要求，v2.2.30；与 entry.js FM_ORDER 完全一致）：
+        //   1) 标识/链接类在最前：类型 → 规范名 → 别名
+        //   2) 描述类按 type 动态展开（仅匹配 type 时显示，detachesHiddenViews 保证不占空白）
+        //   3) 元信息收尾：标签 → 更新 → 反向链接
         let mainStack = NSStackView(views: [
-            makeFieldRow(label: "类型",   control: typeRowStack),
-            makeFieldRow(label: "规范名", control: nameField),
-            personRows,
-            makeFieldRow(label: "别名",   control: aliasesField),
-            companyRows,
-            chipRows,
-            makeFieldRow(label: "标签",   control: tagsField),
-            makeFieldRow(label: "更新",   control: updatedField),
-            makeFieldRow(label: "反向链接", control: withScroll(backlinksView, height: 72))
+            makeFieldRow(label: "类型",       control: typeRowStack),
+            makeFieldRow(label: "规范名",     control: nameField),
+            makeFieldRow(label: "别名",       control: aliasesField),
+            personRows,    // 中文名 / 公司 / 职位 / 职能范围（仅 type=Person 时显示）
+            companyRows,   // 公司类型 / 所属行业 / 公司简介（仅 type=Company 时显示；正好位于 aliases 与 tags 之间）
+            chipRows,      // 品牌 / 具体型号 / 类别 / 功能简述 / 状态 / 替代料（仅 type=Chip 时显示）
+            makeFieldRow(label: "标签",       control: tagsField),
+            makeFieldRow(label: "更新",       control: updatedField),
+            makeFieldRow(label: "反向链接",   control: withScroll(backlinksView, height: 72))
         ])
         mainStack.orientation = .vertical
         mainStack.spacing = 6
