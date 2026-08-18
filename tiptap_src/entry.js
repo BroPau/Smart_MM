@@ -63,7 +63,7 @@ function parseFrontmatter(lines) {
   let i = 0
   while (i < lines.length) {
     const s = lines[i]
-    const m = s.match(/^([A-Za-z0-9_.\-]+):\s*(.*)$/)
+    const m = s.match(/^([^\s:]+):\s*(.*)$/)
     if (!m) { i++; continue }
     const key = m[1]
     let val = m[2].trim()

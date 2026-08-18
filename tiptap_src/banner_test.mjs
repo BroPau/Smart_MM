@@ -44,7 +44,7 @@ function parseFrontmatter(text) {
   const lines = text.split('\n')
   let i = 0
   while (i < lines.length) {
-    const m = lines[i].match(/^([A-Za-z0-9_.\-]+):\s*(.*)$/)
+    const m = lines[i].match(/^([^\s:]+):\s*(.*)$/)
     if (!m) { i++; continue }
     const key = m[1]; let val = m[2].trim()
     if (val === '') {
@@ -109,7 +109,9 @@ for (const { file, content, fm } of pages) {
   setsEqual(roLabels, expectedLabels, `${file}: 只读 banner 标签集合 == 实际键集合`)
   if (fm['type'] && !ro.includes(String(fm['type']))) fail(`${file}: 只读 banner 未显示 type 值`)
   if (fm['canonical_name'] && !ro.includes(String(fm['canonical_name']))) fail(`${file}: 只读 banner 未显示 canonical_name 值`)
-  if (ro.includes('来源') || ro.includes('概要')) fail(`${file}: 只读 banner 不应含 来源/概要（仅正文章节）`)
+  // 来源/概要 仅是正文章节（## 来源 / ## 概要），不应作为 frontmatter「属性名」出现；
+  // 但真实值里包含这些字（如公司简介："…主要来源之一…"）是合法的，故只校验标签集合不含这两个键。
+  if (roLabels.includes('来源') || roLabels.includes('概要')) fail(`${file}: 只读 banner 不应以 来源/概要 作为属性名（仅正文章节）`)
   // 记录每个 type 取一个代表页，供可编辑模式校验
   const t = (fm['type'] || '').toLowerCase()
   if (t && !checkedTypes[t]) checkedTypes[t] = { file, content, fm }
