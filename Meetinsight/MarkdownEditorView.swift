@@ -659,6 +659,13 @@ fileprivate enum TipTapEditorHTML {
         background: #ffffff; color: #2f6fdb; border: 1px solid #c8d6f5; border-radius: 6px; cursor: pointer;
       }
       .fm-addtype:hover { background: #eef3ff; }
+      /* 反向链接只读区：pill 形 chip 串展示，不允许手动编辑（防破坏自动维护的双链） */
+      .fm-readonly { font-size: 13px; color: #1c1c1e; line-height: 1.9; padding: 2px 0; }
+      .fm-backlink-pill {
+        display: inline-block; padding: 1px 8px; margin: 1px 4px 1px 0;
+        background: #eef3ff; color: #2f6fdb; border: 1px solid #c8d6f5; border-radius: 4px;
+        font-size: 12px; font-family: inherit;
+      }
 
       /* —— 编辑器容器 —————————————————————————————————————————— */
       #editor { position: relative; max-width: 860px; margin: 0 auto; }
@@ -775,6 +782,12 @@ fileprivate enum TipTapEditorHTML {
         background: #2c2c32; color: #74b1ff; border: 1px solid #4a4a52; border-radius: 6px; cursor: pointer;
       }
       .fm-addtype:hover { background: #3a3a52; }
+      .fm-readonly { font-size: 13px; color: #ebebf0; line-height: 1.9; padding: 2px 0; }
+      .fm-backlink-pill {
+        display: inline-block; padding: 1px 8px; margin: 1px 4px 1px 0;
+        background: rgba(116,177,255,0.15); color: #74b1ff; border: 1px solid #3a4a5e; border-radius: 4px;
+        font-size: 12px; font-family: inherit;
+      }
       .ProseMirror code { background: #2a2a2e; }
         .ProseMirror pre { background: #26262b; }
         .ProseMirror blockquote { border-left-color: #3a3a40; color: #b8b8c0; }

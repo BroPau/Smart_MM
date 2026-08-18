@@ -83,7 +83,7 @@ function parseFrontmatter(lines) {
 }
 function renderFrontmatterBanner(fm) {
   if (!fm || Object.keys(fm).length === 0) return ''
-  const SKIP = { backlinks: 1, wiki_首页: 1 }
+  const SKIP = { backlinks: 1, wiki_首页: 1, source: 1, summary: 1, product: 1 }
   const rows = []
   function addRow(label, value) {
     if (!value) return
@@ -92,23 +92,44 @@ function renderFrontmatterBanner(fm) {
     if (!v || v === '(空)') return
     rows.push('<tr><th>' + escapeHtml(label) + '</th><td>' + escapeHtml(v) + '</td></tr>')
   }
-  const TYPE_LABEL = { person: '👤 人名', company: '🏢 公司', chip: '🔌 芯片', project: '📦 项目', product: '📦 产品', topic: '📚 主题' }
-  const tRaw = (fm['type'] || '').toLowerCase()
-  addRow('类型', TYPE_LABEL[tRaw] || tRaw || '—')
+  // 类型 token 全 TitleCase，emoji 前缀便于一眼识别。统一小写比较，兼容历史脏数据。
+  const TYPE_LABEL = {
+    person:  '👤 Person',
+    company: '🏢 Company',
+    chip:    '🔌 Chip',
+    project: '📦 Project',
+    topic:   '📚 Topic',
+    method:  '🛠 Method',
+    product: '📦 Project'
+  }
+  const tRaw = (fm['type'] || '').toString().trim()
+  const tLower = tRaw.toLowerCase()
+  addRow('类型', TYPE_LABEL[tLower] || tRaw || '—')
+  // 通用：规范名 / 别名 / 标签（去 wiki + 类型） / 更新
   const cn = (fm['canonical_name'] || '').toString().trim()
   if (cn) addRow('规范名', cn)
-  addRow('别名', fm['aliases']); addRow('公司', fm['company']); addRow('职位', fm['title'])
-  addRow('公司类型', fm['公司类型']); addRow('所属行业', fm['所属行业']); addRow('中文名', fm['中文名'])
-  addRow('来源', fm['source']); addRow('概要', fm['summary'])
+  addRow('别名', fm['aliases'])
+  // 按 type 显示专属字段（人名/公司/芯片）
+  if (tLower === 'person') {
+    addRow('中文名', fm['中文名']); addRow('公司', fm['company']); addRow('职位', fm['title']); addRow('职能范围', fm['职能范围'])
+  } else if (tLower === 'company') {
+    addRow('公司类型', fm['公司类型']); addRow('所属行业', fm['所属行业']); addRow('公司简介', fm['公司简介'])
+  } else if (tLower === 'chip') {
+    addRow('品牌', fm['品牌']); addRow('具体型号', fm['具体型号']); addRow('类别', fm['类别'])
+    addRow('功能简述', fm['功能简述']); addRow('状态', fm['状态']); addRow('替代料', fm['替代料'])
+  }
   const tags = fm['tags']
   if (Array.isArray(tags)) {
-    const filtered = tags.filter(x => x && x !== 'wiki' && x.toLowerCase() !== tRaw.toLowerCase())
+    const filtered = tags.filter(x => x && x !== 'wiki' && x.toLowerCase() !== tLower)
     addRow('标签', filtered)
   }
   addRow('更新', fm['updated'])
+  // 未知字段（兜底展示，Type/通用+专属键/Backlinks/已弃用 跳过）
   Object.keys(fm).forEach(k => {
     if (SKIP[k.toLowerCase()]) return
-    if (['type', 'canonical_name', 'aliases', 'company', 'title', '公司类型', '所属行业', '中文名', 'source', 'summary', 'tags', 'updated'].includes(k)) return
+    if (['type', 'canonical_name', 'aliases', '中文名', 'company', 'title', '职能范围',
+         '公司类型', '所属行业', '公司简介', '品牌', '具体型号', '类别', '功能简述', '状态', '替代料',
+         'tags', 'updated'].includes(k)) return
     addRow(k, fm[k])
   })
   if (rows.length === 0) return ''
@@ -912,6 +933,20 @@ function wireBannerForm(root) {
     }
     el.addEventListener('input', onEdit)
     el.addEventListener('change', onEdit)
+    // 「类型」select 改变后整段重渲染 banner：让 typeSet 字段按新类型显隐。
+    if (el.tagName === 'SELECT' && el.getAttribute('data-fm') === 'type') {
+      el.addEventListener('change', () => {
+        setTimeout(renderBanner, 0)
+        // 同步 tags：剔除旧类型 token，追加新类型
+        const newType = (currentFM['type'] || '').toString().trim()
+        const TYPE_TOKENS = ['Person', 'Company', 'Chip', 'Project', 'Topic', 'Method', 'person', 'company', 'chip', 'project', 'product', 'topic', 'method']
+        if (Array.isArray(currentFM['tags'])) {
+          currentFM['tags'] = currentFM['tags'].filter(t => t && t !== 'wiki' && !TYPE_TOKENS.includes(t))
+          if (newType && !currentFM['tags'].includes(newType)) currentFM['tags'].push(newType)
+        }
+        pendingFrontmatter = serializeFrontmatter(currentFM)
+      })
+    }
   })
   root.querySelectorAll('[data-addtype]').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -923,42 +958,75 @@ function wireBannerForm(root) {
 }
 
 function renderBannerEditForm(fm) {
+  // 类型 token 全部 TitleCase；小写 / 历史 product 兼容到 Project。
+  const TYPES = ['Person', 'Company', 'Chip', 'Project', 'Topic', 'Method']
+  // 通用字段（始终展示；别名/标签/更新独立放到下面顺序末尾）
+  // typeSet 匹配的字段才会渲染，模拟 Obsidian「按类型切换字段」的效果。
   const FIELDS = [
     { key: 'type', label: '类型', kind: 'select' },
     { key: 'canonical_name', label: '规范名', kind: 'text' },
+    // —— Person 专属 ——
+    { typeSet: 'Person', key: '中文名', label: '中文名', kind: 'text' },
+    { typeSet: 'Person', key: 'company', label: '公司', kind: 'text' },
+    { typeSet: 'Person', key: 'title', label: '职位', kind: 'text' },
+    { typeSet: 'Person', key: '职能范围', label: '职能范围', kind: 'textarea' },
+    // —— Company 专属 ——
+    { typeSet: 'Company', key: '公司类型', label: '公司类型', kind: 'text' },
+    { typeSet: 'Company', key: '所属行业', label: '所属行业', kind: 'text' },
+    { typeSet: 'Company', key: '公司简介', label: '公司简介', kind: 'textarea' },
+    // —— Chip 专属 ——
+    { typeSet: 'Chip', key: '品牌', label: '品牌', kind: 'text' },
+    { typeSet: 'Chip', key: '具体型号', label: '具体型号', kind: 'text' },
+    { typeSet: 'Chip', key: '类别', label: '类别', kind: 'text' },
+    { typeSet: 'Chip', key: '功能简述', label: '功能简述', kind: 'textarea' },
+    { typeSet: 'Chip', key: '状态', label: '状态', kind: 'text' },
+    { typeSet: 'Chip', key: '替代料', label: '替代料', kind: 'text' },
+    // —— 通用（按任意类型都可填） ——
     { key: 'aliases', label: '别名', kind: 'list' },
-    { key: 'company', label: '公司', kind: 'text' },
-    { key: 'title', label: '职位', kind: 'text' },
-    { key: '公司类型', label: '公司类型', kind: 'text' },
-    { key: '所属行业', label: '所属行业', kind: 'text' },
-    { key: '中文名', label: '中文名', kind: 'text' },
-    { key: 'source', label: '来源', kind: 'text' },
-    { key: 'summary', label: '概要', kind: 'textarea' },
     { key: 'tags', label: '标签', kind: 'list' },
     { key: 'updated', label: '更新', kind: 'text' }
   ]
-  const SKIP = { backlinks: 1, 'wiki_首页': 1, type: 1, canonical_name: 1, aliases: 1, company: 1, title: 1, '公司类型': 1, '所属行业': 1, '中文名': 1, source: 1, summary: 1, tags: 1, updated: 1 }
+  const SKIP = { backlinks: 1, 'wiki_首页': 1, source: 1, summary: 1, product: 1 }
+  FIELDS.forEach(f => { SKIP[f.key] = 1 })
+
+  // 规范化当前 type：小写 legacy / product 旧值 → 映射到 TitleCase
+  const rawType = (fm['type'] || '').toString().trim()
+  const tLower = rawType.toLowerCase()
+  const matched = TYPES.find(t => t.toLowerCase() === tLower)
+    || (tLower === 'product' ? 'Project' : null)
+
   let html = '<div class="fm-edit-form">'
   FIELDS.forEach(f => {
+    if (f.typeSet && f.typeSet !== matched) return
     const raw = fm[f.key]
     const val = Array.isArray(raw) ? raw.join(', ') : (raw == null ? '' : String(raw))
     html += '<div class="fm-field"><label>' + escapeHtml(f.label) + '</label>'
     if (f.kind === 'select') {
-      const builtin = ['person', 'company', 'chip', 'project', 'product', 'topic']
-      const opts = builtin.concat(CUSTOM_TYPES.filter(t => !builtin.includes(t)))
-      html += '<div class="fm-type-row"><select data-fm="' + f.key + '" data-kind="scalar">' +
-        opts.map(o => '<option value="' + o + '"' + (String(raw) === o ? ' selected' : '') + '>' + o + '</option>').join('') + '</select>' +
-        '<button type="button" data-addtype="1" class="fm-addtype" title="新增自定义类型（共享到所有 Wiki 页）">＋</button></div>'
+      // 把 legacy 小写 / product 旧值也列出来，避免下拉里没有当前值导致选不中
+      const base = TYPES.slice()
+      if (rawType && !base.includes(rawType)) base.push(rawType)
+      const opts = base.concat(CUSTOM_TYPES.filter(t => !base.includes(t)))
+      html += '<div class="fm-type-row"><select data-fm="type" data-kind="scalar">' +
+        opts.map(o => '<option value="' + o + '"' + (rawType === o ? ' selected' : '') + '>' + o + '</option>').join('') + '</select>' +
+        '<button type="button" data-addtype="1" class="fm-addtype" title="新增自定义类型（共享到所有 WiKi 页）">＋</button></div>'
     } else if (f.kind === 'textarea') {
-      html += '<textarea data-fm="' + f.key + '" data-kind="scalar">' + escapeHtml(val) + '</textarea>'
+      html += '<textarea data-fm="' + escapeAttr(f.key) + '" data-kind="scalar">' + escapeHtml(val) + '</textarea>'
     } else {
       const kind = f.kind === 'list' ? 'list' : 'scalar'
-      html += '<input type="text" data-fm="' + f.key + '" data-kind="' + kind + '" value="' + escapeAttr(val) + '">'
+      html += '<input type="text" data-fm="' + escapeAttr(f.key) + '" data-kind="' + kind + '" value="' + escapeAttr(val) + '">'
     }
     html += '</div>'
   })
-  // 未知额外字段（除托管字段外）也一并可编辑
+  // 反向链接：只读展示（来源/生成由 pipeline 自动维护，禁止手动编辑以防破坏）
+  const bl = fm['backlinks']
+  if (Array.isArray(bl) && bl.length) {
+    html += '<div class="fm-field"><label>反向链接</label><div class="fm-readonly fm-backlinks">'
+    bl.forEach(b => { html += '<span class="fm-backlink-pill">' + escapeHtml(b) + '</span> ' })
+    html += '</div></div>'
+  }
+  // 未知额外字段（除托管/已弃用键外）保留可编辑能力
   Object.keys(fm).forEach(k => {
+    if (SKIP[k.toLowerCase()]) return
     if (SKIP[k]) return
     const raw = fm[k]
     const val = Array.isArray(raw) ? raw.join(', ') : (raw == null ? '' : String(raw))
