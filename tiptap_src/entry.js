@@ -83,6 +83,31 @@ function parseFrontmatter(lines) {
   return fm
 }
 // ————————————————————————————————————————————————————————————————
+//  双兼容 key 归一化（v2.2.32）：用户 wiki page frontmatter 改为中文 key；
+//  pipeline 写入路径仍可能写出 PascalCase，因此展示层统一折叠到内部 canonical key。
+//  仅做只读展示，不会改写已保存的 frontmatter 文件（保存路径走 serializeFrontmatter 用原 key 名）。
+// ————————————————————————————————————————————————————————————————
+const KEY_ALIASES = {
+  类型: 'type', Type: 'type', type: 'type',
+  规范名: 'canonical_name', CanonicalName: 'canonical_name', canonical_name: 'canonical_name', canonicalname: 'canonical_name',
+  别名: 'aliases', Aliases: 'aliases', aliases: 'aliases',
+  标签: 'tags', Tags: 'tags', tags: 'tags',
+  更新时间: 'updated', Updated: 'updated', updated: 'updated',
+  反向链接: 'backlinks', Backlinks: 'backlinks', backlinks: 'backlinks',
+  公司: 'company', Company: 'company', company: 'company',
+  职位: 'title', Title: 'title', title: 'title'
+}
+function fmCanonical(k) { return KEY_ALIASES[k] || k }
+function fmNormalize(fm) {
+  const out = {}
+  const seen = new Set()
+  for (const k of Object.keys(fm)) {
+    const c = fmCanonical(k)
+    if (!seen.has(c)) { out[c] = fm[k]; seen.add(c) }
+  }
+  return out
+}
+// ————————————————————————————————————————————————————————————————
 //  frontmatter 属性 banner（数据驱动：读 page 实际 frontmatter 键 → 全部显示 → 仅做键名→中文翻译）
 // ————————————————————————————————————————————————————————————————
 // 已知键的展示顺序；page 中出现的未知键保持原顺序追加到末尾（backlinks 固定最后）
@@ -950,7 +975,7 @@ window.MMEditor = {
   loadMarkdown(mdText, editable, mode, autoLink) {
     const sp = splitFrontmatter(mdText || '')
     pendingFrontmatter = sp.fmRaw
-    currentFM = sp.fmRaw ? parseFrontmatter(sp.fmRaw.split('\n').slice(1, -1)) : {}
+    currentFM = sp.fmRaw ? fmNormalize(parseFrontmatter(sp.fmRaw.split('\n').slice(1, -1))) : {}
     currentEditable = editable !== false
     // 顶部属性 banner：属性表单**始终内联可编辑**（与正文同处一个编辑器窗口），
     // 不再需要"编辑属性"按钮，也不再弹独立窗口。只读场景（搜索结果）仍展示只读表。

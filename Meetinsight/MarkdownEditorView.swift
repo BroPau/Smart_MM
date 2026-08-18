@@ -414,7 +414,7 @@ fileprivate enum EditorHTML {
     }
     function renderFrontmatterBanner(fm){
       if (!fm || Object.keys(fm).length === 0) return '';
-      var SKIP = {'Backlinks': 1, 'SuspectedAliasOf': 1};
+      var SKIP = {'Backlinks':1, '反向链接':1, 'SuspectedAliasOf':1, 'suspected_alias_of':1};
       var rows = [];
       function addRow(label, value){
         if (value === undefined || value === null) return;
@@ -423,27 +423,51 @@ fileprivate enum EditorHTML {
         if (!v || v === '(空)') return;
         rows.push('<tr><th>'+esc(label)+'</th><td>'+esc(v)+'</td></tr>');
       }
+      // 双兼容 picker：依次尝试多个 key（中文 → PascalCase → 小写），返回第一个非空值。
+      // 兼容用户后续单独改 frontmatter key 走中文（v2.2.32 路径），不再受历史 PascalCase 文件影响。
+      function pick(){
+        for (var i=1; i<arguments.length; i++){
+          var k = arguments[i]; var v = arguments[0][k];
+          if (v !== undefined && v !== null && String(v).trim() !== '') return v;
+        }
+        return undefined;
+      }
+      function pickStr(){ var v=pick.apply(null,arguments); return v===undefined?'':String(v).trim(); }
+      function pickArr(){ var v=pick.apply(null,arguments); if (v===undefined) return undefined; if (Array.isArray(v)) return v; var s=String(v).trim().replace(/^[\\[\\(](.*)[\\]\\)]$/,'$1'); return s?s.split(/[,，、]/).map(function(x){return x.trim();}).filter(Boolean):[]; }
       var TYPE_LABEL = {'Person':'👤 人名','Company':'🏢 公司','Chip':'🔌 芯片','Project':'📦 项目','Topic':'📚 主题','Method':'🛠 方法'};
-      var tRaw = (fm['Type']||'').toString().trim();
+      var tRaw = pickStr(fm, '类型', 'Type', 'type');
       var tLabel = TYPE_LABEL[tRaw] || tRaw || '—';
       addRow('类型', tLabel);
-      var cn = (fm['CanonicalName']||'').toString().trim();
+      var cn = pickStr(fm, '规范名', 'CanonicalName', 'canonical_name', 'canonicalname');
       if (cn) addRow('规范名', cn);
-      addRow('别名', fm['Aliases']);
+      var aliasesVal = pickArr(fm, '别名', 'Aliases', 'aliases');
+      if (aliasesVal && aliasesVal.length) addRow('别名', aliasesVal);
       // 按类型自适应展示专属字段（仿 Obsidian 属性面板：person / company / chip 各自一套）
       if (tRaw === 'Person') {
-        addRow('中文名', fm['中文名']); addRow('公司', fm['Company']); addRow('职位', fm['Title']); addRow('职能范围', fm['职能范围']);
+        addRow('中文名', pick(fm, '中文名'));
+        addRow('公司',   pick(fm, '公司', 'Company', 'company'));
+        addRow('职位',   pick(fm, '职位', 'Title', 'title'));
+        addRow('职能范围', pick(fm, '职能范围'));
       } else if (tRaw === 'Company') {
-        addRow('公司类型', fm['公司类型']); addRow('所属行业', fm['所属行业']); addRow('公司简介', fm['公司简介']);
+        addRow('公司类型', pick(fm, '公司类型'));
+        addRow('所属行业', pick(fm, '所属行业'));
+        addRow('公司简介', pick(fm, '公司简介'));
       } else if (tRaw === 'Chip') {
-        addRow('品牌', fm['品牌']); addRow('具体型号', fm['具体型号']); addRow('类别', fm['类别']);
-        addRow('功能简述', fm['功能简述']); addRow('状态', fm['状态']); addRow('替代料', fm['替代料']);
+        addRow('品牌',     pick(fm, '品牌'));
+        addRow('具体型号', pick(fm, '具体型号'));
+        addRow('类别',     pick(fm, '类别'));
+        addRow('功能简述', pick(fm, '功能简述'));
+        addRow('状态',     pick(fm, '状态'));
+        addRow('替代料',   pick(fm, '替代料'));
       }
-      var tags = fm['Tags'];
+      var tagsRaw = pick(fm, '标签', 'Tags', 'tags');
+      var tags = tagsRaw;
       if (Array.isArray(tags)) tags = tags.filter(function(x){ return x && x!=='wiki' && x.toLowerCase()!==tRaw.toLowerCase(); });
-      addRow('标签', tags); addRow('更新', fm['Updated']);
+      if (tags !== undefined && (Array.isArray(tags) ? tags.length : String(tags).trim() !== '')) addRow('标签', tags);
+      var upd = pick(fm, '更新时间', 'Updated', 'updated');
+      if (upd !== undefined) addRow('更新时间', upd);
       // 兜底：未在上方显式列出的其它字段（含自定义类型字段）也不遗漏
-      var KNOWN = ['Type','CanonicalName','Aliases','中文名','Company','Title','职能范围','公司类型','所属行业','公司简介','品牌','具体型号','类别','功能简述','状态','替代料','Tags','Updated','Backlinks','SuspectedAliasOf'];
+      var KNOWN = ['类型','Type','type','规范名','CanonicalName','canonical_name','canonicalname','别名','Aliases','aliases','中文名','公司','Company','company','职位','Title','title','职能范围','公司类型','所属行业','公司简介','品牌','具体型号','类别','功能简述','状态','替代料','标签','Tags','tags','更新时间','Updated','updated','反向链接','Backlinks','backlinks','SuspectedAliasOf','suspected_alias_of'];
       Object.keys(fm).forEach(function(k){
         if (SKIP[k]) return;
         if (KNOWN.indexOf(k) >= 0) return;
