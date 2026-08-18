@@ -2,10 +2,15 @@
 //  WikiPropertySheet.swift
 //  Meetinsight
 //
-//  「新增 / 编辑 Wiki 页」全量属性表单 —— 仿照 Obsidian 笔记属性面板：
-//    类型 / 规范名 / 别名 / 公司 / 职位 / 职能范围 / 标签 / 更新 / 反向链接 / 概要，
-//    并按 type 动态显示 person / company / chip 三类专属字段。
+//  「新增 / 编辑 WiKi 页」属性表单 —— 仿 Obsidian 笔记属性面板：
+//    通用字段：类型 / 规范名 / 别名 / 标签 / 更新 / 反向链接
+//    按 type 动态显示对应专属字段（其它类型的字段自动折叠，零空白）：
+//      Person  → 中文名 / 公司 / 职位 / 职能范围
+//      Company → 公司类型 / 所属行业 / 公司简介
+//      Chip    → 品牌 / 具体型号 / 类别 / 功能简述 / 状态 / 替代料
+//    字段顺序与 Obsidian 面板一致；类型值统一 TitleCase；所有标签中文显示。
 //  独立 NSWindow 模态弹窗，自带 type 切换时字段显隐、aliases/tags 标签 pill 增删。
+//  自定义类型（持久化到 custom_types.json）只会显示通用字段。
 //
 
 import Cocoa
@@ -477,10 +482,10 @@ final class WikiPropertySheet: NSViewController {
         typeRowStack.translatesAutoresizingMaskIntoConstraints = false
         addTypeBtn.setContentHuggingPriority(.required, for: .horizontal)
         let mainStack = NSStackView(views: [
-            makeFieldRow(label: "规范名", control: nameField),
             makeFieldRow(label: "类型",   control: typeRowStack),
-            makeFieldRow(label: "别名",   control: aliasesField),
+            makeFieldRow(label: "规范名", control: nameField),
             personRows,
+            makeFieldRow(label: "别名",   control: aliasesField),
             companyRows,
             chipRows,
             makeFieldRow(label: "标签",   control: tagsField),
@@ -491,6 +496,10 @@ final class WikiPropertySheet: NSViewController {
         mainStack.spacing = 6
         mainStack.alignment = .leading
         mainStack.translatesAutoresizingMaskIntoConstraints = false
+        // 关键：让 person/company/chipRows 被 isHidden=true 时**真正折叠**（不留空白）。
+        // NSStackView 的 detachesHiddenViews 默认 false，会让被隐藏的 arrangedSubview
+        // 仍然占据布局空间 —— 这就是之前「类型选 Company 时还是看到一大片 Person/Chip 空字段」的根因。
+        mainStack.detachesHiddenViews = true
 
         // —— 底部按钮 ——
         confirmBtn = NSButton(title: "确定", target: self, action: #selector(confirm))
@@ -545,26 +554,31 @@ final class WikiPropertySheet: NSViewController {
         return scroll
     }
 
-    /// 把 popup 的 display title 翻译回内部 type 值。
+    /// 把 popup 的 display title 翻译回内部 type 值（TitleCase token）。
     private func typeFromLabel(_ label: String) -> String {
-        // label 形如 "👤 人名 (person)"
-        if let range = label.range(of: "(") {
-            let inside = label[label.index(range.upperBound, offsetBy: 0)..<label.endIndex]
-            let stripped = inside.dropLast()  // remove ")"
-            return String(stripped)
+        // 新格式："👤 Person" / "🏢 Company" / ... —— 去掉开头 emoji 与前导空格即可。
+        // 同时兼容历史格式 "👤 人名 (Person)"（去掉括号内部）和自定义类型 "📄 FooBar"。
+        if let l = label.range(of: "(")?.lowerBound,
+           let r = label.range(of: ")", range: l..<label.endIndex) {
+            return String(label[label.index(after: l)..<r.lowerBound])
         }
-        return "Person"
+        // 去掉 emoji（粗略：去掉首个 token 前的空格分界，截取第二段；并去掉尾部空格）。
+        if let sp = label.firstIndex(of: " ") {
+            return String(label[label.index(after: sp)...]).trimmingCharacters(in: .whitespaces)
+        }
+        return label
     }
 
     private func label(forType t: String) -> String {
+        // 严格 TitleCase（如用户要求「类型用首字母大写」），emoji 保持辨识度。
         switch t {
-        case "Person":  return "👤 人名 (Person)"
-        case "Company": return "🏢 公司 (Company)"
-        case "Chip":    return "🔌 芯片 (Chip)"
-        case "Project": return "📦 项目 (Project)"
-        case "Topic":   return "📚 主题 (Topic)"
-        case "Method":  return "🛠 方法 (Method)"
-        default:        return "\(t) (\(t))"
+        case "Person":  return "👤 Person"
+        case "Company": return "🏢 Company"
+        case "Chip":    return "🔌 Chip"
+        case "Project": return "📦 Project"
+        case "Topic":   return "📚 Topic"
+        case "Method":  return "🛠 Method"
+        default:        return "📄 \(t)"
         }
     }
 
