@@ -640,26 +640,32 @@ fileprivate enum TipTapEditorHTML {
       .fm-table th, .fm-table td { padding: 5px 10px; vertical-align: top; text-align: left; border-bottom: 1px dashed #e2e3e8; }
       .fm-table th { color: #6b6b75; font-weight: 500; width: 96px; white-space: nowrap; }
       .fm-table td { color: #1c1c1e; word-break: break-word; }
-      /* —— Obsidian 风格属性网格（只读 + 编辑通用） —————————————— */
-      .fm-grid { display: flex; flex-direction: column; margin-top: 2px; }
-      .fm-row { display: flex; align-items: flex-start; gap: 8px; padding: 3px 4px; border-radius: 6px; }
-      .fm-row:hover { background: rgba(0,0,0,0.045); }
+      /* —— Obsidian 风格属性网格（只读 + 编辑通用） ——————————————
+         真正标签在左、值在右同行：grid 列第一列按最长 label 自适应，
+         第二列占剩余空间；长文本字段（公司简介 / 职能范围 / 功能简述等）
+         跨整列单独成行，不再被压缩到右侧窄列，编辑时立即可见内容。 */
+      .fm-grid { display: grid; grid-template-columns: minmax(80px, max-content) 1fr; row-gap: 2px; column-gap: 10px; margin-top: 2px; align-items: start; }
+      .fm-row { display: contents; }
+      .fm-row:hover { background: rgba(0,0,0,0.045); border-radius: 6px; }
+      .fm-row:hover > .fm-row-label, .fm-row:hover > .fm-row-value { background: rgba(0,0,0,0.045); }
       .fm-row-label {
-        display: flex; align-items: center; gap: 6px; flex: 0 0 148px;
-        color: #6b6b75; font-weight: 500; font-size: 13px; padding-top: 4px; text-align: left;
-        overflow: hidden; white-space: nowrap;
+        display: flex; align-items: center; gap: 6px;
+        color: #6b6b75; font-weight: 500; font-size: 13px; padding-top: 6px; text-align: left;
+        overflow: hidden; white-space: nowrap; min-height: 26px;
       }
       .fm-icon { font-size: 13px; width: 16px; text-align: center; opacity: 0.82; flex: 0 0 auto; }
-      .fm-key { overflow: hidden; text-overflow: ellipsis; }
-      .fm-row-value { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
-      .fm-row-value input[type="text"], .fm-row-value input[type="date"], .fm-row-value select, .fm-row-value textarea {
+      .fm-key { overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
+      /* 值列默认块级：input 占满单元格，不再用 flex 嵌套，避免 width:100% 撑爆 */
+      .fm-row-value { min-width: 0; padding: 3px 0; }
+      .fm-row-value > input[type="text"], .fm-row-value > input[type="date"], .fm-row-value > select, .fm-row-value > textarea {
         font-family: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid #e2e3e8;
         border-radius: 6px; background: #fff; color: #1c1c1e; width: 100%; box-sizing: border-box;
+        display: block;
       }
       .fm-row-value input:focus, .fm-row-value select:focus, .fm-row-value textarea:focus {
         outline: none; border-color: #2f6fdb; box-shadow: 0 0 0 2px rgba(47,111,219,0.12); background: #fff;
       }
-      .fm-row-value textarea { resize: vertical; min-height: 48px; }
+      .fm-row-value textarea { resize: vertical; min-height: 56px; line-height: 1.55; }
       .fm-select { appearance: none; -webkit-appearance: none; background: #fff; cursor: pointer; }
       /* 类型行：下拉 + ＋ 按钮 */
       .fm-type-row { display: flex; gap: 6px; align-items: center; width: 100%; }
@@ -669,8 +675,8 @@ fileprivate enum TipTapEditorHTML {
         background: #fff; color: #2f6fdb; border: 1px solid #c8d6f5; border-radius: 6px; cursor: pointer;
       }
       .fm-addtype:hover { background: #eef3ff; }
-      /* 列表字段 → chips（别名 / 标签） */
-      .fm-chips { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; width: 100%; }
+      /* 列表字段 → chips（别名 / 标签）：位于一个普通块容器，input 占满 */
+      .fm-chips { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; border: 1px solid #e2e3e8; padding: 4px 6px; border-radius: 6px; background: #fff; min-height: 30px; }
       .fm-chip {
         display: inline-flex; align-items: center; gap: 3px; padding: 2px 6px; max-width: 100%;
         background: #eef3ff; color: #2f6fdb; border: 1px solid #c8d6f5; border-radius: 5px;
@@ -679,27 +685,32 @@ fileprivate enum TipTapEditorHTML {
       .fm-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .fm-chip-x { border: none; background: transparent; color: inherit; cursor: pointer; font-size: 13px; line-height: 1; padding: 0 2px; opacity: 0.65; }
       .fm-chip-x:hover { opacity: 1; }
-      .fm-chip-add { flex: 1 1 60px; min-width: 60px; width: auto !important; border: 1px dashed #c8d6f5 !important; background: transparent !important; color: #6b6b75 !important; font-size: 12px; }
+      .fm-chip-add { flex: 1 1 60px; min-width: 60px; width: auto !important; border: 1px dashed #c8d6f5 !important; background: transparent !important; color: #6b6b75 !important; font-size: 12px; padding: 2px 4px !important; border-radius: 4px !important; }
+      /* 长文本字段：跨整列单独成行；标签独占一行、值独占一行（标签上方对齐 textarea 顶部） */
+      .fm-row-long > .fm-row-label { padding-top: 4px; align-self: start; }
+      .fm-row-long > .fm-row-value { grid-column: 1 / -1; padding-top: 0; padding-bottom: 4px; }
       /* 日期 / 标量 / 长文本只读 */
       .fm-date { cursor: pointer; }
       .fm-date-val, .fm-scalar-val, .fm-longtext-val { color: #1c1c1e; line-height: 1.6; }
       .fm-longtext-val { white-space: pre-wrap; }
       .fm-empty { color: #9a9aa2; }
       /* 反向链接只读区：pill 形 chip 串展示，不允许手动编辑（防破坏自动维护的双链） */
-      .fm-readonly { font-size: 13px; color: #1c1c1e; line-height: 1.9; padding: 2px 0; }
+      .fm-readonly { font-size: 13px; color: #1c1c1e; line-height: 1.9; padding: 6px 0; }
       .fm-backlink-pill {
         display: inline-block; padding: 1px 8px; margin: 1px 4px 1px 0;
         background: #eef3ff; color: #2f6fdb; border: 1px solid #c8d6f5; border-radius: 4px;
         font-size: 12px; font-family: inherit;
       }
-      /* 添加笔记属性 */
-      .fm-add-row { margin-top: 4px; }
+      /* 添加笔记属性：整列占满（跨两列） */
+      .fm-add-row { grid-column: 1 / -1; margin-top: 6px; }
       .fm-add-prop {
         padding: 3px 8px; font-size: 12px; font-family: inherit;
         background: transparent; color: #2f6fdb; border: none; border-radius: 6px; cursor: pointer; text-align: left;
       }
       .fm-add-prop:hover { background: rgba(47,111,219,0.08); }
-      .fm-row-new .fm-newkey, .fm-row-new .fm-newval { border: 1px solid #e2e3e8 !important; background: #fff; font-size: 13px; padding: 3px 7px; border-radius: 6px; width: 100%; }
+      /* 新属性输入行：键占第 1 列、值占第 2 列 */
+      .fm-row-new { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(80px, max-content) 1fr; gap: 10px; }
+      .fm-row-new .fm-newkey, .fm-row-new .fm-newval { border: 1px solid #e2e3e8 !important; background: #fff; font-size: 13px; padding: 4px 8px; border-radius: 6px; width: 100%; box-sizing: border-box; display: block; }
 
       /* —— 编辑器容器 —————————————————————————————————————————— */
       #editor { position: relative; max-width: 860px; margin: 0 auto; }
@@ -798,11 +809,11 @@ fileprivate enum TipTapEditorHTML {
         .fm-table td { color: #ebebf0; }
         .fm-table th, .fm-table td { border-bottom-color: #3a3a40; }
         /* Obsidian 属性网格（深色） */
-        .fm-row:hover { background: rgba(255,255,255,0.05); }
+        .fm-row:hover > .fm-row-label, .fm-row:hover > .fm-row-value { background: rgba(255,255,255,0.05); }
         .fm-row-label { color: #b8b8c0; }
-        .fm-row-value input[type="text"], .fm-row-value input[type="date"], .fm-row-value select, .fm-row-value textarea {
+        .fm-row-value > input[type="text"], .fm-row-value > input[type="date"], .fm-row-value > select, .fm-row-value > textarea {
           font-family: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid #4a4a52;
-          border-radius: 6px; background: #2c2c32; color: #ebebf0; width: 100%; box-sizing: border-box;
+          border-radius: 6px; background: #2c2c32; color: #ebebf0; width: 100%; box-sizing: border-box; display: block;
         }
         .fm-row-value input:focus, .fm-row-value select:focus, .fm-row-value textarea:focus {
           outline: none; border-color: #74b1ff; box-shadow: 0 0 0 2px rgba(116,177,255,0.18); background: #2c2c32;
@@ -812,8 +823,9 @@ fileprivate enum TipTapEditorHTML {
         .fm-addtype:hover { background: #3a3a52; }
         .fm-chip { background: rgba(116,177,255,0.15); color: #74b1ff; border: 1px solid #3a4a5e; }
         .fm-chip-add { border: 1px dashed #3a4a5e !important; background: transparent !important; color: #b8b8c0 !important; }
+        .fm-chips { background: #2c2c32; border-color: #4a4a52; }
         .fm-date-val, .fm-scalar-val, .fm-longtext-val { color: #ebebf0; }
-        .fm-readonly { font-size: 13px; color: #ebebf0; line-height: 1.9; padding: 2px 0; }
+        .fm-readonly { font-size: 13px; color: #ebebf0; line-height: 1.9; padding: 6px 0; }
         .fm-backlink-pill {
           display: inline-block; padding: 1px 8px; margin: 1px 4px 1px 0;
           background: rgba(116,177,255,0.15); color: #74b1ff; border: 1px solid #3a4a5e; border-radius: 4px;

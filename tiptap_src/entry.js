@@ -173,8 +173,11 @@ function renderFrontmatterBanner(fm) {
       rows.push(fmRowHtml(icon, label, '<span class="fm-date-val">' + escapeHtml(dv) + '</span>'))
     } else if (t === 'longtext') {
       const dv = (fm[k] == null ? '' : String(fm[k])).trim()
-      if (!dv) return
-      rows.push(fmRowHtml(icon, label, '<div class="fm-longtext-val">' + escapeHtml(dv) + '</div>'))
+      // 长文本即使为空也保留一行「（空）」占位，确保该字段始终在 banner 中可见、可被定位
+      const inner = dv
+        ? '<div class="fm-longtext-val">' + escapeHtml(dv) + '</div>'
+        : '<div class="fm-longtext-val fm-empty">（空）</div>'
+      rows.push(fmRowHtml(icon, label, inner, { long: true }))
     } else {
       const dv = fmDisplay(fm[k])
       if (!dv) return
@@ -184,9 +187,10 @@ function renderFrontmatterBanner(fm) {
   if (rows.length === 0) return ''
   return '<div class="fm-grid">' + rows.join('') + '</div>'
 }
-// 共享：单行 [图标 + 标签] + [值]
-function fmRowHtml(icon, label, valueHtml) {
-  return '<div class="fm-row"><div class="fm-row-label"><span class="fm-icon">' + icon + '</span><span class="fm-key">' + escapeHtml(label) + '</span></div>' +
+// 共享：单行 [图标 + 标签] + [值]；long=true 时整行跨列（label 一行 + value 一行）
+function fmRowHtml(icon, label, valueHtml, opts) {
+  const cls = (opts && opts.long) ? 'fm-row fm-row-long' : 'fm-row'
+  return '<div class="' + cls + '"><div class="fm-row-label"><span class="fm-icon">' + icon + '</span><span class="fm-key">' + escapeHtml(label) + '</span></div>' +
     '<div class="fm-row-value">' + valueHtml + '</div></div>'
 }
 
@@ -1118,7 +1122,10 @@ function renderBannerEditForm(fm) {
       const blHtml = renderBacklinks(fm[k])
       valHtml = '<div class="fm-readonly">' + (blHtml || '<span class="fm-empty">（空）</span>') + '</div>'
     } else if (t === 'longtext') {
-      valHtml = '<textarea data-fm="' + escapeAttr(k) + '" data-kind="scalar" class="fm-textarea">' + escapeHtml(fm[k] == null ? '' : String(fm[k])) + '</textarea>'
+      // 长文本：textarea 跨整行（label 一行 + value 一行），不挤压到右侧窄列
+      valHtml = '<textarea data-fm="' + escapeAttr(k) + '" data-kind="scalar" class="fm-textarea" placeholder="（空）" rows="3">' + escapeHtml(fm[k] == null ? '' : String(fm[k])) + '</textarea>'
+      html += fmRowHtml(icon, label, valHtml, { long: true })
+      return  // 跳到下一次 forEach（已写入）
     } else {
       valHtml = '<input type="text" data-fm="' + escapeAttr(k) + '" data-kind="scalar" value="' + escapeAttr(fm[k] == null ? '' : String(fm[k])) + '" class="fm-text">'
     }
