@@ -81,57 +81,86 @@ function parseFrontmatter(lines) {
   }
   return fm
 }
+// ————————————————————————————————————————————————————————————————
+//  frontmatter 属性 banner（数据驱动：读 page 实际 frontmatter 键 → 全部显示 → 仅做键名→中文翻译）
+// ————————————————————————————————————————————————————————————————
+// 键名 → 中文标签（只翻译，不猜测 / 不新增 / 不丢弃字段）
+const FM_LABEL = {
+  type: '类型',
+  canonical_name: '规范名',
+  aliases: '别名',
+  中文名: '中文名',
+  company: '公司',
+  title: '职位',
+  职能范围: '职能范围',
+  公司类型: '公司类型',
+  所属行业: '所属行业',
+  公司简介: '公司简介',
+  品牌: '品牌',
+  具体型号: '具体型号',
+  类别: '类别',
+  功能简述: '功能简述',
+  状态: '状态',
+  替代料: '替代料',
+  tags: '标签',
+  updated: '更新',
+  backlinks: '反向链接'
+}
+// 已知键的展示顺序；page 中出现的未知键保持原顺序追加到末尾（backlinks 固定最后）
+const FM_ORDER = [
+  'type', 'canonical_name', '中文名', 'company', 'title', '职能范围',
+  '公司类型', '所属行业', '公司简介',
+  '品牌', '具体型号', '类别', '功能简述', '状态', '替代料',
+  'aliases', 'tags', 'updated', 'backlinks'
+]
+// 内部标记键，不展示（如 MOC 首页的 wiki_首页 标志）
+const FM_SKIP = { wiki_首页: 1 }
+// type 值 → emoji 前缀（仅展示增强，不影响数据）
+const FM_TYPE_EMOJI = { person: '👤', company: '🏢', chip: '🔌', project: '📦', topic: '📚', method: '🛠', product: '📦' }
+
+// 按 FM_ORDER 排序已知键，未知键按出现顺序追加（剔除 FM_SKIP）
+function fmOrderedKeys(fm) {
+  const known = FM_ORDER.filter(k => Object.prototype.hasOwnProperty.call(fm, k))
+  const unknown = Object.keys(fm).filter(k => !FM_ORDER.includes(k) && !FM_SKIP[k])
+  return known.concat(unknown)
+}
+// 值 → 展示字符串（数组用「、」连接；剥离外层 [] / () / 引号）
+function fmDisplay(v) {
+  if (v === undefined || v === null) return ''
+  let s = Array.isArray(v) ? v.map(x => String(x).trim()).filter(Boolean).join('、') : String(v).trim()
+  s = s.replace(/^[\[\(](.*)[\]\)]$/, '$1').replace(/^["“”']|["“”']$/g, '')
+  return s
+}
+// 反向链接 → 只读 pill HTML（兼容数组 / 字符串 / [[..|..]] 语法）；无内容返回 ''
+function renderBacklinks(bl) {
+  if (!bl) return ''
+  let items = Array.isArray(bl) ? bl.slice() : String(bl).split(/[,，、]/)
+  items = items.map(s => String(s).trim()).filter(Boolean)
+  if (!items.length) return ''
+  items = items.map(s => s.replace(/^\[\[/, '').replace(/\]\]$/, '').replace(/\|/g, ' · '))
+  return '<span class="fm-backlinks">' +
+    items.map(s => '<span class="fm-backlink-pill">' + escapeHtml(s) + '</span>').join(' ') +
+    '</span>'
+}
+
+// 只读 banner：遍历 page 全部实际键，全部显示（backlinks 渲染为只读 pill）
 function renderFrontmatterBanner(fm) {
   if (!fm || Object.keys(fm).length === 0) return ''
-  const SKIP = { backlinks: 1, wiki_首页: 1, source: 1, summary: 1, product: 1 }
   const rows = []
-  function addRow(label, value) {
-    if (!value) return
-    let v = Array.isArray(value) ? value.join('、') : String(value)
-    v = v.replace(/^[\[\(](.*)[\]\)]$/, '$1').replace(/^["“”']|["“”']$/g, '')
-    if (!v || v === '(空)') return
-    rows.push('<tr><th>' + escapeHtml(label) + '</th><td>' + escapeHtml(v) + '</td></tr>')
-  }
-  // 类型 token 全 TitleCase，emoji 前缀便于一眼识别。统一小写比较，兼容历史脏数据。
-  const TYPE_LABEL = {
-    person:  '👤 Person',
-    company: '🏢 Company',
-    chip:    '🔌 Chip',
-    project: '📦 Project',
-    topic:   '📚 Topic',
-    method:  '🛠 Method',
-    product: '📦 Project'
-  }
-  const tRaw = (fm['type'] || '').toString().trim()
-  const tLower = tRaw.toLowerCase()
-  addRow('类型', TYPE_LABEL[tLower] || tRaw || '—')
-  // 通用：规范名 / 别名 / 标签（去 wiki + 类型） / 更新
-  const cn = (fm['canonical_name'] || '').toString().trim()
-  if (cn) addRow('规范名', cn)
-  addRow('别名', fm['aliases'])
-  // 按 type 显示专属字段（人名/公司/芯片）
-  if (tLower === 'person') {
-    addRow('中文名', fm['中文名']); addRow('公司', fm['company']); addRow('职位', fm['title']); addRow('职能范围', fm['职能范围'])
-  } else if (tLower === 'company') {
-    addRow('公司类型', fm['公司类型']); addRow('所属行业', fm['所属行业']); addRow('公司简介', fm['公司简介'])
-  } else if (tLower === 'chip') {
-    addRow('品牌', fm['品牌']); addRow('具体型号', fm['具体型号']); addRow('类别', fm['类别'])
-    addRow('功能简述', fm['功能简述']); addRow('状态', fm['状态']); addRow('替代料', fm['替代料'])
-  }
-  const tags = fm['tags']
-  if (Array.isArray(tags)) {
-    const filtered = tags.filter(x => x && x !== 'wiki' && x.toLowerCase() !== tLower)
-    addRow('标签', filtered)
-  }
-  addRow('更新', fm['updated'])
-  // 未知字段（兜底展示，Type/通用+专属键/Backlinks/已弃用 跳过）
-  Object.keys(fm).forEach(k => {
-    if (SKIP[k.toLowerCase()]) return
-    if (['type', 'canonical_name', 'aliases', '中文名', 'company', 'title', '职能范围',
-         '公司类型', '所属行业', '公司简介', '品牌', '具体型号', '类别', '功能简述', '状态', '替代料',
-         'tags', 'updated'].includes(k)) return
-    addRow(k, fm[k])
+  fmOrderedKeys(fm).forEach(k => {
+    if (FM_SKIP[k]) return
+    if (k === 'backlinks') return // 单独渲染
+    const label = FM_LABEL[k] || k
+    let disp = fmDisplay(fm[k])
+    if (!disp) return
+    if (k === 'type') {
+      const emoji = FM_TYPE_EMOJI[String(disp).toLowerCase()]
+      if (emoji) disp = emoji + ' ' + disp
+    }
+    rows.push('<tr><th>' + escapeHtml(label) + '</th><td>' + escapeHtml(disp) + '</td></tr>')
   })
+  const blHtml = renderBacklinks(fm['backlinks'])
+  if (blHtml) rows.push('<tr><th>' + escapeHtml(FM_LABEL['backlinks'] || '反向链接') + '</th><td>' + blHtml + '</td></tr>')
   if (rows.length === 0) return ''
   return '<table class="fm-table">' + rows.join('') + '</table>'
 }
@@ -933,7 +962,7 @@ function wireBannerForm(root) {
     }
     el.addEventListener('input', onEdit)
     el.addEventListener('change', onEdit)
-    // 「类型」select 改变后整段重渲染 banner：让 typeSet 字段按新类型显隐。
+    // 「类型」select 改变后整段重渲染 banner（数据驱动：字段来自 page 实际 frontmatter，不再按类型显隐）
     if (el.tagName === 'SELECT' && el.getAttribute('data-fm') === 'type') {
       el.addEventListener('change', () => {
         setTimeout(renderBanner, 0)
@@ -957,82 +986,47 @@ function wireBannerForm(root) {
   })
 }
 
+// 可编辑属性表单（数据驱动）：遍历 page 实际 frontmatter 的全部键，全部可编辑显示，
+// 仅对键名做中文翻译；page 有什么字段就显示什么字段，不再按 type 硬编码字段清单。
 function renderBannerEditForm(fm) {
-  // 类型 token 全部 TitleCase；小写 / 历史 product 兼容到 Project。
+  if (!fm) fm = {}
   const TYPES = ['Person', 'Company', 'Chip', 'Project', 'Topic', 'Method']
-  // 通用字段（始终展示；别名/标签/更新独立放到下面顺序末尾）
-  // typeSet 匹配的字段才会渲染，模拟 Obsidian「按类型切换字段」的效果。
-  const FIELDS = [
-    { key: 'type', label: '类型', kind: 'select' },
-    { key: 'canonical_name', label: '规范名', kind: 'text' },
-    // —— Person 专属 ——
-    { typeSet: 'Person', key: '中文名', label: '中文名', kind: 'text' },
-    { typeSet: 'Person', key: 'company', label: '公司', kind: 'text' },
-    { typeSet: 'Person', key: 'title', label: '职位', kind: 'text' },
-    { typeSet: 'Person', key: '职能范围', label: '职能范围', kind: 'textarea' },
-    // —— Company 专属 ——
-    { typeSet: 'Company', key: '公司类型', label: '公司类型', kind: 'text' },
-    { typeSet: 'Company', key: '所属行业', label: '所属行业', kind: 'text' },
-    { typeSet: 'Company', key: '公司简介', label: '公司简介', kind: 'textarea' },
-    // —— Chip 专属 ——
-    { typeSet: 'Chip', key: '品牌', label: '品牌', kind: 'text' },
-    { typeSet: 'Chip', key: '具体型号', label: '具体型号', kind: 'text' },
-    { typeSet: 'Chip', key: '类别', label: '类别', kind: 'text' },
-    { typeSet: 'Chip', key: '功能简述', label: '功能简述', kind: 'textarea' },
-    { typeSet: 'Chip', key: '状态', label: '状态', kind: 'text' },
-    { typeSet: 'Chip', key: '替代料', label: '替代料', kind: 'text' },
-    // —— 通用（按任意类型都可填） ——
-    { key: 'aliases', label: '别名', kind: 'list' },
-    { key: 'tags', label: '标签', kind: 'list' },
-    { key: 'updated', label: '更新', kind: 'text' }
-  ]
-  const SKIP = { backlinks: 1, 'wiki_首页': 1, source: 1, summary: 1, product: 1 }
-  FIELDS.forEach(f => { SKIP[f.key] = 1 })
-
-  // 规范化当前 type：小写 legacy / product 旧值 → 映射到 TitleCase
   const rawType = (fm['type'] || '').toString().trim()
-  const tLower = rawType.toLowerCase()
-  const matched = TYPES.find(t => t.toLowerCase() === tLower)
-    || (tLower === 'product' ? 'Project' : null)
+  // 已知用 textarea 的长文本字段；其余标量用 input
+  const TEXTAREA_KEYS = { 公司简介: 1, 职能范围: 1, 功能简述: 1, 概要: 1, summary: 1 }
+  // 已知用逗号列表的字段
+  const LIST_KEYS = { aliases: 1, tags: 1 }
 
   let html = '<div class="fm-edit-form">'
-  FIELDS.forEach(f => {
-    if (f.typeSet && f.typeSet !== matched) return
-    const raw = fm[f.key]
+  fmOrderedKeys(fm).forEach(k => {
+    if (FM_SKIP[k]) return
+    if (k === 'backlinks') return // 只读，单独渲染
+    const label = FM_LABEL[k] || k
+    const raw = fm[k]
     const val = Array.isArray(raw) ? raw.join(', ') : (raw == null ? '' : String(raw))
-    html += '<div class="fm-field"><label>' + escapeHtml(f.label) + '</label>'
-    if (f.kind === 'select') {
+    html += '<div class="fm-field"><label>' + escapeHtml(label) + '</label>'
+    if (k === 'type') {
       // 把 legacy 小写 / product 旧值也列出来，避免下拉里没有当前值导致选不中
       const base = TYPES.slice()
       if (rawType && !base.includes(rawType)) base.push(rawType)
       const opts = base.concat(CUSTOM_TYPES.filter(t => !base.includes(t)))
       html += '<div class="fm-type-row"><select data-fm="type" data-kind="scalar">' +
-        opts.map(o => '<option value="' + o + '"' + (rawType === o ? ' selected' : '') + '>' + o + '</option>').join('') + '</select>' +
+        opts.map(o => '<option value="' + escapeAttr(o) + '"' + (rawType === o ? ' selected' : '') + '>' + escapeHtml(o) + '</option>').join('') + '</select>' +
         '<button type="button" data-addtype="1" class="fm-addtype" title="新增自定义类型（共享到所有 WiKi 页）">＋</button></div>'
-    } else if (f.kind === 'textarea') {
-      html += '<textarea data-fm="' + escapeAttr(f.key) + '" data-kind="scalar">' + escapeHtml(val) + '</textarea>'
+    } else if (TEXTAREA_KEYS[k]) {
+      html += '<textarea data-fm="' + escapeAttr(k) + '" data-kind="scalar">' + escapeHtml(val) + '</textarea>'
+    } else if (LIST_KEYS[k]) {
+      html += '<input type="text" data-fm="' + escapeAttr(k) + '" data-kind="list" value="' + escapeAttr(val) + '">'
     } else {
-      const kind = f.kind === 'list' ? 'list' : 'scalar'
-      html += '<input type="text" data-fm="' + escapeAttr(f.key) + '" data-kind="' + kind + '" value="' + escapeAttr(val) + '">'
+      html += '<input type="text" data-fm="' + escapeAttr(k) + '" data-kind="scalar" value="' + escapeAttr(val) + '">'
     }
     html += '</div>'
   })
   // 反向链接：只读展示（来源/生成由 pipeline 自动维护，禁止手动编辑以防破坏）
-  const bl = fm['backlinks']
-  if (Array.isArray(bl) && bl.length) {
-    html += '<div class="fm-field"><label>反向链接</label><div class="fm-readonly fm-backlinks">'
-    bl.forEach(b => { html += '<span class="fm-backlink-pill">' + escapeHtml(b) + '</span> ' })
-    html += '</div></div>'
+  const blHtml = renderBacklinks(fm['backlinks'])
+  if (blHtml) {
+    html += '<div class="fm-field"><label>' + escapeHtml(FM_LABEL['backlinks'] || '反向链接') + '</label><div class="fm-readonly fm-backlinks">' + blHtml + '</div></div>'
   }
-  // 未知额外字段（除托管/已弃用键外）保留可编辑能力
-  Object.keys(fm).forEach(k => {
-    if (SKIP[k.toLowerCase()]) return
-    if (SKIP[k]) return
-    const raw = fm[k]
-    const val = Array.isArray(raw) ? raw.join(', ') : (raw == null ? '' : String(raw))
-    html += '<div class="fm-field"><label>' + escapeHtml(k) + '</label>' +
-      '<input type="text" data-fm="' + escapeAttr(k) + '" data-kind="scalar" value="' + escapeAttr(val) + '"></div>'
-  })
   html += '</div>'
   return html
 }
