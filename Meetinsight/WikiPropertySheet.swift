@@ -176,28 +176,49 @@ final class WikiLinkTextField: NSView, NSTextViewDelegate {
         onChange?()
     }
 
-    /// 扫描 `[[Page]]` / `[[Page|alias]]` / `[[Page#anchor]]`，转成蓝色超链接。
+    /// 扫描 `[[Page]]` / `[[Page|alias]]` / `[[Page#anchor]]` / `[[Page|alias#anchor]]`，转成蓝色超链接。
     /// 不修改用户输入字符，只在显示层加属性。
+    /// v2.2.37 关键修复：
+    ///   1) 不再用 setAttributedString 重置整个 NSTextStorage，避免破坏 IME 中文输入态（markedText）与
+    ///      typing attributes（导致下一字符继承链接颜色 / 下划线）。
+    ///   2) 用 setAttributes(baseAttrs) + addAttributes(linkAttrs) 精准更新：
+    ///      - 全量重置 baseAttrs（清掉上次匹配残留的链接色）
+    ///      - 在 [[...]] 匹配区间叠加 linkAttrs（保留光标处的颜色/字体行为）
+    ///   3) 显式设回 typingAttributes = baseAttrs，确保下一字符按普通文字色渲染。
     private func highlightWikiLinks() {
         let raw = textView.string
-        let attr = NSMutableAttributedString()
-        let baseAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 12),
-            .foregroundColor: NSColor.labelColor
-        ]
-        attr.append(NSAttributedString(string: raw, attributes: baseAttrs))
-        // 正则匹配 `[[Page]]` / `[[Page|alias]]` / `[[Page#anchor]]`
         let pattern = "\\[\\[([^\\]\\n]+?)\\]\\]"
         guard let re = try? NSRegularExpression(pattern: pattern) else { return }
         let nsStr = raw as NSString
         let matches = re.matches(in: raw, range: NSRange(location: 0, length: nsStr.length))
+        guard let storage = textView.textStorage else { return }
+
+        let baseAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 12),
+            .foregroundColor: NSColor.labelColor
+        ]
+
+        // 保护选中区间：setAttributes / addAttributes 会重置 typing attributes 与 selectedRange
+        let selRanges = textView.selectedRanges
+
+        storage.beginEditing()
+        let fullRange = NSRange(location: 0, length: nsStr.length)
+        storage.setAttributes(baseAttrs, range: fullRange)
         for m in matches {
             let r = m.range(at: 1)  // 内容（不含 [[ ]]）
             let content = nsStr.substring(with: r)
-            let pageName = content.components(separatedBy: "|").first ?? content
-            let page = pageName.components(separatedBy: "#").first ?? pageName
-            // 用 meetinsight:// 协议避免被当作系统 URL
-            let urlStr = "meetinsight://open-wiki/\(page.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? page)"
+            // 拆分 alias 与 #anchor（兼容 [[Page|alias#anchor]]）
+            let firstSplit = content.components(separatedBy: "|")
+            let left = firstSplit.first ?? content
+            let pageAndAnchor = left.components(separatedBy: "#")
+            let page = pageAndAnchor.first ?? left
+            let anchor = pageAndAnchor.count > 1 ? pageAndAnchor[1] : ""
+            // 用 meetinsight:// 协议 + 单独 anchor 段避免被当 URL 渲染
+            var urlStr = "meetinsight://open-wiki/\(page.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? page)"
+            if !anchor.isEmpty {
+                let a = (anchor.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? anchor)
+                urlStr += "#\(a)"
+            }
             if let url = URL(string: urlStr) {
                 let linkAttrs: [NSAttributedString.Key: Any] = [
                     .font: NSFont.systemFont(ofSize: 12),
@@ -205,17 +226,15 @@ final class WikiLinkTextField: NSView, NSTextViewDelegate {
                     .underlineStyle: NSUnderlineStyle.single.rawValue,
                     .link: url
                 ]
-                attr.addAttributes(linkAttrs, range: m.range)
+                storage.addAttributes(linkAttrs, range: m.range)
             }
         }
-        // 替换不打断光标：用 NSTextStorage 替换并维护选中区间
-        let selRanges = textView.selectedRanges
-        if let storage = textView.textStorage {
-            storage.beginEditing()
-            storage.setAttributedString(attr)
-            storage.endEditing()
-        }
+        storage.endEditing()
+
+        // 还原选中区间，并把 typing attributes 显式重置为普通文字属性。
+        // 这样后续输入（无论是直接键入还是 IME 提交中文）都按 labelColor 渲染，不会继承链接色。
         textView.selectedRanges = selRanges
+        textView.typingAttributes = baseAttrs
     }
 }
 
@@ -283,22 +302,34 @@ final class WikiLinkTextView: NSView, NSTextViewDelegate {
 
     private func highlightWikiLinks() {
         let raw = textView.string
-        let attr = NSMutableAttributedString()
         let baseAttrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 11),
             .foregroundColor: NSColor.labelColor
         ]
-        attr.append(NSAttributedString(string: raw, attributes: baseAttrs))
         let pattern = "\\[\\[([^\\]\\n]+?)\\]\\]"
         guard let re = try? NSRegularExpression(pattern: pattern) else { return }
         let nsStr = raw as NSString
         let matches = re.matches(in: raw, range: NSRange(location: 0, length: nsStr.length))
+        guard let storage = textView.textStorage else { return }
+        let selRanges = textView.selectedRanges
+
+        storage.beginEditing()
+        let fullRange = NSRange(location: 0, length: nsStr.length)
+        storage.setAttributes(baseAttrs, range: fullRange)
         for m in matches {
             let r = m.range(at: 1)
             let content = nsStr.substring(with: r)
-            let pageName = content.components(separatedBy: "|").first ?? content
-            let page = pageName.components(separatedBy: "#").first ?? pageName
-            let urlStr = "meetinsight://open-wiki/\(page.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? page)"
+            // 拆分 alias 与 #anchor
+            let firstSplit = content.components(separatedBy: "|")
+            let left = firstSplit.first ?? content
+            let pageAndAnchor = left.components(separatedBy: "#")
+            let page = pageAndAnchor.first ?? left
+            let anchor = pageAndAnchor.count > 1 ? pageAndAnchor[1] : ""
+            var urlStr = "meetinsight://open-wiki/\(page.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? page)"
+            if !anchor.isEmpty {
+                let a = (anchor.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? anchor)
+                urlStr += "#\(a)"
+            }
             if let url = URL(string: urlStr) {
                 let linkAttrs: [NSAttributedString.Key: Any] = [
                     .font: NSFont.systemFont(ofSize: 11),
@@ -306,16 +337,12 @@ final class WikiLinkTextView: NSView, NSTextViewDelegate {
                     .underlineStyle: NSUnderlineStyle.single.rawValue,
                     .link: url
                 ]
-                attr.addAttributes(linkAttrs, range: m.range)
+                storage.addAttributes(linkAttrs, range: m.range)
             }
         }
-        let selRanges = textView.selectedRanges
-        if let storage = textView.textStorage {
-            storage.beginEditing()
-            storage.setAttributedString(attr)
-            storage.endEditing()
-        }
+        storage.endEditing()
         textView.selectedRanges = selRanges
+        textView.typingAttributes = baseAttrs
     }
 }
 
@@ -327,11 +354,19 @@ class WikiLinkClickRouter: NSObject, NSTextViewDelegate {
     weak var origDelegate: NSTextViewDelegate?
     func textView(_ textView: NSTextView, clickedOnLink url: URL, at charIndex: Int) -> Bool {
         if url.scheme == "meetinsight" {
-            // 解析 host=open-wiki, path=/PageName
-            let page = url.host == "open-wiki" ? url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")) :
+            // 解析 host=open-wiki, path=/PageName，fragment=#Heading（可选锚点）
+            var page = url.host == "open-wiki" ? url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")) :
                 url.absoluteString.replacingOccurrences(of: "meetinsight://open-wiki/", with: "")
+            var anchor: String? = nil
+            if let frag = url.fragment, !frag.isEmpty { anchor = frag }
+            // 把可能的「.../#Heading」残留段也认作 anchor（防御性，避免 path 含 #）
+            if let hash = page.range(of: "#") {
+                let a = String(page[hash.upperBound...])
+                page = String(page[..<hash.lowerBound])
+                if !a.isEmpty { anchor = a }
+            }
             if !page.isEmpty {
-                WikiLinkRouter.open(name: page)
+                WikiLinkRouter.open(name: page, anchor: anchor)
             }
             return true
         }

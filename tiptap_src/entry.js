@@ -178,32 +178,66 @@ function fmListItems(v) {
   if (!s) return []
   return s.split(/[,，、]/).map(x => x.trim()).filter(Boolean)
 }
-// 把标量 / 长文本值里的 [[Page]] / [[Page|alias]] 渲染成可点击双向链接（只读展示用）
+// 把标量 / 长文本值里的 [[Page]] / [[Page|alias]] / [[Page#anchor]] 渲染成可点击双向链接（只读展示用）
 function renderWikiText(s) {
   if (!s) return ''
   const esc = escapeHtml(s)
   return esc.replace(/\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]/g, (m, p, a) => {
-    const page = (p || '').trim()
+    const target = (p || '').trim()
     const alias = (a || '').trim()
+    if (!target) return m
+    // 支持 [[Page#anchor]] / [[Page|alias#anchor]]
+    let page = target, anchor = ''
+    const h = target.indexOf('#')
+    if (h >= 0) {
+      page = target.slice(0, h).trim()
+      anchor = target.slice(h + 1).trim()
+      if (!page) page = anchor
+    }
     if (!page) return m
+    const anchorAttr = anchor ? ' data-anchor="' + escapeAttr(anchor) + '"' : ''
     return '<a class="wikilink" data-wikilink data-page="' + escapeAttr(page) + '"' +
-      (alias ? ' data-alias="' + escapeAttr(alias) + '"' : '') + '>' + escapeHtml(alias || page) + '</a>'
+      (alias ? ' data-alias="' + escapeAttr(alias) + '"' : '') +
+      anchorAttr + '>' + escapeHtml(alias || page) + '</a>'
   })
 }
-// 反向链接 → 可点击双向链接（兼容数组 / 字符串 / [[..|..]] 语法）；无内容返回 ''
+// 反向链接 → 可点击双向链接。
+// 兼容输入：[[Page]] / [[Page|alias]] / [[Page#anchor]] / [[Page|alias#anchor]] / 纯文本「Page」/ 纯文本「Page#anchor」；
+// 无内容返回 ''。
 function renderBacklinks(bl) {
   if (!bl) return ''
   let items = Array.isArray(bl) ? bl.slice() : String(bl).split(/[,，、]/)
   items = items.map(s => String(s).trim()).filter(Boolean)
   if (!items.length) return ''
-  // 反向链接以 Obsidian 式双链呈现（点击跳转对应笔记，双向可达）
   return items.map(s => {
+    let page = '', alias = '', anchor = ''
+    // 1) 优先匹配 [[...]] 包装
     const m = s.match(/^\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]$/)
-    let page, alias
-    if (m) { page = (m[1] || '').trim(); alias = (m[2] || '').trim() } else { page = s; alias = '' }
+    if (m) {
+      const target = (m[1] || '').trim()
+      alias = (m[2] || '').trim()
+      const h = target.indexOf('#')
+      if (h >= 0) {
+        page = target.slice(0, h).trim()
+        anchor = target.slice(h + 1).trim()
+      } else {
+        page = target
+      }
+    } else {
+      // 2) 兼容纯文本（无 [[]] 包装），仍支持 #anchor
+      const h = s.indexOf('#')
+      if (h >= 0) {
+        page = s.slice(0, h).trim()
+        anchor = s.slice(h + 1).trim()
+      } else {
+        page = s
+      }
+    }
     if (!page) return escapeHtml(s)
+    const anchorAttr = anchor ? ' data-anchor="' + escapeAttr(anchor) + '"' : ''
     return '<a class="wikilink" data-wikilink data-page="' + escapeAttr(page) + '"' +
-      (alias ? ' data-alias="' + escapeAttr(alias) + '"' : '') + '>' + escapeHtml(alias || page) + '</a>'
+      (alias ? ' data-alias="' + escapeAttr(alias) + '"' : '') +
+      anchorAttr + '>' + escapeHtml(alias || page) + '</a>'
   }).join(' ')
 }
 // 合并「宿主下发的 incoming 反向链接（被哪些页引用）」与页面 frontmatter 里的手动 backlinks 字段，去重保序
@@ -569,12 +603,23 @@ function applyWikiLink(view, page, from, to) {
   const markType = state.schema.marks.wikilink
   if (!markType) return
   let tr = state.tr
-  tr.delete(from, to)
+  // 1) 删除 [[query（光标前到 [[ 起始位置）
+  tr = tr.delete(from, to)
+  // 2) 插入 page 文本（覆盖原 [[query）
   const text = page
-  tr.insertText(text, from)
+  tr = tr.insertText(text, from)
   const end = from + text.length
-  tr.addMark(from, end, markType.create({ page: page, alias: null }))
-  tr.setSelection(TextSelection.create(tr.doc, end))
+  // 3) 同步消耗紧随其后的 ]]（autoPair 自动插入的双方括号闭合符）。
+  //    原文档：[[query]]  删 from..to 后只剩 ]]  插 text 后变成 text]]
+  //    删 end..end+2 让 wikilink 干净收尾，光标落在链接末尾而不是 ]] 之前。
+  if (end + 2 <= tr.doc.content.size) {
+    const after = tr.doc.textBetween(end, Math.min(end + 2, tr.doc.content.size), undefined, '￼')
+    if (after === ']]') {
+      tr = tr.delete(end, end + 2)
+    }
+  }
+  tr = tr.addMark(from, end, markType.create({ page: page, alias: null }))
+  tr = tr.setSelection(TextSelection.create(tr.doc, end))
   view.dispatch(tr)
 }
 
@@ -629,7 +674,8 @@ class WikiAutocompleteView {
     if (this.index >= s.items.length) this.index = 0
     let html = ''
     s.items.forEach((it, i) => {
-      html += '<div class="wiki-ac-item' + (i === this.index ? ' active' : '') + '" data-idx="' + i + '">' + escapeHtml(it) + '</div>'
+      const label = (it && typeof it === 'object') ? it.label : String(it)
+      html += '<div class="wiki-ac-item wiki-ac-' + (it && it.kind) + (i === this.index ? ' active' : '') + '" data-idx="' + i + '">' + escapeHtml(label) + '</div>'
     })
     this.box.innerHTML = html
     this.box.style.display = 'block'
@@ -643,7 +689,9 @@ class WikiAutocompleteView {
   select(i) {
     const s = wikiAcKey.getState(this.view.state)
     if (!s || !s.items[i]) return
-    applyWikiLink(this.view, s.items[i], s.from, s.to)
+    const it = s.items[i]
+    const value = (it && typeof it === 'object') ? it.value : String(it)
+    applyWikiLink(this.view, value, s.from, s.to)
     this.box.style.display = 'none'
     this.index = 0
   }
@@ -667,9 +715,18 @@ const autocompletePlugin = new Plugin({
       if (!m) return { active: false, items: [], index: 0 }
       const from = $from.pos - m[0].length
       const query = m[1]
-      const items = (window.__wikiPages || [])
-        .filter(p => p.toLowerCase().includes(query.toLowerCase()))
-        .slice(0, 8)
+      const q = (query || '').toLowerCase()
+      // 候选：先列页面（来自宿主下发的 __wikiPages），再列当前页的标题（__currentHeadings），
+      // 用「#」前缀区分，让用户能直接选段落锚点（点击后插入 [[#Heading]] → 同页跳转锚点）。
+      const pages = (window.__wikiPages || [])
+        .filter(p => p.toLowerCase().includes(q))
+        .slice(0, 6)
+        .map(name => ({ kind: 'page', label: name, value: name }))
+      const heads = (window.__currentHeadings || [])
+        .filter(h => h.toLowerCase().includes(q))
+        .slice(0, 4)
+        .map(label => ({ kind: 'heading', label: '# ' + label, value: '#' + label }))
+      const items = pages.concat(heads)
       return { active: true, from, to: sel.to, query, items, index: 0 }
     }
   },
@@ -1047,6 +1104,17 @@ window.MMEditor = {
     if (!editor) buildEditor(editable !== false)
     editor.commands.setContent(html, false)
     editor.setEditable(editable !== false)
+    // 抓取当前页所有 h1-h6 标题，供 [[]] 自动补齐建议同时列出「页面 + 段落」候选
+    try {
+      const heads = []
+      const hs = editor.view.dom.querySelectorAll('h1,h2,h3,h4,h5,h6')
+      hs.forEach(h => {
+        const t = (h.textContent || '').trim()
+        if (t) heads.push(t)
+      })
+      // 去重保序，最多 16 个
+      window.__currentHeadings = Array.from(new Set(heads)).slice(0, 16)
+    } catch (e) { window.__currentHeadings = [] }
     // 刷新缺失页装饰
     editor.view.dispatch(editor.state.tr.setMeta(missingKey, { recompute: true }))
   },
@@ -1262,10 +1330,39 @@ function wireBannerForm(root) {
     })
   })
   // 反向链接：手动「添加引用此页的页面」→ 写入本页 backlinks 字段（手动维护，区别于自动发现的 incoming）
+  // 输入支持 Obsidian 式 [[Page]] / [[Page|alias]] / [[Page#Section]] / [[Page|alias#Section]] 或纯文本；
+  // 统一规范化为 [[Page[|alias][#Section]]] 后存储，避免「在 [[]] 中的内容被识别成 URL」之类的脏数据。
   root.querySelectorAll('[data-add-backlink]').forEach(inp => {
+    const normalize = (raw) => {
+      const v = String(raw || '').trim()
+      if (!v) return ''
+      const m = v.match(/^\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]$/)
+      let page = '', alias = '', anchor = ''
+      if (m) {
+        const target = (m[1] || '').trim()
+        alias = (m[2] || '').trim()
+        const h = target.indexOf('#')
+        if (h >= 0) {
+          page = target.slice(0, h).trim()
+          anchor = target.slice(h + 1).trim()
+        } else {
+          page = target
+        }
+      } else {
+        const h = v.indexOf('#')
+        if (h >= 0) {
+          page = v.slice(0, h).trim()
+          anchor = v.slice(h + 1).trim()
+        } else {
+          page = v
+        }
+      }
+      if (!page) return ''
+      return '[[' + page + (alias ? '|' + alias : '') + (anchor ? '#' + anchor : '') + ']]'
+    }
     const addBl = () => {
-      const v = inp.value.trim()
-      if (!v) return
+      const v = normalize(inp.value)
+      if (!v) { inp.value = ''; return }
       if (!Array.isArray(currentFM['backlinks'])) currentFM['backlinks'] = []
       const exists = currentFM['backlinks'].map(x => String(x).trim().toLowerCase()).includes(v.toLowerCase())
       if (!exists) {
