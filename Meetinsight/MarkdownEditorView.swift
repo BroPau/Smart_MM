@@ -79,6 +79,11 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
         uc.add(handler, name: "editorBridge")
         cfg.userContentController = uc
         cfg.defaultWebpagePreferences.allowsContentJavaScript = true
+        // 关键：禁用所有缓存。理由：用户重启 app 仍可能看到旧 banner 英文 label，
+        // 是因为 WKWebView 默认会缓存 loadHTMLString 的 HTML 模板与 %TIPTAP_BASE% 子资源。
+        // 关掉后每次 setup 都从磁盘读最新模板 + 最新 tiptap.bundle.js，
+        // 确保 bundle 替换立即生效（v2.2.30 部署铁律）。
+        cfg.websiteDataStore = WKWebsiteDataStore.nonPersistent()
         webView = WKWebView(frame: .zero, configuration: cfg)
         super.init(coder: coder)
         setup()
