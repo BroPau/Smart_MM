@@ -84,28 +84,6 @@ function parseFrontmatter(lines) {
 // ————————————————————————————————————————————————————————————————
 //  frontmatter 属性 banner（数据驱动：读 page 实际 frontmatter 键 → 全部显示 → 仅做键名→中文翻译）
 // ————————————————————————————————————————————————————————————————
-// 键名 → 中文标签（只翻译，不猜测 / 不新增 / 不丢弃字段）
-const FM_LABEL = {
-  type: '类型',
-  canonical_name: '规范名',
-  aliases: '别名',
-  中文名: '中文名',
-  company: '公司',
-  title: '职位',
-  职能范围: '职能范围',
-  公司类型: '公司类型',
-  所属行业: '所属行业',
-  公司简介: '公司简介',
-  品牌: '品牌',
-  具体型号: '具体型号',
-  类别: '类别',
-  功能简述: '功能简述',
-  状态: '状态',
-  替代料: '替代料',
-  tags: '标签',
-  updated: '更新',
-  backlinks: '反向链接'
-}
 // 已知键的展示顺序；page 中出现的未知键保持原顺序追加到末尾（backlinks 固定最后）
 const FM_ORDER = [
   'type', 'canonical_name', '中文名', 'company', 'title', '职能范围',
@@ -115,8 +93,28 @@ const FM_ORDER = [
 ]
 // 内部标记键，不展示（如 MOC 首页的 wiki_首页 标志）
 const FM_SKIP = { wiki_首页: 1 }
-// type 值 → emoji 前缀（仅展示增强，不影响数据）
-const FM_TYPE_EMOJI = { person: '👤', company: '🏢', chip: '🔌', project: '📦', topic: '📚', method: '🛠', product: '📦' }
+// 标签直接显示 frontmatter 实际键名（与 Obsidian 一致：英文键不强行中文化）
+function fmLabel(k) { return k }
+
+// 字段类型推断（决定渲染控件与图标）。page 有什么字段就显示什么字段，不猜测、不丢弃。
+function fmFieldType(key, value) {
+  if (key === 'type') return 'select'
+  if (key === 'backlinks') return 'readonly'
+  if (key === 'aliases' || key === 'tags') return 'list'
+  const kl = String(key).toLowerCase()
+  if (kl === 'updated' || kl === 'created' || kl === 'date' || kl.endsWith('_date')) return 'date'
+  if (key === '公司简介' || key === '职能范围' || key === '功能简述' || key === '概要' || key === 'summary' || key === 'description') return 'longtext'
+  return 'text'
+}
+// Obsidian 风格字段图标（左侧小图标）
+function fmFieldIcon(type, key) {
+  if (type === 'list' && key === 'tags') return '🏷'   // 标签
+  if (type === 'list') return '↗'                       // 别名（列表）
+  if (type === 'date') return '📅'                      // 日期
+  if (type === 'select') return '≡'                     // 类型
+  if (type === 'readonly') return '🔗'                  // 反向链接
+  return '≡'                                             // 文本 / 长文本
+}
 
 // 按 FM_ORDER 排序已知键，未知键按出现顺序追加（剔除 FM_SKIP）
 function fmOrderedKeys(fm) {
@@ -131,6 +129,14 @@ function fmDisplay(v) {
   s = s.replace(/^[\[\(](.*)[\]\)]$/, '$1').replace(/^["“”']|["“”']$/g, '')
   return s
 }
+// 列表字段 → 非空白项数组（兼容真实数组与 '[]' / '[a, b]' 字符串写法）
+function fmListItems(v) {
+  if (Array.isArray(v)) return v.map(x => String(x).trim()).filter(Boolean)
+  if (v == null) return []
+  let s = String(v).trim().replace(/^[\[\(](.*)[\]\)]$/, '$1').trim()
+  if (!s) return []
+  return s.split(/[,，、]/).map(x => x.trim()).filter(Boolean)
+}
 // 反向链接 → 只读 pill HTML（兼容数组 / 字符串 / [[..|..]] 语法）；无内容返回 ''
 function renderBacklinks(bl) {
   if (!bl) return ''
@@ -143,26 +149,45 @@ function renderBacklinks(bl) {
     '</span>'
 }
 
-// 只读 banner：遍历 page 全部实际键，全部显示（backlinks 渲染为只读 pill）
+// 只读 banner（Obsidian 风格）：遍历 page 实际键全部显示；列表→chip、日期→日历、backlinks→只读
 function renderFrontmatterBanner(fm) {
   if (!fm || Object.keys(fm).length === 0) return ''
   const rows = []
   fmOrderedKeys(fm).forEach(k => {
     if (FM_SKIP[k]) return
-    if (k === 'backlinks') return // 单独渲染
-    const label = FM_LABEL[k] || k
-    let disp = fmDisplay(fm[k])
-    if (!disp) return
-    if (k === 'type') {
-      const emoji = FM_TYPE_EMOJI[String(disp).toLowerCase()]
-      if (emoji) disp = emoji + ' ' + disp
+    const t = fmFieldType(k, fm[k])
+    const icon = fmFieldIcon(t, k)
+    const label = fmLabel(k)
+    if (t === 'list') {
+      const items = fmListItems(fm[k])
+      if (!items.length) return
+      const chips = '<span class="fm-chips readonly">' + items.map(it => '<span class="fm-chip">' + escapeHtml(it) + '</span>').join('') + '</span>'
+      rows.push(fmRowHtml(icon, label, chips))
+    } else if (t === 'readonly') {
+      const blHtml = renderBacklinks(fm[k])
+      if (!blHtml) return
+      rows.push(fmRowHtml(icon, label, '<div class="fm-readonly">' + blHtml + '</div>'))
+    } else if (t === 'date') {
+      const dv = (fm[k] || '').toString().trim()
+      if (!dv) return
+      rows.push(fmRowHtml(icon, label, '<span class="fm-date-val">' + escapeHtml(dv) + '</span>'))
+    } else if (t === 'longtext') {
+      const dv = (fm[k] == null ? '' : String(fm[k])).trim()
+      if (!dv) return
+      rows.push(fmRowHtml(icon, label, '<div class="fm-longtext-val">' + escapeHtml(dv) + '</div>'))
+    } else {
+      const dv = fmDisplay(fm[k])
+      if (!dv) return
+      rows.push(fmRowHtml(icon, label, '<span class="fm-scalar-val">' + escapeHtml(dv) + '</span>'))
     }
-    rows.push('<tr><th>' + escapeHtml(label) + '</th><td>' + escapeHtml(disp) + '</td></tr>')
   })
-  const blHtml = renderBacklinks(fm['backlinks'])
-  if (blHtml) rows.push('<tr><th>' + escapeHtml(FM_LABEL['backlinks'] || '反向链接') + '</th><td>' + blHtml + '</td></tr>')
   if (rows.length === 0) return ''
-  return '<table class="fm-table">' + rows.join('') + '</table>'
+  return '<div class="fm-grid">' + rows.join('') + '</div>'
+}
+// 共享：单行 [图标 + 标签] + [值]
+function fmRowHtml(icon, label, valueHtml) {
+  return '<div class="fm-row"><div class="fm-row-label"><span class="fm-icon">' + icon + '</span><span class="fm-key">' + escapeHtml(label) + '</span></div>' +
+    '<div class="fm-row-value">' + valueHtml + '</div></div>'
 }
 
 // ————————————————————————————————————————————————————————————————
@@ -939,9 +964,29 @@ function renderBanner() {
   }
 }
 
-// 给表单每个 [data-fm] 字段绑定 input/change：实时写回 currentFM + pendingFrontmatter，
-// 并防抖 400ms 后自动 requestSave（宿主落盘）。无需任何按钮。
+// 防抖保存（标量 / chip / 新增属性 改动后统一调用）
 let _bannerSaveTimer = null
+function scheduleSave() {
+  if (_bannerSaveTimer) clearTimeout(_bannerSaveTimer)
+  _bannerSaveTimer = setTimeout(() => {
+    if (window.MMEditor && window.MMEditor.requestSave) window.MMEditor.requestSave()
+  }, 400)
+}
+// 动态创建的 chip × 按钮：删除列表项
+function onChipRemove(e) {
+  const btn = e.currentTarget
+  const k = btn.getAttribute('data-remove-chip')
+  const v = btn.getAttribute('data-val')
+  if (Array.isArray(currentFM[k])) {
+    currentFM[k] = currentFM[k].filter(x => x !== v)
+    pendingFrontmatter = serializeFrontmatter(currentFM)
+    const chip = btn.closest('.fm-chip')
+    if (chip && chip.parentNode) chip.parentNode.removeChild(chip)
+    scheduleSave()
+  }
+}
+
+// 给表单每个字段绑定事件：标量/下拉/日期/长文本实时写回；chip 增删；添加属性。
 function wireBannerForm(root) {
   if (!root) return
   root.querySelectorAll('[data-fm]').forEach(el => {
@@ -955,10 +1000,7 @@ function wireBannerForm(root) {
         currentFM[k] = v.trim()
       }
       pendingFrontmatter = serializeFrontmatter(currentFM)
-      if (_bannerSaveTimer) clearTimeout(_bannerSaveTimer)
-      _bannerSaveTimer = setTimeout(() => {
-        if (window.MMEditor && window.MMEditor.requestSave) window.MMEditor.requestSave()
-      }, 400)
+      scheduleSave()
     }
     el.addEventListener('input', onEdit)
     el.addEventListener('change', onEdit)
@@ -984,49 +1026,106 @@ function wireBannerForm(root) {
       }
     })
   })
+  // 列表字段：chip × 删除
+  root.querySelectorAll('[data-remove-chip]').forEach(btn => {
+    btn.addEventListener('click', onChipRemove)
+  })
+  // 列表字段：输入回车 / 失焦 新增 chip
+  root.querySelectorAll('[data-add-chip]').forEach(inp => {
+    const addItem = () => {
+      const k = inp.getAttribute('data-add-chip')
+      const v = inp.value.trim()
+      if (!v) return
+      if (!Array.isArray(currentFM[k])) currentFM[k] = []
+      if (!currentFM[k].includes(v)) {
+        currentFM[k].push(v)
+        const chip = document.createElement('span')
+        chip.className = 'fm-chip'
+        chip.setAttribute('data-val', v)
+        chip.innerHTML = '<span>' + escapeHtml(v) + '</span><button type="button" class="fm-chip-x" data-remove-chip="' + escapeAttr(k) + '" data-val="' + escapeAttr(v) + '">×</button>'
+        inp.parentNode.insertBefore(chip, inp)
+        chip.querySelector('.fm-chip-x').addEventListener('click', onChipRemove)
+        pendingFrontmatter = serializeFrontmatter(currentFM)
+        scheduleSave()
+      }
+      inp.value = ''
+    }
+    inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addItem() } })
+    inp.addEventListener('blur', addItem)
+  })
+  // 添加笔记属性：一行「属性名 + 值」，回车提交为新 frontmatter 键
+  root.querySelectorAll('[data-add-prop]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const form = btn.closest('.fm-grid.edit') || root
+      const row = document.createElement('div')
+      row.className = 'fm-row fm-row-new'
+      row.innerHTML = '<div class="fm-row-label"><span class="fm-icon">≡</span><input type="text" class="fm-newkey" placeholder="属性名"></div>' +
+        '<div class="fm-row-value"><input type="text" class="fm-newval" placeholder="值"></div>'
+      form.insertBefore(row, btn.closest('.fm-add-row'))
+      const keyInput = row.querySelector('.fm-newkey')
+      const valInput = row.querySelector('.fm-newval')
+      keyInput.focus()
+      const commit = () => {
+        const nk = keyInput.value.trim()
+        const nv = valInput.value.trim()
+        if (nk) {
+          currentFM[nk] = nv
+          pendingFrontmatter = serializeFrontmatter(currentFM)
+          renderBanner()
+          scheduleSave()
+        } else if (row.parentNode) {
+          row.parentNode.removeChild(row)
+        }
+      }
+      valInput.addEventListener('blur', commit)
+      valInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); commit() } })
+      keyInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); valInput.focus() } })
+    })
+  })
 }
 
-// 可编辑属性表单（数据驱动）：遍历 page 实际 frontmatter 的全部键，全部可编辑显示，
-// 仅对键名做中文翻译；page 有什么字段就显示什么字段，不再按 type 硬编码字段清单。
+// 可编辑属性表单（Obsidian 风格）：遍历 page 实际 frontmatter 的全部键全部可编辑显示；
+// 列表→chip、日期→date、类型→select、长文本→textarea；page 有什么字段就显示什么字段。
 function renderBannerEditForm(fm) {
   if (!fm) fm = {}
   const TYPES = ['Person', 'Company', 'Chip', 'Project', 'Topic', 'Method']
   const rawType = (fm['type'] || '').toString().trim()
-  // 已知用 textarea 的长文本字段；其余标量用 input
-  const TEXTAREA_KEYS = { 公司简介: 1, 职能范围: 1, 功能简述: 1, 概要: 1, summary: 1 }
-  // 已知用逗号列表的字段
-  const LIST_KEYS = { aliases: 1, tags: 1 }
 
-  let html = '<div class="fm-edit-form">'
+  let html = '<div class="fm-grid edit">'
   fmOrderedKeys(fm).forEach(k => {
     if (FM_SKIP[k]) return
-    if (k === 'backlinks') return // 只读，单独渲染
-    const label = FM_LABEL[k] || k
-    const raw = fm[k]
-    const val = Array.isArray(raw) ? raw.join(', ') : (raw == null ? '' : String(raw))
-    html += '<div class="fm-field"><label>' + escapeHtml(label) + '</label>'
-    if (k === 'type') {
+    const t = fmFieldType(k, fm[k])
+    const icon = fmFieldIcon(t, k)
+    const label = fmLabel(k)
+    let valHtml = ''
+    if (t === 'select') {
       // 把 legacy 小写 / product 旧值也列出来，避免下拉里没有当前值导致选不中
       const base = TYPES.slice()
       if (rawType && !base.includes(rawType)) base.push(rawType)
-      const opts = base.concat(CUSTOM_TYPES.filter(t => !base.includes(t)))
-      html += '<div class="fm-type-row"><select data-fm="type" data-kind="scalar">' +
+      const opts = base.concat(CUSTOM_TYPES.filter(x => !base.includes(x)))
+      valHtml = '<div class="fm-type-row"><select data-fm="type" data-kind="scalar" class="fm-select">' +
         opts.map(o => '<option value="' + escapeAttr(o) + '"' + (rawType === o ? ' selected' : '') + '>' + escapeHtml(o) + '</option>').join('') + '</select>' +
         '<button type="button" data-addtype="1" class="fm-addtype" title="新增自定义类型（共享到所有 WiKi 页）">＋</button></div>'
-    } else if (TEXTAREA_KEYS[k]) {
-      html += '<textarea data-fm="' + escapeAttr(k) + '" data-kind="scalar">' + escapeHtml(val) + '</textarea>'
-    } else if (LIST_KEYS[k]) {
-      html += '<input type="text" data-fm="' + escapeAttr(k) + '" data-kind="list" value="' + escapeAttr(val) + '">'
+    } else if (t === 'list') {
+      const items = fmListItems(fm[k])
+      valHtml = '<div class="fm-chips" data-list="' + escapeAttr(k) + '">' +
+        items.map(it => '<span class="fm-chip" data-val="' + escapeAttr(it) + '"><span>' + escapeHtml(it) + '</span><button type="button" class="fm-chip-x" data-remove-chip="' + escapeAttr(k) + '" data-val="' + escapeAttr(it) + '">×</button></span>').join('') +
+        '<input type="text" class="fm-chip-add" data-add-chip="' + escapeAttr(k) + '" placeholder="添加…"></div>'
+    } else if (t === 'date') {
+      const dv = (fm[k] || '').toString().trim()
+      valHtml = '<input type="date" data-fm="' + escapeAttr(k) + '" data-kind="scalar" value="' + escapeAttr(dv) + '" class="fm-date">'
+    } else if (t === 'readonly') {
+      const blHtml = renderBacklinks(fm[k])
+      valHtml = '<div class="fm-readonly">' + (blHtml || '<span class="fm-empty">（空）</span>') + '</div>'
+    } else if (t === 'longtext') {
+      valHtml = '<textarea data-fm="' + escapeAttr(k) + '" data-kind="scalar" class="fm-textarea">' + escapeHtml(fm[k] == null ? '' : String(fm[k])) + '</textarea>'
     } else {
-      html += '<input type="text" data-fm="' + escapeAttr(k) + '" data-kind="scalar" value="' + escapeAttr(val) + '">'
+      valHtml = '<input type="text" data-fm="' + escapeAttr(k) + '" data-kind="scalar" value="' + escapeAttr(fm[k] == null ? '' : String(fm[k])) + '" class="fm-text">'
     }
-    html += '</div>'
+    html += fmRowHtml(icon, label, valHtml)
   })
-  // 反向链接：只读展示（来源/生成由 pipeline 自动维护，禁止手动编辑以防破坏）
-  const blHtml = renderBacklinks(fm['backlinks'])
-  if (blHtml) {
-    html += '<div class="fm-field"><label>' + escapeHtml(FM_LABEL['backlinks'] || '反向链接') + '</label><div class="fm-readonly fm-backlinks">' + blHtml + '</div></div>'
-  }
+  // 添加笔记属性：点击插入一行「属性名 + 值」输入，回车即提交为新的 frontmatter 键
+  html += '<div class="fm-add-row"><button type="button" class="fm-add-prop" data-add-prop="1">+ 添加笔记属性</button></div>'
   html += '</div>'
   return html
 }

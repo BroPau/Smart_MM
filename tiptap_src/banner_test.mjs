@@ -56,15 +56,9 @@ function parseFrontmatter(text) {
   }
   return fm
 }
-// 与 entry.js 保持一致的键名→中文标签映射（仅用于把「期望键集合」翻成「期望标签集合」）
-const FM_LABEL = {
-  type: '类型', canonical_name: '规范名', aliases: '别名', '中文名': '中文名', company: '公司',
-  title: '职位', 职能范围: '职能范围', 公司类型: '公司类型', 所属行业: '所属行业', 公司简介: '公司简介',
-  品牌: '品牌', 具体型号: '具体型号', 类别: '类别', 功能简述: '功能简述', 状态: '状态', 替代料: '替代料',
-  tags: '标签', updated: '更新', backlinks: '反向链接'
-}
+// Obsidian 风格：标签直接显示 frontmatter 实际键名（不强行中文化），所以期望值 = 实际键
 const SKIP = { wiki_首页: 1 }
-const labelOf = k => FM_LABEL[k] || k
+const labelOf = k => k
 // 与 entry.js 的 fmDisplay 保持一致：空值（数组空 / 标量空）在只读 banner 中不渲染行
 function dispOf(v) {
   if (v === undefined || v === null) return ''
@@ -109,9 +103,9 @@ for (const { file, content, fm } of pages) {
     .filter(k => (k === 'backlinks' ? !!blHas : dispOf(fm[k]) !== ''))
     .map(labelOf)
   if (expectedLabels.length) {
-    if (!ro.includes('<table class="fm-table">')) { fail(`${file}: 只读 banner 表格未渲染`); continue }
+    if (!ro.includes('<div class="fm-grid">')) { fail(`${file}: 只读 banner 网格未渲染`); continue }
   }
-  const roLabels = [...ro.matchAll(/<th>(.*?)<\/th>/g)].map(m => m[1])
+  const roLabels = [...ro.matchAll(/<span class="fm-key">(.*?)<\/span>/g)].map(m => m[1])
   setsEqual(roLabels, expectedLabels, `${file}: 只读 banner 标签集合 == 实际键集合`)
   if (fm['type'] && !ro.includes(String(fm['type']))) fail(`${file}: 只读 banner 未显示 type 值`)
   if (fm['canonical_name'] && !ro.includes(String(fm['canonical_name']))) fail(`${file}: 只读 banner 未显示 canonical_name 值`)
@@ -127,12 +121,20 @@ for (const t of Object.keys(checkedTypes)) {
   const { file, content, fm } = checkedTypes[t]
   MMEditor.loadMarkdown(content, true)
   const ed = window.document.getElementById('fmBody').innerHTML
-  if (!ed.includes('fm-edit-form')) { fail(`${file}: 可编辑表单未渲染`); continue }
+  if (!ed.includes('fm-grid edit')) { fail(`${file}: 可编辑表单未渲染`); continue }
+  // 标量/下拉/日期/长文本用 data-fm；列表字段（aliases/tags）用 data-add-chip / data-list
   const edFm = [...ed.matchAll(/data-fm="([^"]+)"/g)].map(m => m[1])
+  const edList = [...ed.matchAll(/data-add-chip="([^"]+)"/g)].map(m => m[1])
+  const edKeys = Array.from(new Set(edFm.concat(edList)))
   const expectedFm = Object.keys(fm).filter(k => !SKIP[k] && k !== 'backlinks')
-  setsEqual(edFm, expectedFm, `${file} (${t}): 可编辑字段集合 == 实际键集合`)
+  setsEqual(edKeys, expectedFm, `${file} (${t}): 可编辑字段集合 == 实际键集合`)
   if (fm['backlinks'] && ed.includes('data-fm="backlinks"')) fail(`${file}: backlinks 不应为可编辑字段`)
   if (fm['公司简介'] && !ed.includes('data-fm="公司简介"')) fail(`${file}: 长文本字段 公司简介 未出现`)
+  // Obsidian 风格特征：列表字段渲染为 chip 容器；存在「添加笔记属性」按钮
+  for (const lk of ['aliases', 'tags']) {
+    if (fm[lk] && !ed.includes(`data-list="${lk}"`)) fail(`${file}: 列表字段 ${lk} 未渲染为 chip 容器`)
+  }
+  if (!ed.includes('fm-add-prop')) fail(`${file}: 缺少「添加笔记属性」按钮`)
 }
 
 if (failures) { console.error(`\n❌ ${failures} 条断言失败`); process.exit(1) }

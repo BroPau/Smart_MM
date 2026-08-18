@@ -369,7 +369,7 @@ fileprivate enum EditorHTML {
     </style>
     </head>
     <body>
-    <details id="fmBanner" class="fm-banner" open><summary>📋 页面属性</summary><div id="fmBody"></div></details>
+    <details id="fmBanner" class="fm-banner" open><summary>笔记属性</summary><div id="fmBody"></div></details>
     <div id="editor"></div>
     <script src="%VDITOR_CDN%/dist/index.min.js"></script>
     <script>
@@ -640,25 +640,51 @@ fileprivate enum TipTapEditorHTML {
       .fm-table th, .fm-table td { padding: 5px 10px; vertical-align: top; text-align: left; border-bottom: 1px dashed #e2e3e8; }
       .fm-table th { color: #6b6b75; font-weight: 500; width: 96px; white-space: nowrap; }
       .fm-table td { color: #1c1c1e; word-break: break-word; }
-      /* 内联属性编辑表单（与正文同窗，不再弹独立窗口） */
-      .fm-edit-form { display: grid; grid-template-columns: 86px 1fr; gap: 6px 10px; margin-top: 8px; align-items: start; }
-      .fm-field { display: contents; }
-      .fm-edit-form label { color: #6b6b75; font-weight: 500; font-size: 12.5px; padding-top: 6px; text-align: left; }
-      .fm-edit-form input, .fm-edit-form select, .fm-edit-form textarea {
-        font-family: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid #cdd2dc;
+      /* —— Obsidian 风格属性网格（只读 + 编辑通用） —————————————— */
+      .fm-grid { display: flex; flex-direction: column; margin-top: 2px; }
+      .fm-row { display: flex; align-items: flex-start; gap: 8px; padding: 3px 4px; border-radius: 6px; }
+      .fm-row:hover { background: rgba(0,0,0,0.045); }
+      .fm-row-label {
+        display: flex; align-items: center; gap: 6px; flex: 0 0 148px;
+        color: #6b6b75; font-weight: 500; font-size: 13px; padding-top: 4px; text-align: left;
+        overflow: hidden; white-space: nowrap;
+      }
+      .fm-icon { font-size: 13px; width: 16px; text-align: center; opacity: 0.82; flex: 0 0 auto; }
+      .fm-key { overflow: hidden; text-overflow: ellipsis; }
+      .fm-row-value { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+      .fm-row-value input[type="text"], .fm-row-value input[type="date"], .fm-row-value select, .fm-row-value textarea {
+        font-family: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid #e2e3e8;
         border-radius: 6px; background: #fff; color: #1c1c1e; width: 100%; box-sizing: border-box;
       }
-      .fm-edit-form textarea { resize: vertical; min-height: 52px; }
-      .fm-edit-form input:focus, .fm-edit-form select:focus, .fm-edit-form textarea:focus {
-        outline: none; border-color: #2f6fdb; box-shadow: 0 0 0 2px rgba(47,111,219,0.15);
+      .fm-row-value input:focus, .fm-row-value select:focus, .fm-row-value textarea:focus {
+        outline: none; border-color: #2f6fdb; box-shadow: 0 0 0 2px rgba(47,111,219,0.12); background: #fff;
       }
-      .fm-type-row { display: flex; gap: 6px; align-items: center; }
-      .fm-type-row select { flex: 1 1 auto; width: 100%; }
+      .fm-row-value textarea { resize: vertical; min-height: 48px; }
+      .fm-select { appearance: none; -webkit-appearance: none; background: #fff; cursor: pointer; }
+      /* 类型行：下拉 + ＋ 按钮 */
+      .fm-type-row { display: flex; gap: 6px; align-items: center; width: 100%; }
+      .fm-type-row select { flex: 1 1 auto; }
       .fm-addtype {
-        flex: 0 0 auto; width: 26px; height: 26px; padding: 0; font-size: 15px; line-height: 1;
-        background: #ffffff; color: #2f6fdb; border: 1px solid #c8d6f5; border-radius: 6px; cursor: pointer;
+        flex: 0 0 auto; width: 24px; height: 24px; padding: 0; font-size: 14px; line-height: 1;
+        background: #fff; color: #2f6fdb; border: 1px solid #c8d6f5; border-radius: 6px; cursor: pointer;
       }
       .fm-addtype:hover { background: #eef3ff; }
+      /* 列表字段 → chips（别名 / 标签） */
+      .fm-chips { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; width: 100%; }
+      .fm-chip {
+        display: inline-flex; align-items: center; gap: 3px; padding: 2px 6px; max-width: 100%;
+        background: #eef3ff; color: #2f6fdb; border: 1px solid #c8d6f5; border-radius: 5px;
+        font-size: 12px; font-family: inherit;
+      }
+      .fm-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .fm-chip-x { border: none; background: transparent; color: inherit; cursor: pointer; font-size: 13px; line-height: 1; padding: 0 2px; opacity: 0.65; }
+      .fm-chip-x:hover { opacity: 1; }
+      .fm-chip-add { flex: 1 1 60px; min-width: 60px; width: auto !important; border: 1px dashed #c8d6f5 !important; background: transparent !important; color: #6b6b75 !important; font-size: 12px; }
+      /* 日期 / 标量 / 长文本只读 */
+      .fm-date { cursor: pointer; }
+      .fm-date-val, .fm-scalar-val, .fm-longtext-val { color: #1c1c1e; line-height: 1.6; }
+      .fm-longtext-val { white-space: pre-wrap; }
+      .fm-empty { color: #9a9aa2; }
       /* 反向链接只读区：pill 形 chip 串展示，不允许手动编辑（防破坏自动维护的双链） */
       .fm-readonly { font-size: 13px; color: #1c1c1e; line-height: 1.9; padding: 2px 0; }
       .fm-backlink-pill {
@@ -666,6 +692,14 @@ fileprivate enum TipTapEditorHTML {
         background: #eef3ff; color: #2f6fdb; border: 1px solid #c8d6f5; border-radius: 4px;
         font-size: 12px; font-family: inherit;
       }
+      /* 添加笔记属性 */
+      .fm-add-row { margin-top: 4px; }
+      .fm-add-prop {
+        padding: 3px 8px; font-size: 12px; font-family: inherit;
+        background: transparent; color: #2f6fdb; border: none; border-radius: 6px; cursor: pointer; text-align: left;
+      }
+      .fm-add-prop:hover { background: rgba(47,111,219,0.08); }
+      .fm-row-new .fm-newkey, .fm-row-new .fm-newval { border: 1px solid #e2e3e8 !important; background: #fff; font-size: 13px; padding: 3px 7px; border-radius: 6px; width: 100%; }
 
       /* —— 编辑器容器 —————————————————————————————————————————— */
       #editor { position: relative; max-width: 860px; margin: 0 auto; }
@@ -763,30 +797,27 @@ fileprivate enum TipTapEditorHTML {
         .fm-table th { color: #b8b8c0; }
         .fm-table td { color: #ebebf0; }
         .fm-table th, .fm-table td { border-bottom-color: #3a3a40; }
-        /* 内联属性编辑表单（深色） */
-        .fm-edit-form { display: grid; grid-template-columns: 86px 1fr; gap: 6px 10px; margin-top: 8px; align-items: start; }
-        .fm-field { display: contents; }
-        .fm-edit-form label { color: #b8b8c0; font-weight: 500; font-size: 12.5px; padding-top: 6px; text-align: left; }
-        .fm-edit-form input, .fm-edit-form select, .fm-edit-form textarea {
+        /* Obsidian 属性网格（深色） */
+        .fm-row:hover { background: rgba(255,255,255,0.05); }
+        .fm-row-label { color: #b8b8c0; }
+        .fm-row-value input[type="text"], .fm-row-value input[type="date"], .fm-row-value select, .fm-row-value textarea {
           font-family: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid #4a4a52;
           border-radius: 6px; background: #2c2c32; color: #ebebf0; width: 100%; box-sizing: border-box;
         }
-        .fm-edit-form textarea { resize: vertical; min-height: 52px; }
-      .fm-edit-form input:focus, .fm-edit-form select:focus, .fm-edit-form textarea:focus {
-        outline: none; border-color: #74b1ff; box-shadow: 0 0 0 2px rgba(116,177,255,0.18);
-      }
-      .fm-type-row { display: flex; gap: 6px; align-items: center; }
-      .fm-type-row select { flex: 1 1 auto; width: 100%; }
-      .fm-addtype {
-        flex: 0 0 auto; width: 26px; height: 26px; padding: 0; font-size: 15px; line-height: 1;
-        background: #2c2c32; color: #74b1ff; border: 1px solid #4a4a52; border-radius: 6px; cursor: pointer;
-      }
-      .fm-addtype:hover { background: #3a3a52; }
-      .fm-readonly { font-size: 13px; color: #ebebf0; line-height: 1.9; padding: 2px 0; }
-      .fm-backlink-pill {
-        display: inline-block; padding: 1px 8px; margin: 1px 4px 1px 0;
-        background: rgba(116,177,255,0.15); color: #74b1ff; border: 1px solid #3a4a5e; border-radius: 4px;
-        font-size: 12px; font-family: inherit;
+        .fm-row-value input:focus, .fm-row-value select:focus, .fm-row-value textarea:focus {
+          outline: none; border-color: #74b1ff; box-shadow: 0 0 0 2px rgba(116,177,255,0.18); background: #2c2c32;
+        }
+        .fm-select { background: #2c2c32; cursor: pointer; }
+        .fm-addtype { background: #2c2c32; color: #74b1ff; border: 1px solid #4a4a52; }
+        .fm-addtype:hover { background: #3a3a52; }
+        .fm-chip { background: rgba(116,177,255,0.15); color: #74b1ff; border: 1px solid #3a4a5e; }
+        .fm-chip-add { border: 1px dashed #3a4a5e !important; background: transparent !important; color: #b8b8c0 !important; }
+        .fm-date-val, .fm-scalar-val, .fm-longtext-val { color: #ebebf0; }
+        .fm-readonly { font-size: 13px; color: #ebebf0; line-height: 1.9; padding: 2px 0; }
+        .fm-backlink-pill {
+          display: inline-block; padding: 1px 8px; margin: 1px 4px 1px 0;
+          background: rgba(116,177,255,0.15); color: #74b1ff; border: 1px solid #3a4a5e; border-radius: 4px;
+          font-size: 12px; font-family: inherit;
       }
       .ProseMirror code { background: #2a2a2e; }
         .ProseMirror pre { background: #26262b; }
@@ -807,7 +838,7 @@ fileprivate enum TipTapEditorHTML {
     </style>
     </head>
     <body>
-    <details id="fmBanner" class="fm-banner" open><summary>📋 页面属性</summary><div id="fmBody"></div></details>
+    <details id="fmBanner" class="fm-banner" open><summary>笔记属性</summary><div id="fmBody"></div></details>
     <div id="editor"></div>
     <script src="%TIPTAP_BASE%/tiptap.bundle.js"></script>
     <script>
