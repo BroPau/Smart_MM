@@ -56,9 +56,14 @@ function parseFrontmatter(text) {
   }
   return fm
 }
-// Obsidian 风格：标签直接显示 frontmatter 实际键名（不强行中文化），所以期望值 = 实际键
+// v2.2.29 起：标签统一中文化（与 entry.js 的 fmLabel / FM_LABEL_CN 完全一致），
+// 不再直接显示英文键名。期望值 = 每个键经 fmLabel 翻译后的中文标签。
 const SKIP = { wiki_首页: 1 }
-const labelOf = k => k
+const FM_LABEL_CN = {
+  type: '类型', canonical_name: '规范名', company: '公司', title: '职位',
+  aliases: '别名', tags: '标签', updated: '更新时间', backlinks: '反向链接'
+}
+const labelOf = k => FM_LABEL_CN[k] || k
 // 与 entry.js 的 fmDisplay 保持一致：空值（数组空 / 标量空）在只读 banner 中不渲染行
 function dispOf(v) {
   if (v === undefined || v === null) return ''

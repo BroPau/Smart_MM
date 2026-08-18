@@ -9,7 +9,7 @@
 //  与宿主通过 window.webkit.messageHandlers.editorBridge 通信。
 // ============================================================================
 
-import { Editor, Mark, mergeAttributes, markInputRule } from '@tiptap/core'
+import { Editor, Mark, Extension, mergeAttributes, markPasteRule } from '@tiptap/core'
 import StarterKit from '@tiptap/starter-kit'
 import Placeholder from '@tiptap/extension-placeholder'
 import BubbleMenu from '@tiptap/extension-bubble-menu'
@@ -20,6 +20,7 @@ import TableCell from '@tiptap/extension-table-cell'
 import TaskList from '@tiptap/extension-task-list'
 import TaskItem from '@tiptap/extension-task-item'
 import { Plugin, PluginKey, TextSelection } from '@tiptap/pm/state'
+import { liftListItem } from '@tiptap/pm/schema-list'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
 import MarkdownIt from 'markdown-it'
 import TurndownService from 'turndown'
@@ -85,16 +86,30 @@ function parseFrontmatter(lines) {
 //  frontmatter 属性 banner（数据驱动：读 page 实际 frontmatter 键 → 全部显示 → 仅做键名→中文翻译）
 // ————————————————————————————————————————————————————————————————
 // 已知键的展示顺序；page 中出现的未知键保持原顺序追加到末尾（backlinks 固定最后）
+// 顺序约定（用户要求，v2.2.29）：
+//   - 最上方固定为「类型」(type)
+//   - 公司类型 / 所属行业 / 公司简介 放在 aliases 与 tags 之间
+//   - 其余已知字段维持原有相对次序
 const FM_ORDER = [
   'type', 'canonical_name', '中文名', 'company', 'title', '职能范围',
-  '公司类型', '所属行业', '公司简介',
   '品牌', '具体型号', '类别', '功能简述', '状态', '替代料',
-  'aliases', 'tags', 'updated', 'backlinks'
+  'aliases', '公司类型', '所属行业', '公司简介', 'tags',
+  'updated', 'backlinks'
 ]
 // 内部标记键，不展示（如 MOC 首页的 wiki_首页 标志）
 const FM_SKIP = { wiki_首页: 1 }
-// 标签直接显示 frontmatter 实际键名（与 Obsidian 一致：英文键不强行中文化）
-function fmLabel(k) { return k }
+// 英文键 → 中文标签（统一界面语言，避免中英混合）。中文键原样透传。
+const FM_LABEL_CN = {
+  type: '类型',
+  canonical_name: '规范名',
+  company: '公司',
+  title: '职位',
+  aliases: '别名',
+  tags: '标签',
+  updated: '更新时间',
+  backlinks: '反向链接'
+}
+function fmLabel(k) { return FM_LABEL_CN[k] || k }
 
 // 字段类型推断（决定渲染控件与图标）。page 有什么字段就显示什么字段，不猜测、不丢弃。
 function fmFieldType(key, value) {
@@ -407,10 +422,13 @@ const WikiLink = Mark.create({
       setWikiLink: attrs => ({ commands }) => commands.setMark(this.name, attrs)
     }
   },
-  addInputRules() {
+  addPasteRules() {
+    // 粘贴场景：[[Page]] / [[Page|alias]] 直接渲染为 wikilink（保留 [[]] 源码符号）。
+    // 键入场景不在此处理——由 autoPairPlugin 在输入 ]] 时调用 autoRenderWikiLink 自动渲染
+    // （并去掉 [[]] 源码符号，与自动补全候选行为一致），避免与 autoPair 的 handleTextInput 冲突。
     return [
-      markInputRule({
-        find: /\[\[([^\[\]\n]+?)(?:\|([^\[\]\n]+?))?\]\]$/,
+      markPasteRule({
+        find: /\[\[([^\[\]\n]+?)(?:\|([^\[\]\n]+?))?\]\]/g,
         type: this.type,
         getAttributes: m => {
           const target = (m[1] || '').trim()
@@ -421,6 +439,37 @@ const WikiLink = Mark.create({
         }
       })
     ]
+  }
+})
+
+// ————————————————————————————————————————————————————————————————
+//  列表项 Backspace 直接 dedent（仿 Obsidian / Typora）
+//  行为：光标位于嵌套列表项（bullet / ordered / task）开头时，Backspace 直接提升一级
+//        （与 Shift+Tab 等价）；顶层列表项退回默认合并行为，避免误删正文。
+// ————————————————————————————————————————————————————————————————
+const ListBackspace = Extension.create({
+  name: 'listBackspace',
+  addKeyboardShortcuts() {
+    return {
+      Backspace: ({ editor }) => {
+        const { state } = editor
+        const { selection } = state
+        if (!selection.empty) return false
+        const $from = selection.$from
+        if ($from.parentOffset !== 0) return false
+        const paraDepth = $from.depth
+        const itemNode = paraDepth >= 2 ? $from.node(paraDepth - 1) : null
+        if (!itemNode || (itemNode.type.name !== 'listItem' && itemNode.type.name !== 'taskItem')) return false
+        const listNode = paraDepth >= 3 ? $from.node(paraDepth - 2) : null
+        if (!listNode || !['bulletList', 'orderedList', 'taskList'].includes(listNode.type.name)) return false
+        // 仅当该列表项确实嵌套在另一个列表项内时才拦截 Backspace（dedent）；
+        // 顶层列表项交给默认行为（与上一块合并），避免破坏正文。
+        const grandParent = paraDepth >= 4 ? $from.node(paraDepth - 3) : null
+        const isNested = !!grandParent && (grandParent.type.name === 'listItem' || grandParent.type.name === 'taskItem')
+        if (!isNested) return false
+        return liftListItem(itemNode.type)(state, editor.view.dispatch)
+      }
+    }
   }
 })
 
@@ -467,6 +516,36 @@ function applyWikiLink(view, page, from, to) {
   tr.addMark(from, end, markType.create({ page: page, alias: null }))
   tr.setSelection(TextSelection.create(tr.doc, end))
   view.dispatch(tr)
+}
+
+// 手动键入 [[Page]] / [[Page|alias]] 完成后，自动把整段转为 wikilink mark（Obsidian 式「输入双方括号即自动渲染」）。
+// 与自动补全候选行为一致：去掉 [[]] 源码符号，仅保留可见链接文本；缺失页交给 missingPlugin 标红。
+function autoRenderWikiLink(view, pos) {
+  const { state } = view
+  const $pos = state.doc.resolve(pos)
+  const textBefore = $pos.parent.textBetween(0, $pos.parentOffset, undefined, '￼')
+  const m = /\[\[([^\[\]\n]+?)(?:\|([^\[\]\n]+?))?\]\]$/.exec(textBefore)
+  if (!m) return false
+  const target = m[1].trim()
+  if (!target) return false
+  let page = target, anchor = ''
+  const h = target.indexOf('#')
+  if (h >= 0) { page = target.slice(0, h).trim(); anchor = target.slice(h + 1).trim() }
+  const alias = m[2] ? m[2].trim() : null
+  const display = alias || page
+  const markType = state.schema.marks.wikilink
+  if (!markType) return false
+  const full = m[0].length
+  const start = pos - full
+  const end = pos
+  const tr = state.tr
+  tr.delete(start, end)
+  tr.insertText(display, start)
+  const newEnd = start + display.length
+  tr.addMark(start, newEnd, markType.create({ page: page, anchor: anchor || null, alias: alias || null }))
+  tr.setSelection(TextSelection.create(tr.doc, newEnd))
+  view.dispatch(tr.scrollIntoView())
+  return true
 }
 
 class WikiAutocompleteView {
@@ -567,8 +646,11 @@ const autoPairPlugin = new Plugin({
       if (!view.editable) return false
       const { state } = view
       if (from !== to) return false  // 有选区时不自动配对，交给默认行为
-      const after = state.doc.textBetween(to, to + 2, undefined, '￼')
-      const after1 = state.doc.textBetween(to, to + 1, undefined, '￼')
+      // 防止 to+1 / to+2 越界（在文档末尾输入时 textBetween 会抛错）
+      const size = state.doc.content.size
+      const tb = (a, b) => state.doc.textBetween(a, Math.min(b, size), undefined, '￼')
+      const after = tb(to, to + 2)
+      const after1 = tb(to, to + 1)
       const before = from > 0 ? state.doc.textBetween(from - 1, from, undefined, '￼') : ''
       // 1) 直接输入 [[ → 自动成对 [[ ]]
       if (text === '[[') {
@@ -582,6 +664,7 @@ const autoPairPlugin = new Plugin({
         if (after === ']]') {
           const tr = state.tr.setSelection(TextSelection.create(state.doc, to + 2))
           view.dispatch(tr)
+          autoRenderWikiLink(view, view.state.selection.to)
           return true
         }
         return false
@@ -613,6 +696,7 @@ const autoPairPlugin = new Plugin({
         if (after1 === ']') {
           const tr = state.tr.setSelection(TextSelection.create(state.doc, to + 1))
           view.dispatch(tr)
+          autoRenderWikiLink(view, view.state.selection.to)
           return true
         }
         return false
@@ -639,10 +723,13 @@ const autoPairPlugin = new Plugin({
         const { state } = view
         const sel = state.selection
         if (sel.empty) {
-          const after = state.doc.textBetween(sel.to, sel.to + 1, undefined, '￼')
+          const after = state.doc.textBetween(sel.to, Math.min(sel.to + 1, state.doc.content.size), undefined, '￼')
           if (after === event.key) {
             const tr = state.tr.setSelection(TextSelection.create(state.doc, sel.to + 1))
             view.dispatch(tr)
+            // 输入 ] 跳过自动配对符后，若恰好完成 [[name]]，则自动渲染为 wikilink
+            // （真实输入场景下 ] 由 keydown 消费，handleTextInput 不会再触发，故此处也要处理）
+            if (event.key === ']') autoRenderWikiLink(view, view.state.selection.to)
             return true
           }
         }
@@ -758,6 +845,7 @@ function buildEditor(editable) {
       StarterKit.configure({ link: { openOnClick: false, autolink: false, linkOnPaste: false } }),
       Placeholder.configure({ placeholder: '输入正文，或输入 [[ 关联其他页面…' }),
       WikiLink,
+      ListBackspace,
       Table.configure({ resizable: true }),
       TableRow,
       TableHeader,
@@ -768,15 +856,9 @@ function buildEditor(editable) {
         element: getBubbleMenuEl(),
         shouldShow: ({ editor, from, to }) => from !== to && !editor.isActive('wikilink')
       }),
-      {
-        addProseMirrorPlugins() { return [missingPlugin] }
-      },
-      {
-        addProseMirrorPlugins() { return [autocompletePlugin] }
-      },
-      {
-        addProseMirrorPlugins() { return [autoPairPlugin] }
-      }
+      Extension.create({ name: 'missingPluginExt', addProseMirrorPlugins() { return [missingPlugin] } }),
+      Extension.create({ name: 'autocompletePluginExt', addProseMirrorPlugins() { return [autocompletePlugin] } }),
+      Extension.create({ name: 'autoPairPluginExt', addProseMirrorPlugins() { return [autoPairPlugin] } }),
     ],
     editable: editable,
     autofocus: false,
@@ -860,6 +942,10 @@ function wireEditorDom() {
 window.MMEditor = {
   init() {
     buildEditor(true)
+  },
+  // 暴露底层 TipTap Editor 实例（供宿主高级集成 / 自动化测试驱动 handleTextInput 等）
+  getEditor() {
+    return editor
   },
   loadMarkdown(mdText, editable, mode, autoLink) {
     const sp = splitFrontmatter(mdText || '')
