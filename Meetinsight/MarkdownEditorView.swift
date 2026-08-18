@@ -167,6 +167,15 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
         webView.evaluateJavaScript("MMEditor.setAutoLinkNames(\(js))")
     }
 
+    /// 推送「反向链接 / incoming」列表给 JS：即所有在正文里 [[引用了本页]] 的页面名（由宿主扫描得到）。
+    /// JS 侧会把它与本页 frontmatter 的手动 backlinks 字段合并去重展示，并支持手动追加。
+    func setBacklinks(_ names: [String]) {
+        guard Self.engine == "tiptap" else { return }
+        let json = (try? JSONSerialization.data(withJSONObject: names)) ?? Data("[]".utf8)
+        let js = String(data: json, encoding: .utf8) ?? "[]"
+        webView.evaluateJavaScript("MMEditor.setBacklinks(\(js))")
+    }
+
     /// 跳转到 Wiki 页内某标题锚点（Obsidian 式 [[Page#Heading]]）；无匹配标题时静默忽略。
     func scrollToAnchor(_ anchor: String) {
         guard Self.engine == "tiptap", !anchor.isEmpty else { return }
@@ -769,8 +778,8 @@ fileprivate enum TipTapEditorHTML {
         background: #eef3ff; color: #2f6fdb; border: 1px solid #c8d6f5; border-radius: 4px;
         font-size: 12px; font-family: inherit;
       }
-      /* 添加笔记属性：整列占满（跨两列） */
-      .fm-add-row { grid-column: 1 / -1; margin-top: 6px; }
+      /* 所有「添加」输入行与第 2 列（值列）对齐，与上方其余输入框保持一致宽度 */
+      .fm-add-row { grid-column: 2; margin-top: 6px; }
       .fm-add-prop {
         padding: 3px 8px; font-size: 12px; font-family: inherit;
         background: transparent; color: #2f6fdb; border: none; border-radius: 6px; cursor: pointer; text-align: left;

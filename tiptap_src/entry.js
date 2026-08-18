@@ -206,6 +206,22 @@ function renderBacklinks(bl) {
       (alias ? ' data-alias="' + escapeAttr(alias) + '"' : '') + '>' + escapeHtml(alias || page) + '</a>'
   }).join(' ')
 }
+// 合并「宿主下发的 incoming 反向链接（被哪些页引用）」与页面 frontmatter 里的手动 backlinks 字段，去重保序
+// （incoming 来自其他页正文 [[本页]] 扫描；manual 来自本页 backlinks 字段，手动维护。两者均为可点击双链。）
+function backlinksMerged(manualField) {
+  const incoming = Array.isArray(window.__backlinks) ? window.__backlinks.slice() : []
+  const manual = fmListItems(manualField)
+  const seen = new Set()
+  const out = []
+  // 手动优先（用户显式关联），incoming 其次（自动发现）
+  for (const s of manual.concat(incoming)) {
+    const key = String(s).trim().toLowerCase()
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    out.push(String(s).trim())
+  }
+  return out
+}
 
 // 只读 banner（Obsidian 风格）：遍历 page 实际键全部显示；列表→chip、日期→日历、backlinks→只读
 function renderFrontmatterBanner(fm) {
@@ -222,7 +238,7 @@ function renderFrontmatterBanner(fm) {
       const chips = '<span class="fm-chips readonly">' + items.map(it => '<span class="fm-chip">' + escapeHtml(it) + '</span>').join('') + '</span>'
       rows.push(fmRowHtml(icon, label, chips))
     } else if (t === 'readonly') {
-      const blHtml = renderBacklinks(fm[k])
+      const blHtml = renderBacklinks(backlinksMerged(fm[k]))
       if (!blHtml) return
       rows.push(fmRowHtml(icon, label, '<div class="fm-readonly">' + blHtml + '</div>'))
     } else if (t === 'date') {
@@ -1012,6 +1028,8 @@ window.MMEditor = {
     pendingFrontmatter = sp.fmRaw
     currentFM = sp.fmRaw ? fmNormalize(parseFrontmatter(sp.fmRaw.split('\n').slice(1, -1))) : {}
     currentEditable = editable !== false
+    // 每次加载新页重置「incoming 反向链接」（由宿主 selectPage 重新下发），避免跨页残留
+    window.__backlinks = []
     // 顶部属性 banner：属性表单**始终内联可编辑**（与正文同处一个编辑器窗口），
     // 不再需要"编辑属性"按钮，也不再弹独立窗口。只读场景（搜索结果）仍展示只读表。
     renderBanner()
@@ -1054,6 +1072,11 @@ window.MMEditor = {
   setWikiPages(arr) {
     window.__wikiPages = Array.isArray(arr) ? arr : []
     if (editor) editor.view.dispatch(editor.state.tr.setMeta(missingKey, { recompute: true }))
+  },
+  // 宿主下发的 incoming 反向链接（其他页面正文里 [[本页]] 的扫描结果）；下发后重渲染 banner 以合并展示
+  setBacklinks(arr) {
+    window.__backlinks = Array.isArray(arr) ? arr : []
+    renderBanner()
   },
   // 推送「自动双链」目标名（仅 Wiki 页名），加载纪要时把裸词包裹成 [[名称]]
   setAutoLinkNames(arr) {
@@ -1238,6 +1261,24 @@ function wireBannerForm(root) {
       keyInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); valInput.focus() } })
     })
   })
+  // 反向链接：手动「添加引用此页的页面」→ 写入本页 backlinks 字段（手动维护，区别于自动发现的 incoming）
+  root.querySelectorAll('[data-add-backlink]').forEach(inp => {
+    const addBl = () => {
+      const v = inp.value.trim()
+      if (!v) return
+      if (!Array.isArray(currentFM['backlinks'])) currentFM['backlinks'] = []
+      const exists = currentFM['backlinks'].map(x => String(x).trim().toLowerCase()).includes(v.toLowerCase())
+      if (!exists) {
+        currentFM['backlinks'].push(v)
+        pendingFrontmatter = serializeFrontmatter(currentFM)
+        renderBanner()      // 重渲染：手动项立即出现在合并列表里（与 incoming 去重）
+        scheduleSave()
+      }
+      inp.value = ''
+    }
+    inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addBl() } })
+    inp.addEventListener('blur', addBl)
+  })
 }
 
 // 可编辑属性表单（Obsidian 风格）：遍历 page 实际 frontmatter 的全部键全部可编辑显示；
@@ -1278,8 +1319,16 @@ function renderBannerEditForm(fm) {
       const dv = (fm[k] || '').toString().trim()
       valHtml = '<input type="date" data-fm="' + escapeAttr(k) + '" data-kind="scalar" value="' + escapeAttr(dv) + '" class="fm-date">'
     } else if (t === 'readonly') {
-      const blHtml = renderBacklinks(fm[k])
-      valHtml = '<div class="fm-readonly">' + (blHtml || '<span class="fm-empty">（空）</span>') + '</div>'
+      // 反向链接：合并 incoming（被哪些页引用）+ 手动 backlinks 字段，均以可点击双链呈现
+      const merged = backlinksMerged(fm[k])
+      const blHtml = merged.length
+        ? renderBacklinks(merged)
+        : '<span class="fm-empty">（暂无反向链接）</span>'
+      valHtml = '<div class="fm-readonly">' + blHtml + '</div>'
+      html += fmRowHtml(icon, label, valHtml)
+      // 「添加引用此页的页面」另起一行，统一 .fm-add-input 风格，对齐第 2 列
+      html += '<div class="fm-add-row"><input type="text" class="fm-add-input" data-add-backlink="1" placeholder="＋ 添加引用此页的页面（手动维护）"></div>'
+      return
     } else if (t === 'longtext') {
       // 长文本与其他属性同列对齐（不再跨整行顶格），编辑框宽度/高度与下方其余输入框一致
       valHtml = '<textarea data-fm="' + escapeAttr(k) + '" data-kind="scalar" class="fm-textarea" placeholder="（空）" rows="3">' + escapeHtml(fm[k] == null ? '' : String(fm[k])) + '</textarea>'

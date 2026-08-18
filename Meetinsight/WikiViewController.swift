@@ -268,6 +268,31 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         }
     }
 
+    // MARK: - 反向链接（incoming）计算
+
+    /// 计算「引用了当前页」的所有页面（incoming backlinks）：
+    /// 扫描其他 Wiki 页（含首页）正文 + frontmatter 里的 [[当前页名]] / [[当前页别名]]
+    /// （大小写不敏感，支持 [[Name|alias]]），返回这些页面的显示名，供 banner「反向链接」自动展示。
+    private func computeIncomingBacklinks(for current: WikiPage) -> [String] {
+        let targets = Set(([current.name] + current.aliases).map { $0.lowercased() })
+        guard !targets.isEmpty else { return [] }
+        let regex = try? NSRegularExpression(pattern: #"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]"#, options: [])
+        var found: [String] = []
+        for page in pages where page.file != current.file {
+            let url = page.isHome ? homeFile : wikiPagesDir.appendingPathComponent(page.file)
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            let range = NSRange(text.startIndex..., in: text)
+            var hit = false
+            regex?.enumerateMatches(in: text, options: [], range: range) { match, _, _ in
+                guard let match, let r = Range(match.range(at: 1), in: text) else { return }
+                let target = String(text[r]).trimmingCharacters(in: .whitespaces).lowercased()
+                if targets.contains(target) { hit = true }
+            }
+            if hit { found.append(page.name) }
+        }
+        return found
+    }
+
     private func selectPage(_ page: WikiPage) {
         showingSearch = false
         selectedPage = page
@@ -282,6 +307,8 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
                 presentBaseDirAccessReset(message: "无法读取文件：\(homeFile.path)")
             }
             editor.setWikiPages(pages.flatMap { [$0.name] + $0.aliases })
+            // 推送 incoming 反向链接（被哪些页 [[引用]]），供 banner「反向链接」自动展示
+            editor.setBacklinks(computeIncomingBacklinks(for: page))
             return
         }
         // 普通页面：显示编辑器
@@ -298,6 +325,8 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         }
         // 把现有页面名（含别名）推给编辑器，供双链自动完成 + 缺失页判定。
         editor.setWikiPages(pages.flatMap { [$0.name] + $0.aliases })
+        // 推送 incoming 反向链接（被哪些页 [[引用]]），供 banner「反向链接」自动展示
+        editor.setBacklinks(computeIncomingBacklinks(for: page))
     }
 
     // MARK: - 搜索
