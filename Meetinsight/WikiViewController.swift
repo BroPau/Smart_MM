@@ -46,6 +46,10 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
     private let statusLabel = NSTextField(labelWithString: "就绪")
     private let progressIndicator = NSProgressIndicator()
 
+    /// v2.2.50: 存 split 引用，供 viewDidLayout 设初始分界位置
+    private var wikiSplitView: NSSplitView?
+    private var hasSetInitialSplitPosition = false
+
     // MARK: - 状态
     private var pages: [WikiPage] = []
     private var selectedPage: WikiPage?
@@ -149,6 +153,8 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         tableView.allowsColumnSelection = false
         tableView.allowsColumnResizing = true
         tableView.allowsColumnReordering = false
+        // ✅ v2.2.50: 列宽持久化——NSTableView 自动把列宽/顺序存入 UserDefaults，下次打开恢复
+        tableView.autosaveName = "WikiListColumns"
         // 右键菜单
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "删除", action: #selector(deleteSelected), keyEquivalent: ""))
@@ -162,9 +168,12 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         //   2) 给一个最小宽度 240（列表不至于被拖没）+ 弹性最大（跟随 split）
         //   3) 设一个起点宽度 440（容纳「名称 320 + 类型 120」两列宽 + 边距）
         listScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
-        listScroll.widthAnchor.constraint(equalToConstant: 440).isActive = true
+        // v2.2.50: 改 equalToConstant → lessThanOrEqualToConstant，让分界线可自由拖动
+        //   min 240（列表不至于被拖没）+ max 800（不超过窗口 2/3）+ autosave 记忆位置
+        listScroll.widthAnchor.constraint(lessThanOrEqualToConstant: 800).isActive = true
 
         let split = NSSplitView()
+        wikiSplitView = split  // v2.2.50: 存引用供 viewDidLayout 设初始位置
         split.isVertical = true
         split.dividerStyle = .thin
         // 持久化用户的拖动位置（Xcode/macOS 原生支持）
@@ -509,6 +518,20 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         selectPage(pages[rows.first!])
         // 同步编辑视图的"可点击"焦点（仅当是单选）
         // 不需要额外操作：setBusy 由各处自行处理。
+    }
+
+    // MARK: - v2.2.50: 首次布局设默认分界位置（仅无 autosave 记录时）
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        if !hasSetInitialSplitPosition {
+            hasSetInitialSplitPosition = true
+            // autosave 已有记录 → 跳过（NSSplitView 自动恢复）
+            // 无记录（首次打开）→ 设默认 440（容纳「名称 320 + 类型 120」两列）
+            let key = "NSSplitView Subview Positions WikiSplitPosition"
+            if UserDefaults.standard.object(forKey: key) == nil {
+                wikiSplitView?.setPosition(440, ofDividerAt: 0)
+            }
+        }
     }
 
     // MARK: - 全局 ⌘+Delete 键监听（仅本窗口激活时）批量删除选中
