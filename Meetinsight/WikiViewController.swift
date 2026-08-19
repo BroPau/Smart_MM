@@ -23,7 +23,7 @@ struct WikiPage {
     let isHome: Bool
 }
 
-final class WikiViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+final class WikiViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSSplitViewDelegate {
 
     // MARK: - UI 组件
     private let searchField = NSSearchField()
@@ -48,7 +48,6 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
 
     /// v2.2.50: 存 split 引用，供 viewDidLayout 设初始分界位置
     private var wikiSplitView: NSSplitView?
-    private var hasSetInitialSplitPosition = false
 
     // MARK: - 状态
     private var pages: [WikiPage] = []
@@ -59,6 +58,21 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
     private var pendingOpenWikiName: String?
     /// 伴随 pendingOpenWikiName 的锚点（[[Page#Heading]] 的标题）。
     private var pendingOpenWikiAnchor: String?
+
+    // MARK: - v2.2.55: 缓存 + 列宽/分界位置持久化
+    /// 静默刷新时临时抑制 tableViewSelectionDidChange → 不触发 selectPage（避免打断编辑）。
+    private var suppressSelectionChange = false
+    /// 分界位置是否已初始化（防止 viewDidLayout 反复设默认值）。
+    private var hasAppliedSplitPosition = false
+    /// 列宽是否已从 UserDefaults 恢复（防止 setupUI 设默认值覆盖用户设置）。
+    private var hasRestoredColumnWidths = false
+
+    /// UserDefaults 键名常量。
+    private enum PersistKey {
+        static let nameColWidth = "WikiColumnNameWidth"
+        static let typeColWidth = "WikiColumnTypeWidth"
+        static let splitPosition = "WikiSplitPositionValue"
+    }
 
     private var wikiDir: URL { AppConfig.shared.baseDir.appendingPathComponent("005_LLMWiKi") }
     private var wikiPagesDir: URL { wikiDir.appendingPathComponent("wiki_pages") }
@@ -91,7 +105,34 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
             self,
             selector: #selector(handleOpenWikiPageNotification(_:)),
             name: .openWikiPage, object: nil)
-        loadPages()
+        // v2.2.55: 监听列宽变化——主动持久化到 UserDefaults
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(columnDidResize(_:)),
+            name: NSTableView.columnDidResizeNotification,
+            object: tableView)
+
+        // v2.2.55: 缓存优先 + 后台静默刷新
+        if let cache = WikiCache.shared.loadPages() {
+            // 有缓存：直接渲染（秒开，不跑 Python）
+            self.pages = cache.pages
+            WikiIndex.shared.sync(from: self.pages)
+            self.tableView.reloadData()
+            // 选中缓存中记录的页面（或默认首页）
+            var row = 0
+            if let name = cache.selectedPageName,
+               let idx = self.pages.firstIndex(where: { $0.name == name }) {
+                row = idx
+            }
+            self.tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            self.selectPage(self.pages[row])
+            self.setBusy(false, status: "已加载缓存（后台刷新中…）")
+            // 后台异步刷新（静默，用户无感知）
+            refreshPagesFromPipeline(silent: true)
+        } else {
+            // 无缓存（首次打开）：正常加载
+            loadPages()
+        }
     }
 
     deinit {
@@ -137,11 +178,13 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         }
 
         nameColumn.title = "名称"
-        nameColumn.width = 320
+        // v2.2.55: 从 UserDefaults 恢复用户上次设定的列宽（无记录用默认值）
+        nameColumn.width = UserDefaults.standard.object(forKey: PersistKey.nameColWidth) as? CGFloat ?? 320
         nameColumn.minWidth = 160
         typeColumn.title = "类型"
-        typeColumn.width = 120
+        typeColumn.width = UserDefaults.standard.object(forKey: PersistKey.typeColWidth) as? CGFloat ?? 120
         typeColumn.minWidth = 80
+        hasRestoredColumnWidths = true
         tableView.addTableColumn(nameColumn)
         tableView.addTableColumn(typeColumn)
         tableView.dataSource = self
@@ -153,8 +196,8 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         tableView.allowsColumnSelection = false
         tableView.allowsColumnResizing = true
         tableView.allowsColumnReordering = false
-        // ✅ v2.2.50: 列宽持久化——NSTableView 自动把列宽/顺序存入 UserDefaults，下次打开恢复
-        tableView.autosaveName = "WikiListColumns"
+        // v2.2.55: 移除 autosave，改用主动持久化（更可靠）
+        // tableView.autosaveName = "WikiListColumns"
         // 右键菜单
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "删除", action: #selector(deleteSelected), keyEquivalent: ""))
@@ -176,8 +219,9 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         wikiSplitView = split  // v2.2.50: 存引用供 viewDidLayout 设初始位置
         split.isVertical = true
         split.dividerStyle = .thin
-        // 持久化用户的拖动位置（Xcode/macOS 原生支持）
-        split.autosaveName = "WikiSplitPosition"
+        split.delegate = self  // v2.2.55: 主动持久化分界位置
+        // v2.2.55: 移除 autosave，改用主动持久化（更可靠）
+        // split.autosaveName = "WikiSplitPosition"
         // 让 split 在 stack 的垂直方向上"膨胀"——stack.distribution = .fill 默认选
         // hugging 最低的子视图作 gravity；这里把 split 设为最低，确保它吃满剩余空间。
         split.setContentHuggingPriority(.defaultLow, for: .vertical)
@@ -230,25 +274,36 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
     // MARK: - 页面列表（Wiki 首页置顶）
     func reloadPages() { loadPages() }
 
-    private func loadPages() {
-        setBusy(true, status: "读取页面列表…")
+    /// 公开入口——非静默加载（显示 busy 状态，完成后选中首页）。
+    func loadPages() {
+        refreshPagesFromPipeline(silent: false)
+    }
+
+    /// v2.2.55: 从 pipeline 读取页面列表。
+    /// - silent=true：不显示 busy、不切换选中页、不打断编辑器，仅更新列表 + 写缓存（后台静默刷新）。
+    /// - silent=false：显示 busy、完成后选中首页、处理 pendingOpenWikiName（等同原 loadPages）。
+    private func refreshPagesFromPipeline(silent: Bool) {
+        if !silent {
+            setBusy(true, status: "读取页面列表…")
+        }
         PipelineRunner.shared.run(script: nil, arguments: ["--list-wiki-pages"]) { _ in }
         completion: { [weak self] result in
             guard let self else { return }
             if let err = result.error {
-                self.setBusy(false, status: "读取失败")
-                let msg = "无法读取 WiKi 页面列表：\(err.localizedDescription)"
-                // 授权失效（EPERM）时引导重设；其余错误（如 Python 缺失）走普通提示。
-                if err.localizedDescription.contains("Operation not permitted") {
-                    self.presentBaseDirAccessReset(message: msg)
-                } else {
-                    self.showAlert(msg)
+                if !silent {
+                    self.setBusy(false, status: "读取失败")
+                    let msg = "无法读取 WiKi 页面列表：\(err.localizedDescription)"
+                    if err.localizedDescription.contains("Operation not permitted") {
+                        self.presentBaseDirAccessReset(message: msg)
+                    } else {
+                        self.showAlert(msg)
+                    }
                 }
                 return
             }
             guard let data = result.stdout.data(using: .utf8),
                   let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-                self.setBusy(false, status: "列表解析失败")
+                if !silent { self.setBusy(false, status: "列表解析失败") }
                 return
             }
             var list: [WikiPage] = [
@@ -261,20 +316,39 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
                 let aliases = (d["aliases"] as? [String]) ?? []
                 list.append(WikiPage(name: name, type: type, aliases: aliases, file: file, isHome: false))
             }
+            // 记录当前选中页名（用于缓存 + 静默刷新后恢复选中）
+            let currentName = self.selectedPage?.name
             self.pages = list
-            // 同步共享索引，供「会议纪要」页做名词联动 / 缺失页判定（无需再次跑子进程）
+            // 同步共享索引，供「会议纪要」页做名词联动 / 缺失页判定
             WikiIndex.shared.sync(from: self.pages)
             self.tableView.reloadData()
-            self.setBusy(false, status: "共 \(self.pages.count) 个页面（首页已置顶）")
-            // 默认选中 Wiki 首页
-            self.tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-            self.selectPage(self.pages[0])
-            // 若此前有「会议纪要」页路由过来的待打开页，加载完成后打开它
-            if let pending = self.pendingOpenWikiName {
-                self.pendingOpenWikiName = nil
-                let anchor = self.pendingOpenWikiAnchor
-                self.pendingOpenWikiAnchor = nil
-                self.resolveOrPromptWikiPage(pending, anchor: anchor)
+            // 写缓存
+            WikiCache.shared.savePages(list, selectedPageName: currentName)
+
+            if silent {
+                // 静默刷新：恢复选中行但不触发 selectPage（避免打断编辑器）
+                self.suppressSelectionChange = true
+                var row = 0
+                if let name = currentName,
+                   let idx = list.firstIndex(where: { $0.name == name }) {
+                    row = idx
+                }
+                self.tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+                self.suppressSelectionChange = false
+                self.deleteSelBtn.isEnabled = (self.tableView.selectedRowIndexes.count > 0) && !self.busy
+                self.statusLabel.stringValue = "共 \(list.count) 个页面（后台已刷新）"
+            } else {
+                // 非静默：选中首页 + 加载内容 + 处理 pending
+                self.setBusy(false, status: "共 \(self.pages.count) 个页面（首页已置顶）")
+                self.tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+                self.selectPage(self.pages[0])
+                // 若此前有「会议纪要」页路由过来的待打开页，加载完成后打开它
+                if let pending = self.pendingOpenWikiName {
+                    self.pendingOpenWikiName = nil
+                    let anchor = self.pendingOpenWikiAnchor
+                    self.pendingOpenWikiAnchor = nil
+                    self.resolveOrPromptWikiPage(pending, anchor: anchor)
+                }
             }
         }
     }
@@ -511,6 +585,8 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
     func tableViewSelectionDidChange(_ notification: Notification) {
         // 左侧页面列表：删除按钮跟随选中数变化
         deleteSelBtn.isEnabled = (tableView.selectedRowIndexes.count > 0) && !busy
+        // v2.2.55: 静默刷新时临时抑制 selectPage（避免打断编辑器）
+        if suppressSelectionChange { return }
         // 仅当"恰好选中 1 行（导航式选择）"才跳转；
         // ⌘+点击/拖选扩展多选时保持当前页不变，避免误把用户刚翻到的页切走。
         let rows = tableView.selectedRowIndexes
@@ -520,18 +596,41 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         // 不需要额外操作：setBusy 由各处自行处理。
     }
 
-    // MARK: - v2.2.50: 首次布局设默认分界位置（仅无 autosave 记录时）
+    // MARK: - v2.2.55: 首次布局设默认分界位置（从 UserDefaults 恢复）
     override func viewDidLayout() {
         super.viewDidLayout()
-        if !hasSetInitialSplitPosition {
-            hasSetInitialSplitPosition = true
-            // autosave 已有记录 → 跳过（NSSplitView 自动恢复）
-            // 无记录（首次打开）→ 设默认 440（容纳「名称 320 + 类型 120」两列）
-            let key = "NSSplitView Subview Positions WikiSplitPosition"
-            if UserDefaults.standard.object(forKey: key) == nil {
-                wikiSplitView?.setPosition(440, ofDividerAt: 0)
+        if !hasAppliedSplitPosition {
+            hasAppliedSplitPosition = true
+            // 从 UserDefaults 读取用户上次设定的分界位置；无记录用默认 440
+            let pos = UserDefaults.standard.object(forKey: PersistKey.splitPosition) as? CGFloat ?? 440
+            wikiSplitView?.setPosition(pos, ofDividerAt: 0)
+        }
+    }
+
+    // MARK: - v2.2.55: 列宽 + 分界位置主动持久化
+
+    /// 列宽变化时保存到 UserDefaults。
+    @objc private func columnDidResize(_ note: Notification) {
+        guard hasRestoredColumnWidths else { return }
+        // NSTableView.columnDidResizeNotification 的 userInfo 含 NSTableColumn
+        if let col = note.userInfo?["NSTableColumn"] as? NSTableColumn {
+            if col.identifier.rawValue == "name" {
+                UserDefaults.standard.set(col.width, forKey: PersistKey.nameColWidth)
+            } else if col.identifier.rawValue == "type" {
+                UserDefaults.standard.set(col.width, forKey: PersistKey.typeColWidth)
             }
         }
+    }
+
+    // MARK: - NSSplitViewDelegate
+
+    /// 用户拖动分界线后保存位置到 UserDefaults。
+    func splitViewDidResizeSubviews(_ notification: Notification) {
+        guard hasAppliedSplitPosition else { return }
+        // 防止初始布局触发的 resize 覆盖用户设定
+        guard let split = notification.object as? NSSplitView, split.subviews.count >= 2 else { return }
+        let pos = split.subviews[0].frame.width
+        UserDefaults.standard.set(pos, forKey: PersistKey.splitPosition)
     }
 
     // MARK: - 全局 ⌘+Delete 键监听（仅本窗口激活时）批量删除选中
