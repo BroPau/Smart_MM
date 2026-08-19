@@ -1340,7 +1340,9 @@ function wireBannerForm(root) {
       const keyInput = row.querySelector('.fm-newkey')
       const valInput = row.querySelector('.fm-newval')
       keyInput.focus()
-      const commit = () => {
+      // 统一收尾：属性名非空 → 提交为新 frontmatter 键；属性名为空 → 视为空行，移除之
+      const finishRow = () => {
+        if (!row.parentNode) return  // 已移除，幂等保护
         const nk = keyInput.value.trim()
         const nv = valInput.value.trim()
         if (nk) {
@@ -1352,9 +1354,27 @@ function wireBannerForm(root) {
           row.parentNode.removeChild(row)
         }
       }
-      valInput.addEventListener('blur', commit)
-      valInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); commit() } })
-      keyInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); valInput.focus() } })
+      // 失焦收尾：带焦点稳定检查，避免从属性名框→值框的内部跳转误触发关闭
+      const onBlur = () => {
+        setTimeout(() => { if (!row.contains(document.activeElement)) finishRow() }, 0)
+      }
+      keyInput.addEventListener('blur', onBlur)
+      valInput.addEventListener('blur', onBlur)
+      // 两个输入框皆为空时按 Backspace → 立即关闭该空行
+      const onBackspaceClear = (e) => {
+        if (e.key === 'Backspace' && keyInput.value === '' && valInput.value === '') {
+          e.preventDefault()
+          if (row.parentNode) row.parentNode.removeChild(row)
+        }
+      }
+      keyInput.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); valInput.focus(); return }
+        onBackspaceClear(e)
+      })
+      valInput.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); finishRow(); return }
+        onBackspaceClear(e)
+      })
     })
   })
   // 反向链接：手动「添加引用此页的页面」→ 写入本页 backlinks 字段（手动维护，区别于自动发现的 incoming）
