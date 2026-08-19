@@ -42,6 +42,34 @@ enum WikiLinkRouter {
     }
 }
 
+/// 把 `meetinsight://open-wiki/Page#Anchor` 链接解析为 wiki 页跳转（统一供点击路由复用）。
+/// 返回 true 表示已处理（消费点击，不再交给系统当成 URL 打开）。
+fileprivate func handleMeetinsightLink(_ url: URL) -> Bool {
+    guard url.scheme == "meetinsight" else { return false }
+    var page: String
+    if url.host == "open-wiki" {
+        page = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    } else {
+        page = url.absoluteString.replacingOccurrences(of: "meetinsight://open-wiki/", with: "")
+    }
+    // 中文页名在 link 里是百分号编码，必须解码才能匹配到真实页名
+    if let decoded = page.removingPercentEncoding { page = decoded }
+    page = page.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    // 防御：path 里可能残留 #Heading 段
+    if let hash = page.range(of: "#") {
+        let a = String(page[hash.upperBound...])
+        page = String(page[..<hash.lowerBound])
+        if !a.isEmpty { WikiLinkRouter.open(name: page, anchor: a.removingPercentEncoding ?? a); return true }
+    }
+    var anchor: String? = nil
+    if let frag = url.fragment, !frag.isEmpty { anchor = frag.removingPercentEncoding ?? frag }
+    if !page.isEmpty {
+        WikiLinkRouter.open(name: page, anchor: anchor)
+        return true
+    }
+    return false
+}
+
 // MARK: - WikiPageSpec（v2.2.33 未变）
 
 /// 提交到 pipeline.py 的全量 spec。所有字段都存在，未填者为空字符串。
@@ -172,8 +200,17 @@ final class WikiLinkTextField: NSView, NSTextViewDelegate {
     required init?(coder: NSCoder) { nil }
 
     func textDidChange(_ notification: Notification) {
-        highlightWikiLinks()
         onChange?()
+        // 中文 IME 组合（marked text）期间绝对不要重排文本属性，否则会吞掉中文输入。
+        // 组合结束（候选上屏）后 textDidChange 会再次触发且 hasMarkedText==false，那时再高亮即可。
+        guard !textView.hasMarkedText() else { return }
+        highlightWikiLinks()
+    }
+
+    /// 点击 [[Page]] / [[Page#anchor]] 超链接 → 跳转到对应 wiki 页（而非被系统当成 URL 打开）。
+    func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+        if let url = link as? URL { return handleMeetinsightLink(url) }
+        return false
     }
 
     /// 扫描 `[[Page]]` / `[[Page|alias]]` / `[[Page#anchor]]` / `[[Page|alias#anchor]]`，转成蓝色超链接。
@@ -185,7 +222,10 @@ final class WikiLinkTextField: NSView, NSTextViewDelegate {
     ///      - 全量重置 baseAttrs（清掉上次匹配残留的链接色）
     ///      - 在 [[...]] 匹配区间叠加 linkAttrs（保留光标处的颜色/字体行为）
     ///   3) 显式设回 typingAttributes = baseAttrs，确保下一字符按普通文字色渲染。
+    /// v2.2.39 关键修复：组合态（hasMarkedText）下全程跳过，避免打断中文 IME 输入。
     private func highlightWikiLinks() {
+        // 防御：组合态下绝不触碰 textStorage / selectedRanges / typingAttributes
+        guard !textView.hasMarkedText() else { return }
         let raw = textView.string
         let pattern = "\\[\\[([^\\]\\n]+?)\\]\\]"
         guard let re = try? NSRegularExpression(pattern: pattern) else { return }
@@ -296,11 +336,21 @@ final class WikiLinkTextView: NSView, NSTextViewDelegate {
     required init?(coder: NSCoder) { nil }
 
     func textDidChange(_ notification: Notification) {
-        highlightWikiLinks()
         onChange?()
+        // 中文 IME 组合期间不要重排文本属性，否则会吞掉中文输入（见 WikiLinkTextField 说明）
+        guard !textView.hasMarkedText() else { return }
+        highlightWikiLinks()
+    }
+
+    /// 点击 [[Page]] / [[Page#anchor]] 超链接 → 跳转到对应 wiki 页（而非被系统当成 URL 打开）。
+    func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+        if let url = link as? URL { return handleMeetinsightLink(url) }
+        return false
     }
 
     private func highlightWikiLinks() {
+        // 防御：组合态下绝不触碰 textStorage / selectedRanges / typingAttributes
+        guard !textView.hasMarkedText() else { return }
         let raw = textView.string
         let baseAttrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 11),
@@ -352,25 +402,9 @@ final class WikiLinkTextView: NSView, NSTextViewDelegate {
 // 既适用于 WikiLinkTextField/View，也适用于迁移期间系统后台弹出的页内 wikilink。
 class WikiLinkClickRouter: NSObject, NSTextViewDelegate {
     weak var origDelegate: NSTextViewDelegate?
-    func textView(_ textView: NSTextView, clickedOnLink url: URL, at charIndex: Int) -> Bool {
-        if url.scheme == "meetinsight" {
-            // 解析 host=open-wiki, path=/PageName，fragment=#Heading（可选锚点）
-            var page = url.host == "open-wiki" ? url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")) :
-                url.absoluteString.replacingOccurrences(of: "meetinsight://open-wiki/", with: "")
-            var anchor: String? = nil
-            if let frag = url.fragment, !frag.isEmpty { anchor = frag }
-            // 把可能的「.../#Heading」残留段也认作 anchor（防御性，避免 path 含 #）
-            if let hash = page.range(of: "#") {
-                let a = String(page[hash.upperBound...])
-                page = String(page[..<hash.lowerBound])
-                if !a.isEmpty { anchor = a }
-            }
-            if !page.isEmpty {
-                WikiLinkRouter.open(name: page, anchor: anchor)
-            }
-            return true
-        }
-        return origDelegate?.textView?(textView, clickedOnLink: url, at: charIndex) ?? true
+    func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+        if let url = link as? URL, handleMeetinsightLink(url) { return true }
+        return origDelegate?.textView?(textView, clickedOnLink: link, at: charIndex) ?? true
     }
 }
 
