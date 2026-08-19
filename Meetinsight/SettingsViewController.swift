@@ -62,7 +62,8 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
     private let chooseRAGModelBtn = NSButton(title: "浏览本机嵌入模型…", target: nil, action: nil)
     private let downloadRAGModelBtn = NSButton(title: "下载所选模型", target: nil, action: nil)
     private let ragStatusLabel = NSTextField(labelWithString: "")
-    private var ragDownloadProcess: Process?
+    private let ragProgressBar = NSProgressIndicator()
+    private var ragDownloader: HFModelDownloader?
 
     // MARK: - 自定义提示词
     private let promptView = NSTextView()
@@ -218,6 +219,14 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
         ragStatusLabel.maximumNumberOfLines = 0
         ragStatusLabel.preferredMaxLayoutWidth = 560
         stack.addArrangedSubview(ragStatusLabel)
+        // RAG 下载进度条（v2.2.53：curl 下载实时总进度）
+        ragProgressBar.isIndeterminate = false
+        ragProgressBar.minValue = 0
+        ragProgressBar.maxValue = 100
+        ragProgressBar.doubleValue = 0
+        ragProgressBar.isHidden = true
+        ragProgressBar.controlSize = .small
+        stack.addArrangedSubview(ragProgressBar)
 
         stack.addArrangedSubview(divider())
 
@@ -625,48 +634,47 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
         AppConfig.shared.embeddingUseMirror = true
         AppConfig.shared.embeddingModelPath = nil
         AppConfig.shared.embeddingModelSkipped = false
-        let py = AppConfig.shared.pythonExecutable.path
-        let localDir = ragDownloadDir.path
+        ragDownloader?.cancel()
+        let localDir = ragDownloadDir
         let sizeStr = m.approxMB >= 1024
             ? String(format: "%.1f GB", Double(m.approxMB) / 1024)
             : "\(m.approxMB) MB"
-        ragStatusLabel.stringValue = "下载中… \(modelName)（约 \(sizeStr)，国内镜像 hf-mirror.com）"
+        ragStatusLabel.stringValue = "⬇️ 下载中… \(modelName)（约 \(sizeStr)，系统 curl · 国内镜像 hf-mirror.com · 断点续传）"
         ragStatusLabel.textColor = .systemBlue
         downloadRAGModelBtn.isEnabled = false
+        ragProgressBar.isHidden = false
+        ragProgressBar.doubleValue = 0
 
-        let pyScript = """
-        from huggingface_hub import snapshot_download
-        p = snapshot_download("\(m.hfId)", local_dir='\(localDir)')
-        print("LOCAL_DIR=" + p)
-        """
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
-        var env = ProcessInfo.processInfo.environment
-        env["HF_HOME"] = AppConfig.shared.huggingfaceHome.path
-        env["HF_ENDPOINT"] = RAG_MIRROR
-        proc.environment = env
-        proc.arguments = ["-c", "\(shellQuote(py)) -c \(shellQuote(pyScript))"]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = pipe
-        pipe.fileHandleForReading.readabilityHandler = { h in
-            guard let data = h.availableData.nonEmpty, let s = String(data: data, encoding: .utf8) else { return }
-            print("[RAG download] \(s.trimmingCharacters(in: .newlines))")
-        }
-        proc.terminationHandler = { [weak self] p in
-            DispatchQueue.main.async {
-                self?.downloadRAGModelBtn.isEnabled = true
-                if p.terminationStatus == 0 {
-                    AppConfig.shared.embeddingModelPath = self?.ragDownloadDir
-                    self?.refreshRAGModelPath()
+        // v2.2.53：改用系统 curl 命令行下载（不依赖 Python / huggingface_hub），带进度条
+        let dl = HFModelDownloader()
+        ragDownloader = dl
+        dl.start(
+            repoID: m.hfId,
+            baseURL: RAG_MIRROR,
+            destination: localDir,
+            onLog: { line in
+                print("[RAG download] \(line)")
+            },
+            onProgress: { [weak self] p in
+                guard let self = self else { return }
+                self.ragProgressBar.doubleValue = p.overallPercent
+                self.ragStatusLabel.stringValue = String(
+                    format: "⬇️ %@ 文件 %d/%d：%@ — %.0f%%（总进度 %.0f%%）",
+                    modelName, p.fileIndex, p.fileTotal, p.fileName, p.filePercent, p.overallPercent)
+            },
+            onFinish: { [weak self] ok, msg in
+                guard let self = self else { return }
+                self.ragProgressBar.isHidden = true
+                self.downloadRAGModelBtn.isEnabled = true
+                if ok {
+                    AppConfig.shared.embeddingModelPath = self.ragDownloadDir
+                    self.refreshRAGModelPath()
                 } else {
-                    self?.ragStatusLabel.stringValue = "❌ 下载失败（退出码 \(p.terminationStatus)）。请检查网络，或点「浏览本机嵌入模型…」指定本机已有目录。"
-                    self?.ragStatusLabel.textColor = .systemRed
+                    self.ragStatusLabel.stringValue = "❌ \(msg)。已下载部分会保留，可重试续传；或点「浏览本机嵌入模型…」指定本机已有目录。"
+                    self.ragStatusLabel.textColor = .systemRed
                 }
             }
-        }
-        ragDownloadProcess = proc
-        try? proc.run()
+        )
     }
 
     // MARK: - 自定义提示词

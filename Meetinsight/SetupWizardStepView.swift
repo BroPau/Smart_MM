@@ -896,9 +896,10 @@ final class StepEmbeddingModelView: WizardStepView {
 
     private let statusLabel = NSTextField(labelWithString: "")
     private let progressLabel = NSTextField(labelWithString: "")
+    private let progressBar = NSProgressIndicator()
     private let logView = NSTextView()
     private let scroll = NSScrollView()
-    private var downloadProcess: Process?
+    private var downloader: HFModelDownloader?
     private var modelReady = false
     private var skipped = false
 
@@ -931,6 +932,14 @@ final class StepEmbeddingModelView: WizardStepView {
 
         contentStack.addArrangedSubview(statusLabel)
         contentStack.addArrangedSubview(progressLabel)
+        // 下载进度条（v2.2.53：curl 下载实时总进度）
+        progressBar.isIndeterminate = false
+        progressBar.minValue = 0
+        progressBar.maxValue = 100
+        progressBar.doubleValue = 0
+        progressBar.isHidden = true
+        progressBar.controlSize = .small
+        contentStack.addArrangedSubview(progressBar)
 
         // 第一行：下载 / 跳过
         let download = makeButton("下载模型（HuggingFace 直连，需科学上网）",
@@ -1020,59 +1029,56 @@ final class StepEmbeddingModelView: WizardStepView {
         appendLog("已切换到国内镜像 \(mirrorEndpoint)（无需科学上网）")
         runDownload()
     }
-    /// 共享下载逻辑：把模型解包到沙箱可写目录（HF_HOME/bge-small-zh-v1.5），
-    /// 用 huggingface_hub.snapshot_download 避免 HF 软链结构；注入 HF_HOME + HF_ENDPOINT 到子进程。
+    /// 共享下载逻辑：把模型下载到沙箱可写目录（HF_HOME/bge-small-zh-v1.5）。
+    /// v2.2.53：改用系统自带 curl 命令行（不依赖 Python / huggingface_hub），
+    /// 支持断点续传 + 实时进度条 + 「文件 N/M」文字提示。
     private func runDownload() {
-        // 清掉可能残留的本地路径（这次走下载）
+        // 清掉可能残留的本地路径（这次走下载）；若上次下载未完成，先终止旧进程
         AppConfig.shared.embeddingModelPath = nil
+        downloader?.cancel()
         let useMirror = AppConfig.shared.embeddingUseMirror
-        let py = AppConfig.shared.pythonExecutable.path
+        let baseURL = useMirror ? mirrorEndpoint : "https://huggingface.co"
         let src = useMirror ? "国内镜像 \(mirrorEndpoint)" : "HuggingFace 直连（需科学上网）"
-        appendLog("将下载 \(modelID)（首次需联网，约 90MB，源：\(src)）…")
-        progressLabel.stringValue = "下载中…（进度见日志，源：\(src)）"
+        appendLog("开始下载 \(modelID)（系统 curl，支持断点续传，源：\(src)）…")
+        statusLabel.stringValue = "⬇️ 正在下载 \(modelID)…"
+        statusLabel.textColor = .systemBlue
+        progressLabel.stringValue = "正在获取文件列表…（源：\(src)）"
+        progressBar.isHidden = false
+        progressBar.doubleValue = 0
 
-        // 用 huggingface_hub 直接解包到沙箱可写目录（扁平、无软链），SentenceTransformer 可直接加载
-        let localDir = downloadDir.path
-        let pyScript = """
-from huggingface_hub import snapshot_download
-p = snapshot_download(\"\(modelID)\", local_dir=\(shellQuote(localDir)))
-print("LOCAL_DIR=" + p)
-"""
-        let script = "\(shellQuote(py)) -c \(shellQuote(pyScript))"
-
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
-        // 注入网络/缓存环境变量（沙箱默认禁网，需 entitlements 开 network.client）
-        var env = ProcessInfo.processInfo.environment
-        env["HF_HOME"] = AppConfig.shared.huggingfaceHome.path
-        if useMirror { env["HF_ENDPOINT"] = mirrorEndpoint }
-        proc.environment = env
-        proc.arguments = ["-c", script]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = pipe
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] h in
-            guard let data = h.availableData.nonEmpty, let s = String(data: data, encoding: .utf8) else { return }
-            self?.appendLog(s.trimmingCharacters(in: .newlines))
-        }
-        proc.terminationHandler = { [weak self] p in
-            DispatchQueue.main.async {
-                if p.terminationStatus == 0 {
-                    // 下载落点即我们指定的扁平目录，自动「采用」
-                    AppConfig.shared.embeddingModelPath = self?.downloadDir
-                    self?.skipped = false
-                    self?.appendLog("✅ 模型已下载到：\(self?.downloadDir.path ?? "")")
-                    self?.detect()
+        let dl = HFModelDownloader()
+        downloader = dl
+        dl.start(
+            repoID: modelID,
+            baseURL: baseURL,
+            destination: downloadDir,
+            onLog: { [weak self] line in
+                self?.appendLog(line)
+            },
+            onProgress: { [weak self] p in
+                guard let self = self else { return }
+                self.progressBar.doubleValue = p.overallPercent
+                self.progressLabel.stringValue = String(
+                    format: "文件 %d/%d：%@ — %.0f%%（总进度 %.0f%%）",
+                    p.fileIndex, p.fileTotal, p.fileName, p.filePercent, p.overallPercent)
+            },
+            onFinish: { [weak self] ok, msg in
+                guard let self = self else { return }
+                self.progressBar.isHidden = true
+                if ok {
+                    AppConfig.shared.embeddingModelPath = self.downloadDir
+                    AppConfig.shared.embeddingModelSkipped = false
+                    self.skipped = false
+                    self.appendLog("✅ 模型已下载到：\(self.downloadDir.path)")
                 } else {
                     let hint = useMirror
-                        ? "国内镜像也失败，请检查网络后重试；或点「浏览本机嵌入模型…」指定本机已有目录；或「跳过」。"
+                        ? "已下载的部分会保留，可重新点下载按钮续传；或点「浏览本机嵌入模型…」；或「跳过」。"
                         : "HuggingFace 直连失败（国内通常需要科学上网），请改点「下载（国内镜像 hf-mirror.com）」；或「浏览本机嵌入模型…」；或「跳过」。"
-                    self?.appendLog("❌ 下载失败，退出码 \(p.terminationStatus)。\(hint)")
+                    self.appendLog("❌ \(msg)。\(hint)")
                 }
+                self.detect()
             }
-        }
-        downloadProcess = proc
-        try? proc.run()
+        )
     }
 
     // MARK: 浏览本机嵌入模型（NSOpenPanel 选目录，校验 config.json + model.safetensors）
