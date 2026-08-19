@@ -199,57 +199,40 @@ final class WikiLinkTextField: NSView, NSTextViewDelegate {
     }
     required init?(coder: NSCoder) { nil }
 
-    // MARK: 第一响应者转发
-    // v2.2.42 关键修复：包装 NSView 必须显式把第一响应者事件转给内部 NSTextView，
-    // 否则鼠标在字段间点击切换时焦点错乱（点别的字段就回不去），且部分字段接收不到输入。
-    override var acceptsFirstResponder: Bool { true }
-    override func becomeFirstResponder() -> Bool { textView.becomeFirstResponder() }
-    override func resignFirstResponder() -> Bool { textView.resignFirstResponder() }
-
     func textDidChange(_ notification: Notification) {
         onChange?()
-        // v2.2.42：编辑期间绝不重排 textStorage / selectedRanges / typingAttributes。
+        // v2.2.43：编辑期间绝不重排 textStorage / selectedRanges / typingAttributes。
         // 高亮只在「非编辑态」做（加载 setStringValue + textDidEndEditing），从根上消除焦点/输入错乱。
     }
 
-    /// 开始编辑 → 去掉链接高亮，恢复纯文本，让光标能落在 [[...]] 任意位置、不被当成链接点击。
+    /// 开始编辑 → 仅把 typingAttributes 重置为普通文字属性（保证在 [[...]] 内输入新字符不会继承链接色/下划线）。
+    /// **不剥离链接属性**：NSTextView 在 isEditable=true 下，点击 [[...]] 默认放光标而非激活链接，所以链接保持蓝色可点显示。
     func textDidBeginEditing(_ notification: Notification) {
         guard let tv = notification.object as? NSTextView, tv == textView else { return }
-        stripLinkAttributes()
+        tv.typingAttributes = [
+            .font: NSFont.systemFont(ofSize: 12),
+            .foregroundColor: NSColor.labelColor
+        ]
     }
 
-    /// 结束编辑（失焦）→ 重新高亮 [[Page]] 双链，恢复可点击跳转。
+    /// 结束编辑（失焦）→ 重新扫描 [[Page]] 应用链接属性，并重置 typingAttributes。
     func textDidEndEditing(_ notification: Notification) {
         guard let tv = notification.object as? NSTextView, tv == textView else { return }
         highlightWikiLinks()
     }
 
     /// 点击 [[Page]] / [[Page#anchor]] 超链接 → 跳转到对应 wiki 页（而非被系统当成 URL 打开）。
-    /// 仅在非编辑态（失焦高亮后）点击才触发；编辑态已被 stripLinkAttributes 清除链接属性，不会误触。
+    /// 仅在非编辑态（失焦高亮后）点击才触发；编辑态下 NSTextView 默认把链接点击当光标放置，不会误触。
     func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
         if let url = link as? URL { return handleMeetinsightLink(url) }
         return false
     }
 
-    /// 编辑态下去掉所有链接属性，恢复统一的普通文字属性，保证光标可自由落点、中文 IME 正常。
-    private func stripLinkAttributes() {
-        guard let storage = textView.textStorage else { return }
-        let nsStr = textView.string as NSString
-        let fullRange = NSRange(location: 0, length: nsStr.length)
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 12),
-            .foregroundColor: NSColor.labelColor
-        ]
-        storage.beginEditing()
-        storage.setAttributes(attrs, range: fullRange)
-        storage.endEditing()
-        textView.typingAttributes = attrs
-    }
-
     /// 扫描 `[[Page]]` / `[[Page|alias]]` / `[[Page#anchor]]` / `[[Page|alias#anchor]]`，转成蓝色超链接。
     /// 不修改用户输入字符，只在显示层加属性。仅在加载（setStringValue）与失焦（textDidEndEditing）时调用。
-    /// v2.2.37：用 setAttributes(baseAttrs) + addAttributes(linkAttrs) 精准更新，避免破坏 typing attributes。
+    /// v2.2.37：用 setAttributes(baseAttrs) + addAttributes(linkAttrs) 精准更新。
     /// v2.2.42：不再于 textDidChange 调用，从根本上消除「编辑期重排导致焦点/输入错乱」的根因。
+    /// v2.2.43：末尾重置 typingAttributes = baseAttrs，确保加载/失焦后输入新字符不继承链接色。
     private func highlightWikiLinks() {
         let raw = textView.string
         let pattern = "\\[\\[([^\\]\\n]+?)\\]\\]"
@@ -292,6 +275,8 @@ final class WikiLinkTextField: NSView, NSTextViewDelegate {
             }
         }
         storage.endEditing()
+        // 重置 typingAttributes → 输入新字符为普通文字色，不继承链接色/下划线。
+        textView.typingAttributes = baseAttrs
     }
 }
 
@@ -352,52 +337,37 @@ final class WikiLinkTextView: NSView, NSTextViewDelegate {
     }
     required init?(coder: NSCoder) { nil }
 
-    // MARK: 第一响应者转发
-    // v2.2.42 关键修复：同 WikiLinkTextField，包装 NSView 转发第一响应者事件到内部 NSTextView。
-    override var acceptsFirstResponder: Bool { true }
-    override func becomeFirstResponder() -> Bool { textView.becomeFirstResponder() }
-    override func resignFirstResponder() -> Bool { textView.resignFirstResponder() }
-
     func textDidChange(_ notification: Notification) {
         onChange?()
-        // v2.2.42：编辑期间绝不重排 textStorage / selectedRanges / typingAttributes。
+        // v2.2.43：编辑期间绝不重排 textStorage / selectedRanges / typingAttributes。
     }
 
-    /// 开始编辑 → 去掉链接高亮，恢复纯文本，让光标能自由落点。
+    /// 开始编辑 → 仅重置 typingAttributes 为普通文字（字号 11），保证在 [[...]] 内输入新字符不继承链接色/下划线。
+    /// **不剥离链接属性**：NSTextView 在 isEditable=true 下，点击 [[...]] 默认放光标而非激活链接，所以链接保持蓝色可点显示。
     func textDidBeginEditing(_ notification: Notification) {
         guard let tv = notification.object as? NSTextView, tv == textView else { return }
-        stripLinkAttributes()
+        tv.typingAttributes = [
+            .font: NSFont.systemFont(ofSize: 11),
+            .foregroundColor: NSColor.labelColor
+        ]
     }
 
-    /// 结束编辑（失焦）→ 重新高亮 [[Page]] 双链。
+    /// 结束编辑（失焦）→ 重新扫描 [[Page]] 应用链接属性，并重置 typingAttributes。
     func textDidEndEditing(_ notification: Notification) {
         guard let tv = notification.object as? NSTextView, tv == textView else { return }
         highlightWikiLinks()
     }
 
     /// 点击 [[Page]] / [[Page#anchor]] 超链接 → 跳转到对应 wiki 页。
+    /// 仅在非编辑态（失焦高亮后）点击才触发；编辑态下 NSTextView 默认把链接点击当光标放置，不会误触。
     func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
         if let url = link as? URL { return handleMeetinsightLink(url) }
         return false
     }
 
-    /// 编辑态下去掉所有链接属性，恢复普通文字属性（字号 11）。
-    private func stripLinkAttributes() {
-        guard let storage = textView.textStorage else { return }
-        let nsStr = textView.string as NSString
-        let fullRange = NSRange(location: 0, length: nsStr.length)
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 11),
-            .foregroundColor: NSColor.labelColor
-        ]
-        storage.beginEditing()
-        storage.setAttributes(attrs, range: fullRange)
-        storage.endEditing()
-        textView.typingAttributes = attrs
-    }
-
     /// 扫描 [[Page]] 双链转蓝色超链接。仅加载（setStringValue）与失焦（textDidEndEditing）时调用。
     /// v2.2.42：不再于 textDidChange 调用，消除编辑期重排导致焦点/输入错乱的根因。
+    /// v2.2.43：末尾重置 typingAttributes = baseAttrs，确保加载/失焦后输入新字符不继承链接色。
     private func highlightWikiLinks() {
         let raw = textView.string
         let baseAttrs: [NSAttributedString.Key: Any] = [
@@ -438,6 +408,8 @@ final class WikiLinkTextView: NSView, NSTextViewDelegate {
             }
         }
         storage.endEditing()
+        // 重置 typingAttributes → 输入新字符为普通文字色，不继承链接色/下划线。
+        textView.typingAttributes = baseAttrs
     }
 }
 
