@@ -669,6 +669,11 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
                 if ok {
                     AppConfig.shared.embeddingModelPath = self.ragDownloadDir
                     self.refreshRAGModelPath()
+                    // partial success 的 message 含「X 个文件失败」详情
+                    if msg != "下载完成" {
+                        self.ragStatusLabel.stringValue = "⚠️ \(msg)"
+                        self.ragStatusLabel.textColor = .systemOrange
+                    }
                 } else {
                     self.ragStatusLabel.stringValue = "❌ \(msg)。已下载部分会保留，可重试续传；或点「浏览本机嵌入模型…」指定本机已有目录。"
                     self.ragStatusLabel.textColor = .systemRed

@@ -1069,6 +1069,10 @@ final class StepEmbeddingModelView: WizardStepView {
                     AppConfig.shared.embeddingModelPath = self.downloadDir
                     AppConfig.shared.embeddingModelSkipped = false
                     self.skipped = false
+                    // partial success 的 message 含「X 个文件失败」详情
+                    if msg != "下载完成" {
+                        self.appendLog("⚠️ \(msg)")
+                    }
                     self.appendLog("✅ 模型已下载到：\(self.downloadDir.path)")
                 } else {
                     let hint = useMirror
