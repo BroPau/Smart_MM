@@ -140,6 +140,44 @@ extension WikiPageSpec {
     }
 }
 
+// MARK: - VerticallyCenteredTextFieldCell（v2.2.45 新增）
+//
+// 自定义 NSTextFieldCell，把标题（编辑文本与光标）在控件 bounds 内垂直居中。
+// 默认 NSTextFieldCell 在 isBezeled=false 时 titleRect 默认顶对齐，导致 NSTextField
+// 自绘 1px 圆角边框（手动 wantsLayer + layer.cornerRadius）时，文字与光标挤在框顶部。
+// 修复：override titleRect / drawingRect 把文本矩形在控件范围内垂直居中；
+//       override edit / select 把 editor 视图（实际承载光标与文字）的 frame 同样居中。
+// 保留「1px 圆角扁平边框」的视觉，不引入 bezel 阴影。
+class VerticallyCenteredTextFieldCell: NSTextFieldCell {
+    private func centeredTitle(forBounds rect: NSRect) -> NSRect {
+        let raw = super.titleRect(forBounds: rect)
+        let textHeight = raw.height
+        guard textHeight < rect.height else { return raw }
+        let y = rect.origin.y + (rect.height - textHeight) / 2.0
+        return NSRect(x: raw.origin.x, y: y, width: raw.width, height: textHeight)
+    }
+    override func titleRect(forBounds rect: NSRect) -> NSRect {
+        return centeredTitle(forBounds: rect)
+    }
+    override func drawingRect(forBounds rect: NSRect) -> NSRect {
+        return centeredTitle(forBounds: rect)
+    }
+    /// 把编辑框（field editor，承载光标与文字）的 frame 在控件 bounds 内垂直居中。
+    private func centeredEditorFrame(originalRect: NSRect, in controlView: NSView) -> NSRect {
+        let textHeight = originalRect.height
+        let y = controlView.bounds.origin.y + (controlView.bounds.height - textHeight) / 2.0
+        return NSRect(x: originalRect.origin.x, y: y, width: originalRect.width, height: textHeight)
+    }
+    override func edit(withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText, delegate: Any?, event: NSEvent?) {
+        super.edit(withFrame: centeredEditorFrame(originalRect: rect, in: controlView),
+                   in: controlView, editor: textObj, delegate: delegate, event: event)
+    }
+    override func select(withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText, delegate: Any?, start selStart: Int, length selLength: Int) {
+        super.select(withFrame: centeredEditorFrame(originalRect: rect, in: controlView),
+                     in: controlView, editor: textObj, delegate: delegate, start: selStart, length: selLength)
+    }
+}
+
 // MARK: - WikiLinkTextField（v2.2.44 重写：标准 NSTextField，彻底修复焦点/输入回归）
 //
 // 单行文本输入控件，高度 24px（与 NSTextField 等同）。直接继承 NSTextField，
@@ -148,12 +186,31 @@ extension WikiPageSpec {
 // 部分框死锁」的根因（外层 NSView 破坏了 AppKit 的 hit-test / first-responder 链）。
 // 单行长文本字段本身不含 `[[Page]]`（规范名/中文名/公司/职位…均为纯文本），双链渲染
 // 集中在多行 WikiLinkTextView（反向链接/公司简介/功能简述）。
+//
+// v2.2.45：在自绘 1px 圆角扁平边框（非标准 bezel）下，替换 cell 为自定义
+// VerticallyCenteredTextFieldCell，把文本与光标在 24px 高度内垂直居中。
 final class WikiLinkTextField: NSTextField, NSTextFieldDelegate {
     var onChange: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        // 视觉：自绘 1px 圆角边框（与 v2.2.40 批准样式一致）；文本可编辑、可点聚焦。
+        // 替换为自定义 cell（垂直居中 + 无 bezel），保留控件的扁平 1px 圆角边框样式。
+        // 注：NSTextField.cellClass 是 ObjC 类属性（get/set），Swift 不能 override 为只读，
+        //     所以在 init 里直接换 cell 实例，这是 Apple 文档推荐的等价做法。
+        let centeredCell = VerticallyCenteredTextFieldCell(textCell: "")
+        centeredCell.isBezeled = false
+        centeredCell.isBordered = false
+        centeredCell.isEditable = true
+        centeredCell.isSelectable = true
+        centeredCell.font = .systemFont(ofSize: 12)
+        centeredCell.textColor = .labelColor
+        centeredCell.lineBreakMode = .byClipping
+        centeredCell.usesSingleLineMode = true
+        centeredCell.wraps = false
+        centeredCell.isScrollable = false
+        self.cell = centeredCell
+
+        // 视觉：自绘 1px 圆角边框（沿用 v2.2.40 批准样式）
         self.isBordered = false
         self.isBezeled = false
         self.drawsBackground = true
@@ -206,38 +263,49 @@ final class WikiLinkTextView: NSScrollView, NSTextViewDelegate {
     }
 
     override init(frame frameRect: NSRect) {
-        textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 10, height: 10))
+        textView = NSTextView()
         super.init(frame: frameRect)
+
+        // 1) textView 必须先正确设置 sizing，再作为 documentView 挂到 scrollView。
+        //    默认 NSTextView() 创建时 frame 为 0×0，缺少 minSize/maxSize 与 containerSize
+        //    会让 scrollView 的 contentView 不知道文档视图该多大 → 在 NSStackView 中作为
+        //    行字段时，整体高度/可见面积异常，导致字段边框与内容不可见（v2.2.44 回归）。
+        textView.minSize = NSSize(width: 0, height: 24)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                  height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.font = .systemFont(ofSize: 11)
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.isRichText = true
+        textView.allowsUndo = true
+        textView.textContainerInset = NSSize(width: 4, height: 4)
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.delegate = self
+        textView.backgroundColor = .textBackgroundColor
+
+        // 2) ScrollView 配置（无 bezel；圆角 + 边框靠外层 layer 自绘）
         self.translatesAutoresizingMaskIntoConstraints = false
         self.hasVerticalScroller = true
         self.hasHorizontalScroller = false
         self.borderType = .noBorder
         self.drawsBackground = false
         self.autohidesScrollers = true
+        // NSTextView 默认 textContainer.widthTracksTextView=true + 高度随内容；
+        // 配合 .width 自动调整，containerSize 不用手设，挂上 documentView 后会自动撑开。
+        self.documentView = textView
 
-        let tv = textView
-        tv.font = .systemFont(ofSize: 11)
-        tv.isEditable = true
-        tv.isSelectable = true
-        tv.isRichText = true
-        tv.allowsUndo = true
-        tv.textContainerInset = NSSize(width: 4, height: 3)
-        tv.textContainer?.widthTracksTextView = true
-        tv.textContainer?.heightTracksTextView = false
-        tv.textContainer?.lineFragmentPadding = 0
-        tv.isHorizontallyResizable = false
-        tv.isVerticallyResizable = true
-        tv.autoresizingMask = [.width]
-        tv.delegate = self
-        self.documentView = tv
-
-        // 视觉：自绘 1px 圆角边框（与 WikiLinkTextField / v2.2.40 一致）
+        // 3) 圆角边框（layer 自绘）
         self.wantsLayer = true
         self.layer?.borderColor = NSColor.separatorColor.cgColor
         self.layer?.borderWidth = 1
         self.layer?.cornerRadius = 5
-        self.layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
-        // 固定 24px 高（与单行长字段纵向对齐，内容滚动）。
+        // masksToBounds=true 让 cornerRadius 真正生效（否则 documentView 会溢出圆角）
+        self.layer?.masksToBounds = true
+
+        // 4) 固定 24px 高（与单行字段纵向对齐，多行内容滚动）。
         self.heightAnchor.constraint(equalToConstant: 24).isActive = true
     }
     required init?(coder: NSCoder) { nil }
