@@ -133,9 +133,11 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         }
 
         nameColumn.title = "名称"
-        nameColumn.width = 200
+        nameColumn.width = 320
+        nameColumn.minWidth = 160
         typeColumn.title = "类型"
-        typeColumn.width = 80
+        typeColumn.width = 120
+        typeColumn.minWidth = 80
         tableView.addTableColumn(nameColumn)
         tableView.addTableColumn(typeColumn)
         tableView.dataSource = self
@@ -156,11 +158,11 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         listScroll.hasVerticalScroller = true
         listScroll.documentView = tableView
         // 让 NSSplitView 用户可拖动调节宽度：
-        //   1) 不再固定 320 宽（之前 widthAnchor=320 让 splitter 形同虚设）
-        //   2) 给一个最小宽度 200（列表不至于被拖没）+ 弹性最大（跟随 split）
-        //   3) 设一个起点宽度 320 让初次加载视觉稳定
-        listScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
-        listScroll.widthAnchor.constraint(equalToConstant: 320).isActive = true
+        //   1) 不再固定窄宽（之前 widthAnchor=320 让 splitter 形同虚设）
+        //   2) 给一个最小宽度 240（列表不至于被拖没）+ 弹性最大（跟随 split）
+        //   3) 设一个起点宽度 440（容纳「名称 320 + 类型 120」两列宽 + 边距）
+        listScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
+        listScroll.widthAnchor.constraint(equalToConstant: 440).isActive = true
 
         let split = NSSplitView()
         split.isVertical = true
