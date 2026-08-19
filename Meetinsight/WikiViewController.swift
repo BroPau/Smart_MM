@@ -153,7 +153,7 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         searchField.recentsAutosaveName = "WikiSearchRecents"
         searchField.target = self
         searchField.action = #selector(runSearch)
-        searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
+        // v2.2.56: 搜索栏宽度跟随左侧面板（不再固定宽度）
 
         [homeBtn, rebuildBtn, refreshBtn, folderBtn, addBtn, deleteSelBtn].forEach { b in
             b.target = self
@@ -167,18 +167,18 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         deleteSelBtn.action = #selector(deleteSelected)
         deleteSelBtn.isEnabled = false   // 有选中才启用
 
-        let toolbar = NSStackView(views: [searchField, homeBtn, rebuildBtn, refreshBtn, folderBtn, addBtn, deleteSelBtn])
-        toolbar.orientation = .horizontal
-        toolbar.spacing = 10
-        toolbar.alignment = .centerY
-        toolbar.distribution = .fill
-        searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        // v2.2.56: 按钮栏（放在右侧面板顶部，与编辑器左对齐）
+        let buttonToolbar = NSStackView(views: [homeBtn, rebuildBtn, refreshBtn, folderBtn, addBtn, deleteSelBtn])
+        buttonToolbar.orientation = .horizontal
+        buttonToolbar.spacing = 10
+        buttonToolbar.alignment = .centerY
+        buttonToolbar.distribution = .fill
+        buttonToolbar.translatesAutoresizingMaskIntoConstraints = false
         [homeBtn, rebuildBtn, refreshBtn, folderBtn, addBtn, deleteSelBtn].forEach {
             $0.setContentHuggingPriority(.required, for: .horizontal)
         }
 
         nameColumn.title = "名称"
-        // v2.2.55: 从 UserDefaults 恢复用户上次设定的列宽（无记录用默认值）
         nameColumn.width = UserDefaults.standard.object(forKey: PersistKey.nameColWidth) as? CGFloat ?? 320
         nameColumn.minWidth = 160
         typeColumn.title = "类型"
@@ -191,13 +191,10 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         tableView.delegate = self
         tableView.headerView = NSTableHeaderView()
         tableView.allowsEmptySelection = true
-        // ✅ 多选模型：⌘+点击切换、shift+点击范围、⌘+A 全选
         tableView.allowsMultipleSelection = true
         tableView.allowsColumnSelection = false
         tableView.allowsColumnResizing = true
         tableView.allowsColumnReordering = false
-        // v2.2.55: 移除 autosave，改用主动持久化（更可靠）
-        // tableView.autosaveName = "WikiListColumns"
         // 右键菜单
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "删除", action: #selector(deleteSelected), keyEquivalent: ""))
@@ -206,28 +203,27 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         let listScroll = NSScrollView()
         listScroll.hasVerticalScroller = true
         listScroll.documentView = tableView
-        // 让 NSSplitView 用户可拖动调节宽度：
-        //   1) 不再固定窄宽（之前 widthAnchor=320 让 splitter 形同虚设）
-        //   2) 给一个最小宽度 240（列表不至于被拖没）+ 弹性最大（跟随 split）
-        //   3) 设一个起点宽度 440（容纳「名称 320 + 类型 120」两列宽 + 边距）
         listScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
-        // v2.2.50: 改 equalToConstant → lessThanOrEqualToConstant，让分界线可自由拖动
-        //   min 240（列表不至于被拖没）+ max 800（不超过窗口 2/3）+ autosave 记忆位置
         listScroll.widthAnchor.constraint(lessThanOrEqualToConstant: 800).isActive = true
 
-        let split = NSSplitView()
-        wikiSplitView = split  // v2.2.50: 存引用供 viewDidLayout 设初始位置
-        split.isVertical = true
-        split.dividerStyle = .thin
-        split.delegate = self  // v2.2.55: 主动持久化分界位置
-        // v2.2.55: 移除 autosave，改用主动持久化（更可靠）
-        // split.autosaveName = "WikiSplitPosition"
-        // 让 split 在 stack 的垂直方向上"膨胀"——stack.distribution = .fill 默认选
-        // hugging 最低的子视图作 gravity；这里把 split 设为最低，确保它吃满剩余空间。
-        split.setContentHuggingPriority(.defaultLow, for: .vertical)
-        split.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        split.addSubview(listScroll)
-        // 右侧内容容器：托管 MarkdownEditorView（Wiki 首页与普通页均以 markdown 呈现）
+        // v2.2.56: 左侧面板 = 搜索栏 + 列表（搜索栏与列表同宽，跟随 split 分界线）
+        let leftPane = NSView()
+        leftPane.translatesAutoresizingMaskIntoConstraints = false
+        searchField.translatesAutoresizingMaskIntoConstraints = false
+        listScroll.translatesAutoresizingMaskIntoConstraints = false
+        leftPane.addSubview(searchField)
+        leftPane.addSubview(listScroll)
+        NSLayoutConstraint.activate([
+            searchField.topAnchor.constraint(equalTo: leftPane.topAnchor),
+            searchField.leadingAnchor.constraint(equalTo: leftPane.leadingAnchor),
+            searchField.trailingAnchor.constraint(equalTo: leftPane.trailingAnchor),
+            listScroll.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 8),
+            listScroll.leadingAnchor.constraint(equalTo: leftPane.leadingAnchor),
+            listScroll.trailingAnchor.constraint(equalTo: leftPane.trailingAnchor),
+            listScroll.bottomAnchor.constraint(equalTo: leftPane.bottomAnchor),
+        ])
+
+        // v2.2.56: 右侧面板 = 按钮栏 + 编辑器（按钮与编辑器左对齐）
         rightContainer.wantsLayer = true
         rightContainer.translatesAutoresizingMaskIntoConstraints = false
         editor.translatesAutoresizingMaskIntoConstraints = false
@@ -239,8 +235,28 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
             editor.bottomAnchor.constraint(equalTo: rightContainer.bottomAnchor)
         ])
         editor.isHidden = false
-        split.addSubview(rightContainer)
-        // 默认 NSSplitView 已允许用户拖动 divider；列表的 fixed-width 移除后即生效。
+        let rightPane = NSView()
+        rightPane.translatesAutoresizingMaskIntoConstraints = false
+        rightPane.addSubview(buttonToolbar)
+        rightPane.addSubview(rightContainer)
+        NSLayoutConstraint.activate([
+            buttonToolbar.topAnchor.constraint(equalTo: rightPane.topAnchor),
+            buttonToolbar.leadingAnchor.constraint(equalTo: rightPane.leadingAnchor),
+            rightContainer.topAnchor.constraint(equalTo: buttonToolbar.bottomAnchor, constant: 8),
+            rightContainer.leadingAnchor.constraint(equalTo: rightPane.leadingAnchor),
+            rightContainer.trailingAnchor.constraint(equalTo: rightPane.trailingAnchor),
+            rightContainer.bottomAnchor.constraint(equalTo: rightPane.bottomAnchor),
+        ])
+
+        let split = NSSplitView()
+        wikiSplitView = split
+        split.isVertical = true
+        split.dividerStyle = .thin
+        split.delegate = self
+        split.setContentHuggingPriority(.defaultLow, for: .vertical)
+        split.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        split.addSubview(leftPane)
+        split.addSubview(rightPane)
 
         progressIndicator.style = .spinning
         progressIndicator.controlSize = .small
@@ -250,7 +266,7 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         statusRow.spacing = 8
         statusRow.alignment = .centerY
 
-        let stack = NSStackView(views: [toolbar, split, statusRow])
+        let stack = NSStackView(views: [split, statusRow])
         stack.orientation = .vertical
         stack.spacing = 12
         stack.alignment = .leading
@@ -262,12 +278,7 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
             stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: pad),
             stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -pad),
             stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -pad),
-            // split 横向拉满 stack（stack.alignment = .leading 不拉伸子视图，故需显式约束）
             split.widthAnchor.constraint(equalTo: stack.widthAnchor)
-            // ❌ 不要把 split.heightAnchor 等于 stack.heightAnchor：
-            //    stack 里装着 split 自己，会逼 toolbar / statusRow 高度归零，
-            //    与它们的内禀高度 + Stack.Min(>=12) 互相冲突，必触发 Auto Layout 警告。
-            //    改靠 split 的低 hugging 优先级 + stack.distribution=.fill 让 split 吃掉剩余空间。
         ])
     }
 
