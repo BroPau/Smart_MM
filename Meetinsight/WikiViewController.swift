@@ -1021,7 +1021,7 @@ final class WikiRowCellView: NSTableCellView {
         titleField.focusRingType = .none
         titleField.font = NSFont.systemFont(ofSize: 13)
         titleField.lineBreakMode = .byTruncatingTail
-        titleField.alignment = .center   // 居中
+        titleField.alignment = .left   // 左对齐（v2.2.41：回退 v2.2.40 的居中，保留圆角高亮框）
         titleField.textColor = .labelColor
         titleField.translatesAutoresizingMaskIntoConstraints = false
         addSubview(titleField)
