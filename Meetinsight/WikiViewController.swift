@@ -300,10 +300,10 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         if page.isHome {
             editor.isHidden = false
             if let text = try? String(contentsOf: homeFile, encoding: .utf8) {
-                editor.load(markdown: text, editable: true)
+                editor.load(markdown: text, editable: true, pageName: page.name)
                 statusLabel.stringValue = "WiKi 首页"
             } else {
-                editor.load(markdown: "（无法读取文件：\(homeFile.path)）", editable: false)
+                editor.load(markdown: "（无法读取文件：\(homeFile.path)）", editable: false, pageName: "")
                 presentBaseDirAccessReset(message: "无法读取文件：\(homeFile.path)")
             }
             editor.setWikiPages(pages.flatMap { [$0.name] + $0.aliases })
@@ -315,10 +315,10 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         editor.isHidden = false
         let url = wikiPagesDir.appendingPathComponent(page.file)
         if let text = try? String(contentsOf: url, encoding: .utf8) {
-            editor.load(markdown: text, editable: true)
+            editor.load(markdown: text, editable: true, pageName: page.name)
             statusLabel.stringValue = "\(page.name)（\(page.type.capitalized)）"
         } else {
-            editor.load(markdown: "（无法读取文件：\(url.path)）", editable: false)
+            editor.load(markdown: "（无法读取文件：\(url.path)）", editable: false, pageName: "")
             // v2.2.13：读取失败多半是 App 重启后丢失对 sandbox 外目录的授权（EPERM）。
             // 引导用户「重设工作目录…」重新授权，无需重启 App。
             presentBaseDirAccessReset(message: "无法读取文件：\(url.path)")
@@ -694,6 +694,14 @@ extension WikiViewController: MarkdownEditorViewDelegate, SaveablePage {
     /// 解析并跳转，未命中则礼貌提示新建（供纪要页路由与本页点击复用）。anchor 为 [[Page#Heading]] 的标题锚点。
     private func resolveOrPromptWikiPage(_ name: String, anchor: String? = nil) {
         if let (idx, page) = resolveWikiPage(in: pages, rawName: name) {
+            // 同页锚点（如正文里的 [[#Heading]]、或反向链接跳回当前页）：不重载当前页，
+            // 直接滚动到目标标题，避免无谓刷新甚至丢失未保存的编辑。
+            if let cur = selectedPage, cur.name == page.name {
+                if let anchor = anchor, !anchor.isEmpty {
+                    editor.scrollToAnchor(anchor)
+                }
+                return
+            }
             tableView.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
             selectPage(page)
             if let anchor = anchor, !anchor.isEmpty {
@@ -702,6 +710,11 @@ extension WikiViewController: MarkdownEditorViewDelegate, SaveablePage {
                     self?.editor.scrollToAnchor(anchor)
                 }
             }
+            return
+        }
+        // 没找到页、但带了锚点（例如旧数据里 [[#Heading]] 被当成页名）：尝试在当前页内滚动到该标题。
+        if let anchor = anchor, !anchor.isEmpty {
+            editor.scrollToAnchor(anchor)
             return
         }
         // 没找到：礼貌给出 ⌘N 新建候选页的提示（带图标，避免破图）

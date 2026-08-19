@@ -331,7 +331,9 @@ md.inline.ruler.before('link', 'wikilink', (state, silent) => {
   if (h >= 0) {
     page = target.slice(0, h).trim()
     anchor = target.slice(h + 1).trim()
-    if (page.length === 0) page = anchor
+    // 同页锚点 [[#Heading]]：page 为空时，用当前页名兜底（宿主在 loadMarkdown 时下发），
+    // 这样渲染出的 data-page = 当前页、data-anchor = 标题，点击时宿主能正确判定「当前页 + 滚动到标题」。
+    if (page.length === 0) page = (window.__currentPageName || anchor)
   }
   if (!page) return false
   if (!silent) {
@@ -602,11 +604,34 @@ function applyWikiLink(view, page, from, to) {
   const { state } = view
   const markType = state.schema.marks.wikilink
   if (!markType) return
+  // 解析锚点：把「同页锚点」与「跨页锚点」统一拆成 干净的 page 名 + anchor 标题，
+  // 分别写入 wikilink mark 的 page / anchor 属性（data-page 只存页名、data-anchor 只存标题）。
+  // —— 这样 turndown 保存时会拼成 [[Page#Heading]]，点击时宿主也能正确 split，不会误当独立页。
+  let anchor = null
+  let display = page
+  if (typeof page === 'string') {
+    if (page.charAt(0) === '#') {
+      // 同页锚点：[[#Heading]]（Obsidian 式段内跳转）—补上当前页名。
+      const heading = page.slice(1).trim()
+      const cur = (window.__currentPageName || '').trim()
+      anchor = heading
+      display = heading                 // 同页锚点正文只显示标题
+      page = cur || heading            // 无当前页名兜底（极少见，如搜索结果视图）：退化为纯标题
+    } else {
+      // 跨页锚点：Page#Heading（理论上自动补全不会直接给这种值，但手动/粘贴路径可能进入）
+      const h = page.indexOf('#')
+      if (h >= 0) {
+        anchor = page.slice(h + 1).trim()
+        page = page.slice(0, h).trim() // page 只保留页名，anchor 单独存
+        if (!anchor) anchor = null
+      }
+    }
+  }
   let tr = state.tr
   // 1) 删除 [[query（光标前到 [[ 起始位置）
   tr = tr.delete(from, to)
-  // 2) 插入 page 文本（覆盖原 [[query）
-  const text = page
+  // 2) 插入可见文本（覆盖原 [[query）
+  const text = display
   tr = tr.insertText(text, from)
   const end = from + text.length
   // 3) 同步消耗紧随其后的 ]]（autoPair 自动插入的双方括号闭合符）。
@@ -618,7 +643,7 @@ function applyWikiLink(view, page, from, to) {
       tr = tr.delete(end, end + 2)
     }
   }
-  tr = tr.addMark(from, end, markType.create({ page: page, alias: null }))
+  tr = tr.addMark(from, end, markType.create({ page: page, anchor: anchor || null, alias: null }))
   tr = tr.setSelection(TextSelection.create(tr.doc, end))
   view.dispatch(tr)
 }
@@ -1080,7 +1105,10 @@ window.MMEditor = {
   getEditor() {
     return editor
   },
-  loadMarkdown(mdText, editable, mode, autoLink) {
+  loadMarkdown(mdText, editable, mode, autoLink, pageName) {
+    // 记录当前页名（宿主下发），供 [[#Heading]] 同页锚点渲染时兜底 data-page，
+    // 以及自动补全选中 #Heading 候选时拼出 [[Page#Heading]]。
+    window.__currentPageName = (typeof pageName === 'string' && pageName.trim()) ? pageName.trim() : ''
     const sp = splitFrontmatter(mdText || '')
     pendingFrontmatter = sp.fmRaw
     currentFM = sp.fmRaw ? fmNormalize(parseFrontmatter(sp.fmRaw.split('\n').slice(1, -1))) : {}

@@ -60,6 +60,7 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
     private var pendingEditable: Bool = true
     private var pendingMode: String = "ir"
     private var pendingAutoLink: Bool = false
+    private var pendingPageName: String = ""
 
     override init(frame frameRect: NSRect) {
         let cfg = WKWebViewConfiguration()
@@ -130,13 +131,14 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
     /// 载入并渲染 Markdown。editable=false 时预览区不可编辑（如搜索结果）。
     /// mode 可选：'ir'(实时预览,默认) / 'wysiwyg'(真·所见即所得) / 'sv'(分屏)。
     /// autoLink=true 时（仅纪要页单人纪要用），加载时会把正文里出现的已知 Wiki 页名裸词自动包裹为 [[名称]]。
-    func load(markdown: String, editable: Bool = true, mode: String = "ir", autoLink: Bool = false) {
+    func load(markdown: String, editable: Bool = true, mode: String = "ir", autoLink: Bool = false, pageName: String = "") {
         pendingMarkdown = markdown
         pendingEditable = editable
         pendingMode = mode
         pendingAutoLink = autoLink
+        pendingPageName = pageName
         if didLoad {
-            webView.evaluateJavaScript("loadMarkdown(\(jsString(markdown)), \(jsBool(editable)), \(jsString(mode)), \(jsBool(autoLink)))")
+            webView.evaluateJavaScript("loadMarkdown(\(jsString(markdown)), \(jsBool(editable)), \(jsString(mode)), \(jsBool(autoLink)), \(jsString(pageName)))")
         }
     }
 
@@ -189,7 +191,9 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
         didLoad = true
         if let pending = pendingMarkdown {
             pendingMarkdown = nil
-            webView.evaluateJavaScript("loadMarkdown(\(jsString(pending)), \(jsBool(pendingEditable)), \(jsString(pendingMode)), \(jsBool(pendingAutoLink)))")
+            let pname = pendingPageName
+            pendingPageName = ""
+            webView.evaluateJavaScript("loadMarkdown(\(jsString(pending)), \(jsBool(pendingEditable)), \(jsString(pendingMode)), \(jsBool(pendingAutoLink)), \(jsString(pname)))")
         }
     }
 
@@ -939,7 +943,7 @@ fileprivate enum TipTapEditorHTML {
       window.addEventListener('DOMContentLoaded', function(){
         if (window.MMEditor) MMEditor.init();
         // 暴露与 Vditor 模板同名的全局函数，复用 MarkdownEditorView 现有调用约定
-        window.loadMarkdown = function(md, editable, mode, autoLink){ return window.MMEditor.loadMarkdown(md, editable, mode, autoLink); };
+        window.loadMarkdown = function(md, editable, mode, autoLink, pageName){ return window.MMEditor.loadMarkdown(md, editable, mode, autoLink, pageName); };
         window.requestSave = function(){ return window.MMEditor.requestSave(); };
         window.setMode = function(m){ return window.MMEditor.setMode(m); };
         if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.editorBridge) {
