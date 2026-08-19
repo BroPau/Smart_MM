@@ -1360,20 +1360,20 @@ function wireBannerForm(root) {
       }
       keyInput.addEventListener('blur', onBlur)
       valInput.addEventListener('blur', onBlur)
-      // 两个输入框皆为空时按 Backspace → 立即关闭该空行
-      const onBackspaceClear = (e) => {
-        if (e.key === 'Backspace' && keyInput.value === '' && valInput.value === '') {
+      // 按 Esc → 退出添加（无论是否输入，立即关闭该空行）
+      const onEscape = (e) => {
+        if (e.key === 'Escape') {
           e.preventDefault()
           if (row.parentNode) row.parentNode.removeChild(row)
         }
       }
       keyInput.addEventListener('keydown', e => {
         if (e.key === 'Enter') { e.preventDefault(); valInput.focus(); return }
-        onBackspaceClear(e)
+        onEscape(e)
       })
       valInput.addEventListener('keydown', e => {
         if (e.key === 'Enter') { e.preventDefault(); finishRow(); return }
-        onBackspaceClear(e)
+        onEscape(e)
       })
     })
   })
