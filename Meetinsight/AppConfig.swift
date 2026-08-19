@@ -183,6 +183,24 @@ final class AppConfig {
         set { defaults.set(newValue, forKey: "EMBEDDING_USE_MIRROR") }
     }
 
+    /// RAG 嵌入模型档位标识（small-zh / base-zh / large-zh / m3）。
+    /// 用于设置页下拉菜单恢复选择 + 下载时确定 HF repo ID。
+    /// 默认 "small-zh"（向后兼容 v2.2.50 之前 pipeline.py 硬编码的 bge-small-zh-v1.5）。
+    var ragModelKey: String {
+        get { defaults.string(forKey: "MM_RAG_MODEL_KEY") ?? "small-zh" }
+        set { defaults.set(newValue, forKey: "MM_RAG_MODEL_KEY") }
+    }
+
+    /// ragModelKey → HuggingFace repo ID 映射（供 pipelineEnvironment 注入）。
+    var ragModelHFId: String {
+        switch ragModelKey {
+        case "base-zh":  return "BAAI/bge-base-zh-v1.5"
+        case "large-zh": return "BAAI/bge-large-zh-v1.5"
+        case "m3":       return "BAAI/bge-m3"
+        default:         return "BAAI/bge-small-zh-v1.5"
+        }
+    }
+
     /// Hugging Face 缓存/下载根目录（HF_HOME）。
     /// **关键**：沙箱 App 禁止写用户主目录下的 ~/.cache，故指向沙箱容器可写的
     /// Caches/huggingface（App 进程天生可读写）。下载与离线加载都走这个目录，
@@ -320,6 +338,8 @@ final class AppConfig {
         if let p = embeddingModelPath {
             env["MM_EMBEDDING_MODEL_PATH"] = p.path
         }
+        // 用户在设置页选择的 BGE 模型档位 HF ID → pipeline 据此加载（未设路径时走在线/缓存）
+        env["MM_EMBEDDING_MODEL"] = ragModelHFId
         // 国内镜像开关 → huggingface_hub 自动走 hf-mirror.com（无需科学上网）
         if embeddingUseMirror {
             env["HF_ENDPOINT"] = "https://hf-mirror.com"

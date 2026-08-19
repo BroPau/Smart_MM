@@ -43,10 +43,18 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
     // MARK: - 语音模型 · 自主定位（v2.2.50）
     private let chooseModelFileBtn = NSButton(title: "选择模型文件…", target: nil, action: nil)
 
-    // MARK: - RAG 嵌入模型（v2.2.50）
+    // MARK: - RAG 嵌入模型（v2.2.50/51 改为下拉菜单）
+    private let RAG_MODEL_INFO: [(id: String, label: String, hfId: String, dim: Int, approxMB: Int, desc: String)] = [
+        ("small-zh", "BGE-small-zh · 512维 · ~90MB",      "BAAI/bge-small-zh-v1.5", 512,   90, "最轻量，CPU 极快。中文专用，英文实体名检索能力有限。"),
+        ("base-zh",  "BGE-base-zh · 768维 · ~400MB",      "BAAI/bge-base-zh-v1.5",  768,  400, "中文质量提升，体积适中。仍以中文为主，英文能力有改善。"),
+        ("large-zh", "BGE-large-zh · 1024维 · ~1.3GB",    "BAAI/bge-large-zh-v1.5", 1024, 1300, "BGE 中文系列最强。英文能力优于 small/base，但仍弱于 M3。"),
+        ("m3",       "BGE-M3 · 1024维 · ~2.3GB（推荐）",   "BAAI/bge-m3",            1024, 2300, "中英双语最强。100+ 语种、8192 token 长文档、三模融合检索。无需前缀。"),
+    ]
+    private let ragModelPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let ragModelDescLabel = NSTextField(labelWithString: "")
     private let ragModelPathField = NSTextField(labelWithString: "")
     private let chooseRAGModelBtn = NSButton(title: "浏览本机嵌入模型…", target: nil, action: nil)
-    private let downloadRAGModelBtn = NSButton(title: "下载模型（国内镜像）", target: nil, action: nil)
+    private let downloadRAGModelBtn = NSButton(title: "下载所选模型", target: nil, action: nil)
     private let ragStatusLabel = NSTextField(labelWithString: "")
     private var ragDownloadProcess: Process?
 
@@ -75,6 +83,7 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
         renderScanResult()
         applySmartSelection()
         refreshModelActionButton()
+        applyRAGSmartSelection()
         refreshRAGModelPath()
     }
 
@@ -176,9 +185,17 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
 
         stack.addArrangedSubview(divider())
 
-        // —— RAG 嵌入模型（v2.2.50，界面参考 whisper.cpp）——
-        stack.addArrangedSubview(sectionTitle("RAG 嵌入模型 · bge-small-zh-v1.5"))
-        stack.addArrangedSubview(makeLabel("嵌入模型用于本地语义检索（WiKi 知识库向量化），不会上传。", size: 12))
+        // —— RAG 嵌入模型（v2.2.50/51，下拉菜单选择 BGE 规格）——
+        stack.addArrangedSubview(sectionTitle("RAG 嵌入模型"))
+        stack.addArrangedSubview(makeLabel("嵌入模型用于本地语义检索（WiKi 知识库向量化），不会上传。已下载的会自动识别。", size: 12))
+        RAG_MODEL_INFO.forEach { ragModelPopup.addItem(withTitle: $0.label) }
+        ragModelPopup.target = self; ragModelPopup.action = #selector(ragModelSelected)
+        stack.addArrangedSubview(formRow("模型档位", ragModelPopup))
+        ragModelDescLabel.font = NSFont.systemFont(ofSize: 12)
+        ragModelDescLabel.lineBreakMode = .byWordWrapping
+        ragModelDescLabel.maximumNumberOfLines = 0
+        ragModelDescLabel.preferredMaxLayoutWidth = 560
+        stack.addArrangedSubview(ragModelDescLabel)
         stack.addArrangedSubview(makeLabel("嵌入模型路径：", bold: true))
         ragModelPathField.lineBreakMode = .byTruncatingMiddle
         ragModelPathField.preferredMaxLayoutWidth = 480
@@ -466,15 +483,48 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
         }
     }
 
-    // MARK: - RAG 嵌入模型（v2.2.50）
+    // MARK: - RAG 嵌入模型（v2.2.50/51，下拉菜单选择 BGE 规格）
 
-    private let RAG_MODEL_ID = "BAAI/bge-small-zh-v1.5"
     private let RAG_MIRROR = "https://hf-mirror.com"
+
     private var ragDownloadDir: URL {
-        AppConfig.shared.huggingfaceHome.appendingPathComponent("bge-small-zh-v1.5")
+        let m = RAG_MODEL_INFO[safe: ragModelPopup.indexOfSelectedItem] ?? RAG_MODEL_INFO[0]
+        let dirName = m.hfId.split(separator: "/").last.map(String.init) ?? "bge-small-zh-v1.5"
+        return AppConfig.shared.huggingfaceHome.appendingPathComponent(dirName)
+    }
+
+    private func currentRAGModel() -> (id: String, label: String, hfId: String, dim: Int, approxMB: Int, desc: String) {
+        RAG_MODEL_INFO[safe: ragModelPopup.indexOfSelectedItem] ?? RAG_MODEL_INFO[0]
+    }
+
+    private func applyRAGSmartSelection() {
+        let key = AppConfig.shared.ragModelKey
+        if let idx = RAG_MODEL_INFO.firstIndex(where: { $0.id == key }) {
+            ragModelPopup.selectItem(at: idx)
+        } else {
+            ragModelPopup.selectItem(at: 0)
+        }
+        updateRAGModelDesc()
+    }
+
+    private func updateRAGModelDesc() {
+        let m = currentRAGModel()
+        let sizeStr = m.approxMB >= 1024
+            ? String(format: "%.1f GB", Double(m.approxMB) / 1024)
+            : "\(m.approxMB) MB"
+        ragModelDescLabel.stringValue = "\(m.desc)（\(m.dim) 维，约 \(sizeStr)）"
+    }
+
+    @objc private func ragModelSelected() {
+        let m = currentRAGModel()
+        AppConfig.shared.ragModelKey = m.id
+        updateRAGModelDesc()
+        refreshRAGModelPath()
     }
 
     private func refreshRAGModelPath() {
+        let m = currentRAGModel()
+        let modelName = m.hfId.split(separator: "/").last.map(String.init) ?? m.id
         if AppConfig.shared.embeddingModelSkipped {
             ragModelPathField.stringValue = "（已跳过 RAG）"
             ragStatusLabel.stringValue = "⏭️ RAG 语义检索已停用，WiKi 检索降级为关键词匹配。点「浏览」或「下载」可重新启用。"
@@ -482,34 +532,38 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
         } else if let p = AppConfig.shared.embeddingModelPath,
                   FileManager.default.fileExists(atPath: p.path) {
             ragModelPathField.stringValue = p.path
-            ragStatusLabel.stringValue = "✅ 已就绪：\(p.lastPathComponent)（\(p.path)）"
+            ragStatusLabel.stringValue = "✅ 已就绪：\(p.lastPathComponent)"
             ragStatusLabel.textColor = .systemGreen
         } else {
-            // 检查沙箱下载落点
             let dl = ragDownloadDir
             let hasWeights = FileManager.default.fileExists(atPath: dl.appendingPathComponent("model.safetensors").path)
                          || FileManager.default.fileExists(atPath: dl.appendingPathComponent("pytorch_model.bin").path)
             if hasWeights {
                 AppConfig.shared.embeddingModelPath = dl
                 ragModelPathField.stringValue = dl.path
-                ragStatusLabel.stringValue = "✅ 已就绪：bge-small-zh-v1.5（位于沙箱缓存）"
+                ragStatusLabel.stringValue = "✅ 已就绪：\(modelName)（位于沙箱缓存）"
                 ragStatusLabel.textColor = .systemGreen
             } else {
                 ragModelPathField.stringValue = "（未配置）"
-                ragStatusLabel.stringValue = "🔍 未检测到嵌入模型。点「下载模型（国内镜像）」自动下载（约 90MB），或「浏览本机嵌入模型…」指定本机已有目录。"
+                let sizeStr = m.approxMB >= 1024
+                    ? String(format: "%.1f GB", Double(m.approxMB) / 1024)
+                    : "\(m.approxMB) MB"
+                ragStatusLabel.stringValue = "🔍 未检测到 \(modelName) 模型。点「下载所选模型」自动下载（约 \(sizeStr)，国内镜像），或「浏览本机嵌入模型…」指定本机已有目录。"
                 ragStatusLabel.textColor = .secondaryLabelColor
             }
         }
     }
 
     @objc private func chooseRAGModelFolder() {
+        let m = currentRAGModel()
+        let modelName = m.hfId.split(separator: "/").last.map(String.init) ?? m.id
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         panel.canCreateDirectories = false
         panel.directoryURL = AppConfig.shared.embeddingModelPath ?? ragDownloadDir
-        panel.message = "选择含 bge-small-zh-v1.5 模型文件的目录（需包含 config.json + model.safetensors 或 pytorch_model.bin）"
+        panel.message = "选择含 \(modelName) 模型文件的目录（需包含 config.json + model.safetensors 或 pytorch_model.bin）"
         panel.prompt = "采用此目录"
         panel.begin { [weak self] resp in
             guard resp == .OK, let url = panel.url else { return }
@@ -532,19 +586,23 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
     }
 
     @objc private func downloadRAGModel() {
-        // 默认走国内镜像（用户在国内）
+        let m = currentRAGModel()
+        let modelName = m.hfId.split(separator: "/").last.map(String.init) ?? m.id
         AppConfig.shared.embeddingUseMirror = true
         AppConfig.shared.embeddingModelPath = nil
         AppConfig.shared.embeddingModelSkipped = false
         let py = AppConfig.shared.pythonExecutable.path
         let localDir = ragDownloadDir.path
-        ragStatusLabel.stringValue = "下载中… bge-small-zh-v1.5（约 90MB，国内镜像 hf-mirror.com）"
+        let sizeStr = m.approxMB >= 1024
+            ? String(format: "%.1f GB", Double(m.approxMB) / 1024)
+            : "\(m.approxMB) MB"
+        ragStatusLabel.stringValue = "下载中… \(modelName)（约 \(sizeStr)，国内镜像 hf-mirror.com）"
         ragStatusLabel.textColor = .systemBlue
         downloadRAGModelBtn.isEnabled = false
 
         let pyScript = """
         from huggingface_hub import snapshot_download
-        p = snapshot_download("\(RAG_MODEL_ID)", local_dir='\(localDir)', local_dir_use_symlinks=False)
+        p = snapshot_download("\(m.hfId)", local_dir='\(localDir)', local_dir_use_symlinks=False)
         print("LOCAL_DIR=" + p)
         """
         let proc = Process()
@@ -604,7 +662,7 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
     @objc private func restoreDefaults() {
         let resp = AppAlert.show(
             message: "恢复默认设置",
-            informative: "将重置：whisper-cli 路径、语音模型、RAG 嵌入模型、自定义提示词。\n（大模型 API Key / 供应商不受影响。）",
+            informative: "将重置：whisper-cli 路径、语音模型、RAG 嵌入模型（档位选择）、自定义提示词。\n（大模型 API Key / 供应商不受影响。）",
             icon: .warning,
             style: .warning,
             buttons: ["恢复", "取消"]
@@ -614,10 +672,11 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
         AppConfig.shared.whisperCLI = URL(fileURLWithPath: "/Users/weilu/whisper.cpp/build/bin/whisper-cli")
         AppConfig.shared.whisperModel = URL(fileURLWithPath: "/Users/weilu/whisper.cpp/models/ggml-large-v3.bin")
         AppConfig.shared.customSystemPrompt = nil
-        // v2.2.50: 重置 RAG 嵌入模型
+        // v2.2.50/51: 重置 RAG 嵌入模型
         AppConfig.shared.embeddingModelSkipped = false
         AppConfig.shared.embeddingModelPath = nil
         AppConfig.shared.embeddingUseMirror = false
+        AppConfig.shared.ragModelKey = "small-zh"
 
         refreshWhisperPath()
         refreshPrompt()
@@ -625,6 +684,7 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
         renderScanResult()
         applySmartSelection()
         refreshModelActionButton()
+        applyRAGSmartSelection()
         refreshRAGModelPath()
     }
 
