@@ -27,7 +27,11 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
         ("large-v3", "large-v3 · ~3.0 GB", 3000),
         ("turbo",    "turbo · ~1.5 GB",    1500)
     ]
-    private let MODEL_BASE_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/"
+
+    /// whisper 模型下载基 URL（根据镜像开关走 hf-mirror.com 或 huggingface.co）。
+    private var modelBaseURL: String {
+        AppConfig.shared.whisperModelBaseURL + "/ggerganov/whisper.cpp/resolve/main/"
+    }
     private let modelPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let modelInfoLabel = NSTextField(labelWithString: "")
     private let scanResultLabel = NSTextField(labelWithString: "")
@@ -38,6 +42,8 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
         URLSession(configuration: .default, delegate: self, delegateQueue: .main)
     }()
     private var destination: URL?
+    /// 断点续传恢复数据（下载失败/取消时由 URLSession 回调保存）。
+    private var resumeData: Data?
     private var existingModels: [String: URL] = [:]
 
     // MARK: - 语音模型 · 自主定位（v2.2.50）
@@ -291,11 +297,20 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
 
     @objc private func buildWhisper() {
         let dest = URL(fileURLWithPath: "/Users/weilu/whisper.cpp")
+        let useMirror = AppConfig.shared.whisperGitUseMirror
+        let cloneURL = useMirror
+            ? "\(AppConfig.GIT_MIRROR_PREFIX)/ggerganov/whisper.cpp.git"
+            : "https://github.com/ggerganov/whisper.cpp.git"
         let script = """
         set -e
-        rm -rf '\(dest.path)'
-        git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git '\(dest.path)'
-        cd '\(dest.path)'
+        if [ -d '\(dest.path)/.git' ]; then
+          cd '\(dest.path)'
+          git pull --depth 1
+        else
+          rm -rf '\(dest.path)'
+          git clone --depth 1 \(cloneURL) '\(dest.path)'
+          cd '\(dest.path)'
+        fi
         cmake -B build -DWHISPER_BUILD_CLI=ON
         cmake --build build -j
         """
@@ -424,10 +439,15 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
         let dest = modelsDir.appendingPathComponent("ggml-\(item.id).bin")
         destination = dest
         AppConfig.shared.whisperModel = dest
-        let url = URL(string: MODEL_BASE_URL + "ggml-\(item.id).bin")!
-        modelStatusLabel.stringValue = "准备下载…"
+        modelStatusLabel.stringValue = resumeData != nil ? "继续下载…" : "准备下载…"
         modelActionBtn.isEnabled = false
-        session.downloadTask(with: url).resume()
+        // 断点续传：有 resumeData 时用恢复数据创建任务，否则从 URL 新建。
+        if let resume = resumeData {
+            session.downloadTask(withResumeData: resume).resume()
+        } else {
+            let url = URL(string: modelBaseURL + "ggml-\(item.id).bin")!
+            session.downloadTask(with: url).resume()
+        }
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
@@ -452,8 +472,22 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        if let error = error { modelStatusLabel.stringValue = "❌ 下载失败：\(error.localizedDescription)" }
-        modelActionBtn.isEnabled = true
+        if let error = error {
+            // 提取断点续传数据（下载失败/取消时 URLSession 提供）。
+            let data = (error as NSError).userInfo[NSURLSessionDownloadTaskResumeData] as? Data
+            resumeData = data
+            if data != nil {
+                modelStatusLabel.stringValue = "⚠️ 下载中断（\(error.localizedDescription)）。可点「继续下载」从断点恢复。"
+                modelActionBtn.title = "继续下载"
+                modelActionBtn.action = #selector(startDownload)
+            } else {
+                modelStatusLabel.stringValue = "❌ 下载失败：\(error.localizedDescription)"
+            }
+            modelActionBtn.isEnabled = true
+        } else {
+            // 成功完成：清除断点数据（按钮状态由 didFinishDownloadingTo 已设置）。
+            resumeData = nil
+        }
     }
 
     // MARK: - 语音模型 · 自主定位（v2.2.50）
@@ -602,7 +636,7 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
 
         let pyScript = """
         from huggingface_hub import snapshot_download
-        p = snapshot_download("\(m.hfId)", local_dir='\(localDir)', local_dir_use_symlinks=False)
+        p = snapshot_download("\(m.hfId)", local_dir='\(localDir)')
         print("LOCAL_DIR=" + p)
         """
         let proc = Process()

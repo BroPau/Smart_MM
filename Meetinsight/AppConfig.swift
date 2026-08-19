@@ -183,6 +183,45 @@ final class AppConfig {
         set { defaults.set(newValue, forKey: "EMBEDDING_USE_MIRROR") }
     }
 
+    /// whisper 模型下载是否使用国内镜像（默认 true，用户在国内）。
+    /// 控制向导 Step2 / 设置页 whisper 模型下载 URL 使用 hf-mirror.com 替代 huggingface.co。
+    var whisperUseMirror: Bool {
+        get { (defaults.object(forKey: "MM_WHISPER_USE_MIRROR") as? Bool) ?? true }
+        set { defaults.set(newValue, forKey: "MM_WHISPER_USE_MIRROR") }
+    }
+
+    /// whisper.cpp 源码 clone 是否使用国内镜像（默认 true）。
+    /// 控制向导 Step1 / 设置页 buildWhisper 的 git clone URL 使用 gitclone.com 镜像。
+    var whisperGitUseMirror: Bool {
+        get { (defaults.object(forKey: "MM_WHISPER_GIT_USE_MIRROR") as? Bool) ?? true }
+        set { defaults.set(newValue, forKey: "MM_WHISPER_GIT_USE_MIRROR") }
+    }
+
+    /// pip install 是否使用国内镜像（默认 true）。
+    /// 控制向导 Step4 / 设置页依赖安装使用清华 TUNA 镜像加速。
+    var pipUseMirror: Bool {
+        get { (defaults.object(forKey: "MM_PIP_USE_MIRROR") as? Bool) ?? true }
+        set { defaults.set(newValue, forKey: "MM_PIP_USE_MIRROR") }
+    }
+
+    // MARK: - 国内镜像 URL 常量（供向导 / 设置页统一引用）
+
+    /// HuggingFace 国内 CDN 镜像。
+    static let HF_MIRROR_URL = "https://hf-mirror.com"
+    /// HuggingFace 原始 URL（镜像关闭时使用）。
+    static let HF_DIRECT_URL = "https://huggingface.co"
+    /// PyPI 清华 TUNA 镜像。
+    static let PIP_MIRROR_URL = "https://pypi.tuna.tsinghua.edu.cn/simple"
+    /// PyPI 清华 TUNA 镜像主机名（--trusted-host 参数）。
+    static let PIP_MIRROR_HOST = "pypi.tuna.tsinghua.edu.cn"
+    /// GitHub 国内镜像前缀（gitclone.com）。
+    static let GIT_MIRROR_PREFIX = "https://gitclone.com/github.com"
+
+    /// 根据镜像开关返回 whisper 模型下载基 URL。
+    var whisperModelBaseURL: String {
+        whisperUseMirror ? AppConfig.HF_MIRROR_URL : AppConfig.HF_DIRECT_URL
+    }
+
     /// RAG 嵌入模型档位标识（small-zh / base-zh / large-zh / m3）。
     /// 用于设置页下拉菜单恢复选择 + 下载时确定 HF repo ID。
     /// 默认 "small-zh"（向后兼容 v2.2.50 之前 pipeline.py 硬编码的 bge-small-zh-v1.5）。

@@ -195,12 +195,21 @@ final class Step1RuntimeView: WizardStepView {
 
     @objc private func downloadAndBuild() {
         let dest = URL(fileURLWithPath: "/Users/weilu/whisper.cpp")
-        appendLog("将克隆并构建到：\(dest.path)")
+        let useMirror = AppConfig.shared.whisperGitUseMirror
+        let cloneURL = useMirror
+            ? "\(AppConfig.GIT_MIRROR_PREFIX)/ggerganov/whisper.cpp.git"
+            : "https://github.com/ggerganov/whisper.cpp.git"
+        appendLog("将克隆并构建到：\(dest.path)\n镜像：\(useMirror ? "gitclone.com 国内镜像" : "GitHub 直连")")
         let script = """
         set -e
-        rm -rf '\(dest.path)'
-        git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git '\(dest.path)'
-        cd '\(dest.path)'
+        if [ -d '\(dest.path)/.git' ]; then
+          cd '\(dest.path)'
+          git pull --depth 1
+        else
+          rm -rf '\(dest.path)'
+          git clone --depth 1 \(cloneURL) '\(dest.path)'
+          cd '\(dest.path)'
+        fi
         cmake -B build -DWHISPER_BUILD_CLI=ON
         cmake --build build -j
         """
@@ -255,7 +264,11 @@ final class Step2ModelView: WizardStepView, URLSessionDownloadDelegate {
         ("large-v3", "large-v3 · ~3.0 GB", 3000),
         ("turbo",    "turbo · ~1.5 GB",    1500)
     ]
-    private let MODEL_BASE_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/"
+
+    /// whisper 模型下载基 URL（根据镜像开关走 hf-mirror.com 或 huggingface.co）。
+    private var modelBaseURL: String {
+        AppConfig.shared.whisperModelBaseURL + "/ggerganov/whisper.cpp/resolve/main/"
+    }
 
     private let popup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let infoLabel = NSTextField(labelWithString: "")
@@ -268,6 +281,9 @@ final class Step2ModelView: WizardStepView, URLSessionDownloadDelegate {
         URLSession(configuration: .default, delegate: self, delegateQueue: .main)
     }()
     private var destination: URL?
+    /// 断点续传恢复数据（下载失败/取消时由 URLSession 回调保存）。
+    /// 用户点「继续下载」时用此 data 创建新 downloadTask 恢复下载。
+    private var resumeData: Data?
     /// buildUI() 阶段扫描到的本机已有模型（id → URL）。切换档位与下载完成时刷新。
     private var existingModels: [String: URL] = [:]
 
@@ -496,11 +512,15 @@ final class Step2ModelView: WizardStepView, URLSessionDownloadDelegate {
         destination = dest
         AppConfig.shared.whisperModel = dest
 
-        let url = URL(string: MODEL_BASE_URL + "ggml-\(item.id).bin")!
-        statusLabel.stringValue = "准备下载…"
+        statusLabel.stringValue = resumeData != nil ? "继续下载…" : "准备下载…"
         actionBtn.isEnabled = false
-        let task = session.downloadTask(with: url)
-        task.resume()
+        // 断点续传：有 resumeData 时用恢复数据创建任务，否则从 URL 新建。
+        if let resume = resumeData {
+            session.downloadTask(withResumeData: resume).resume()
+        } else {
+            let url = URL(string: modelBaseURL + "ggml-\(item.id).bin")!
+            session.downloadTask(with: url).resume()
+        }
     }
 
     // MARK: URLSessionDownloadDelegate（delegateQueue = main，回调在主线程）
@@ -537,8 +557,21 @@ final class Step2ModelView: WizardStepView, URLSessionDownloadDelegate {
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         if let error = error {
-            statusLabel.stringValue = "❌ 下载失败：\(error.localizedDescription)"
-            actionBtn.isEnabled = true
+            // 提取断点续传数据（下载失败/取消时 URLSession 提供）。
+            let data = (error as NSError).userInfo[NSURLSessionDownloadTaskResumeData] as? Data
+            resumeData = data
+            if data != nil {
+                statusLabel.stringValue = "⚠️ 下载中断（\(error.localizedDescription)）。可点「继续下载」从断点恢复。"
+                actionBtn.title = "继续下载"
+                actionBtn.isEnabled = true
+                actionBtn.action = #selector(startDownload)
+            } else {
+                statusLabel.stringValue = "❌ 下载失败：\(error.localizedDescription)"
+                actionBtn.isEnabled = true
+            }
+        } else {
+            // 成功完成：清除断点数据（按钮状态由 didFinishDownloadingTo 已设置）。
+            resumeData = nil
         }
     }
 
@@ -817,8 +850,14 @@ final class StepPythonEngineView: WizardStepView {
             appendLog("⚠️ 未找到 requirements.txt：\(req)")
             return
         }
-        appendLog("将执行：\(py) -m pip install -r \(req)")
-        let script = "\(py) -m pip install -r '\(req)'"
+        // 国内镜像加速 pip install（清华 TUNA）。
+        let useMirror = AppConfig.shared.pipUseMirror
+        let mirrorArgs = useMirror
+            ? "-i \(AppConfig.PIP_MIRROR_URL) --trusted-host \(AppConfig.PIP_MIRROR_HOST)"
+            : ""
+        let cmd = "\(py) -m pip install \(mirrorArgs) -r '\(req)'"
+        appendLog("将执行：\(cmd)")
+        let script = cmd
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/bash")
         proc.arguments = ["-c", script]
@@ -863,12 +902,14 @@ final class StepEmbeddingModelView: WizardStepView {
     private var modelReady = false
     private var skipped = false
 
-    private let modelID = "BAAI/bge-small-zh-v1.5"
-    /// 下载落点：沙箱容器可写的 Caches/huggingface/bge-small-zh-v1.5（扁平、无软链，
+    private let modelID: String = AppConfig.shared.ragModelHFId
+    /// 下载落点：沙箱容器可写的 Caches/huggingface/<model-name>（扁平、无软链，
     /// SentenceTransformer 可直接加载）。沙箱禁止写 ~/.cache，故必须走这里。
-    private let downloadDir: URL = {
-        AppConfig.shared.huggingfaceHome.appendingPathComponent("bge-small-zh-v1.5")
-    }()
+    /// 目录名从 HF repo ID 取末段（如 bge-small-zh-v1.5 / bge-m3）。
+    private var downloadDir: URL {
+        let dirName = modelID.split(separator: "/").last.map(String.init) ?? "bge-small-zh-v1.5"
+        return AppConfig.shared.huggingfaceHome.appendingPathComponent(dirName)
+    }
     /// 已知国内 CDN 镜像（Hugging Face 的官方推荐替代，无需科学上网，文件结构与 HF 完全一致）
     private let mirrorEndpoint = "https://hf-mirror.com"
 
@@ -994,7 +1035,7 @@ final class StepEmbeddingModelView: WizardStepView {
         let localDir = downloadDir.path
         let pyScript = """
 from huggingface_hub import snapshot_download
-p = snapshot_download(\"\(modelID)\", local_dir=\(shellQuote(localDir)), local_dir_use_symlinks=False)
+p = snapshot_download(\"\(modelID)\", local_dir=\(shellQuote(localDir)))
 print("LOCAL_DIR=" + p)
 """
         let script = "\(shellQuote(py)) -c \(shellQuote(pyScript))"
