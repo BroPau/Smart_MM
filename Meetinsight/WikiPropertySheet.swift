@@ -140,153 +140,63 @@ extension WikiPageSpec {
     }
 }
 
-// MARK: - WikiLinkTextField（v2.2.33 新增，替代 NSTextField）
+// MARK: - WikiLinkTextField（v2.2.44 重写：标准 NSTextField，彻底修复焦点/输入回归）
 //
-// 单行文本输入控件，高度 24px（与 NSTextField 等同），可识别 `[[Page]]` 显示为蓝色超链接。
-// 实现策略：内嵌一个 NSTextView 用 NSScrollView 包起来（isHorizontallyResizable=false → 自动单行折行），
-// 在 textDidChange 时扫描 [[...]] 子串替换为带 .link 属性的 NSAttributedString。
-// 点击超链接 → WikiLinkRouter.open(name:anchor:)。
-final class WikiLinkTextField: NSView, NSTextViewDelegate {
-    private let scroll = NSScrollView()
-    let textView = NSTextView()
+// 单行文本输入控件，高度 24px（与 NSTextField 等同）。直接继承 NSTextField，
+// 用系统标准的圆角边框（layer 自绘 1px 圆角边框，沿用 v2.2.40 批准样式），
+// 不再包三层 NSView→NSScrollView→NSTextView —— 那正是「点击无法聚焦 / 移开回不去 /
+// 部分框死锁」的根因（外层 NSView 破坏了 AppKit 的 hit-test / first-responder 链）。
+// 单行长文本字段本身不含 `[[Page]]`（规范名/中文名/公司/职位…均为纯文本），双链渲染
+// 集中在多行 WikiLinkTextView（反向链接/公司简介/功能简述）。
+final class WikiLinkTextField: NSTextField, NSTextFieldDelegate {
     var onChange: (() -> Void)?
-    var stringValue: String { textView.string }
-
-    func setStringValue(_ s: String) {
-        textView.string = s
-        highlightWikiLinks()
-    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        wantsLayer = true
-        // 与 NSTextField 视觉一致：roundedBezel 风格边框
-        layer?.borderColor = NSColor.separatorColor.cgColor
-        layer?.borderWidth = 1
-        layer?.cornerRadius = 5
-        layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
-
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.hasVerticalScroller = false
-        scroll.hasHorizontalScroller = false
-        scroll.borderType = .noBorder
-        scroll.drawsBackground = false
-        scroll.autohidesScrollers = true
-        addSubview(scroll)
-
-        let tv = textView
-        tv.font = .systemFont(ofSize: 12)
-        tv.isEditable = true
-        tv.isSelectable = true
-        tv.isRichText = true  // 启用 attributed string 以支持超链接
-        tv.allowsUndo = true
-        tv.isHorizontallyResizable = false
-        tv.isVerticallyResizable = false
-        tv.textContainerInset = NSSize(width: 4, height: 3)
-        tv.textContainer?.widthTracksTextView = true
-        tv.textContainer?.heightTracksTextView = false
-        tv.textContainer?.lineFragmentPadding = 0
-        tv.delegate = self
-        scroll.documentView = tv
-
-        NSLayoutConstraint.activate([
-            scroll.topAnchor.constraint(equalTo: topAnchor),
-            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
-            heightAnchor.constraint(equalToConstant: 24)
-        ])
+        // 视觉：自绘 1px 圆角边框（与 v2.2.40 批准样式一致）；文本可编辑、可点聚焦。
+        self.isBordered = false
+        self.isBezeled = false
+        self.drawsBackground = true
+        self.backgroundColor = NSColor.textBackgroundColor
+        self.font = .systemFont(ofSize: 12)
+        self.textColor = .labelColor
+        self.delegate = self
+        self.wantsLayer = true
+        self.layer?.borderColor = NSColor.separatorColor.cgColor
+        self.layer?.borderWidth = 1
+        self.layer?.cornerRadius = 5
+        // 固定 24px 高（与 NSTextField 等同，纵向与多行字段对齐）。
+        self.heightAnchor.constraint(equalToConstant: 24).isActive = true
     }
     required init?(coder: NSCoder) { nil }
 
-    func textDidChange(_ notification: Notification) {
-        onChange?()
-        // v2.2.43：编辑期间绝不重排 textStorage / selectedRanges / typingAttributes。
-        // 高亮只在「非编辑态」做（加载 setStringValue + textDidEndEditing），从根上消除焦点/输入错乱。
+    /// 设置文本（保留原有调用方 API：setStringValue(_:)）。
+    func setStringValue(_ s: String) { self.stringValue = s }
+
+    // MARK: NSControlTextEditingDelegate
+    func controlTextDidChange(_ obj: Notification) { onChange?() }
+    func controlTextDidEndEditing(_ obj: Notification) { onChange?() }
+
+    /// 校验失败：边框变红（之后用户编辑会由 onChange 调 clearInvalid 复位）。
+    func markInvalid() {
+        self.layer?.borderColor = NSColor.systemRed.cgColor
+        self.layer?.borderWidth = 1.5
     }
-
-    /// 开始编辑 → 仅把 typingAttributes 重置为普通文字属性（保证在 [[...]] 内输入新字符不会继承链接色/下划线）。
-    /// **不剥离链接属性**：NSTextView 在 isEditable=true 下，点击 [[...]] 默认放光标而非激活链接，所以链接保持蓝色可点显示。
-    func textDidBeginEditing(_ notification: Notification) {
-        guard let tv = notification.object as? NSTextView, tv == textView else { return }
-        tv.typingAttributes = [
-            .font: NSFont.systemFont(ofSize: 12),
-            .foregroundColor: NSColor.labelColor
-        ]
-    }
-
-    /// 结束编辑（失焦）→ 重新扫描 [[Page]] 应用链接属性，并重置 typingAttributes。
-    func textDidEndEditing(_ notification: Notification) {
-        guard let tv = notification.object as? NSTextView, tv == textView else { return }
-        highlightWikiLinks()
-    }
-
-    /// 点击 [[Page]] / [[Page#anchor]] 超链接 → 跳转到对应 wiki 页（而非被系统当成 URL 打开）。
-    /// 仅在非编辑态（失焦高亮后）点击才触发；编辑态下 NSTextView 默认把链接点击当光标放置，不会误触。
-    func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
-        if let url = link as? URL { return handleMeetinsightLink(url) }
-        return false
-    }
-
-    /// 扫描 `[[Page]]` / `[[Page|alias]]` / `[[Page#anchor]]` / `[[Page|alias#anchor]]`，转成蓝色超链接。
-    /// 不修改用户输入字符，只在显示层加属性。仅在加载（setStringValue）与失焦（textDidEndEditing）时调用。
-    /// v2.2.37：用 setAttributes(baseAttrs) + addAttributes(linkAttrs) 精准更新。
-    /// v2.2.42：不再于 textDidChange 调用，从根本上消除「编辑期重排导致焦点/输入错乱」的根因。
-    /// v2.2.43：末尾重置 typingAttributes = baseAttrs，确保加载/失焦后输入新字符不继承链接色。
-    private func highlightWikiLinks() {
-        let raw = textView.string
-        let pattern = "\\[\\[([^\\]\\n]+?)\\]\\]"
-        guard let re = try? NSRegularExpression(pattern: pattern) else { return }
-        let nsStr = raw as NSString
-        let matches = re.matches(in: raw, range: NSRange(location: 0, length: nsStr.length))
-        guard let storage = textView.textStorage else { return }
-
-        let baseAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 12),
-            .foregroundColor: NSColor.labelColor
-        ]
-
-        storage.beginEditing()
-        let fullRange = NSRange(location: 0, length: nsStr.length)
-        storage.setAttributes(baseAttrs, range: fullRange)
-        for m in matches {
-            let r = m.range(at: 1)  // 内容（不含 [[ ]]）
-            let content = nsStr.substring(with: r)
-            // 拆分 alias 与 #anchor（兼容 [[Page|alias#anchor]]）
-            let firstSplit = content.components(separatedBy: "|")
-            let left = firstSplit.first ?? content
-            let pageAndAnchor = left.components(separatedBy: "#")
-            let page = pageAndAnchor.first ?? left
-            let anchor = pageAndAnchor.count > 1 ? pageAndAnchor[1] : ""
-            // 用 meetinsight:// 协议 + 单独 anchor 段避免被当 URL 渲染
-            var urlStr = "meetinsight://open-wiki/\(page.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? page)"
-            if !anchor.isEmpty {
-                let a = (anchor.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? anchor)
-                urlStr += "#\(a)"
-            }
-            if let url = URL(string: urlStr) {
-                let linkAttrs: [NSAttributedString.Key: Any] = [
-                    .font: NSFont.systemFont(ofSize: 12),
-                    .foregroundColor: NSColor.controlAccentColor,
-                    .underlineStyle: NSUnderlineStyle.single.rawValue,
-                    .link: url
-                ]
-                storage.addAttributes(linkAttrs, range: m.range)
-            }
-        }
-        storage.endEditing()
-        // 重置 typingAttributes → 输入新字符为普通文字色，不继承链接色/下划线。
-        textView.typingAttributes = baseAttrs
+    /// 复位边框为常规灰。
+    func clearInvalid() {
+        self.layer?.borderColor = NSColor.separatorColor.cgColor
+        self.layer?.borderWidth = 1
     }
 }
 
-// MARK: - WikiLinkTextView（v2.2.33 新增，替代多行 NSTextView）
+// MARK: - WikiLinkTextView（v2.2.44 重写：NSScrollView 直接包 NSTextView，去掉外层 NSView）
 //
-// 多行版本，高度 24px（纵向对齐单行字段），内部 NSScrollView 提供纵向滚动。
-// 同样的 [[Page]] 高亮 + 点击跳转。
-final class WikiLinkTextView: NSView, NSTextViewDelegate {
-    private let scroll = NSScrollView()
-    let textView = NSTextView()
+// 多行版本，高度 24px（与 v2.2.33 一致，纵向滚动）。直接继承 NSScrollView，
+// documentView 为 NSTextView（**无外层 NSView 包装**），从根上修复 hit-test / first-responder
+// 链断裂（这正是「点不到 / 回不去 / 某些框死锁」的真正根因）。
+// 同样的 `[[Page]]` 高亮 + 点击跳转（clickedOnLink → WikiLinkRouter.open）。
+final class WikiLinkTextView: NSScrollView, NSTextViewDelegate {
+    let textView: NSTextView
     var onChange: (() -> Void)?
     var stringValue: String { textView.string }
 
@@ -296,20 +206,14 @@ final class WikiLinkTextView: NSView, NSTextViewDelegate {
     }
 
     override init(frame frameRect: NSRect) {
+        textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 10, height: 10))
         super.init(frame: frameRect)
-        wantsLayer = true
-        layer?.borderColor = NSColor.separatorColor.cgColor
-        layer?.borderWidth = 1
-        layer?.cornerRadius = 5
-        layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
-
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.hasVerticalScroller = true
-        scroll.hasHorizontalScroller = false
-        scroll.borderType = .noBorder
-        scroll.drawsBackground = false
-        scroll.autohidesScrollers = true
-        addSubview(scroll)
+        self.translatesAutoresizingMaskIntoConstraints = false
+        self.hasVerticalScroller = true
+        self.hasHorizontalScroller = false
+        self.borderType = .noBorder
+        self.drawsBackground = false
+        self.autohidesScrollers = true
 
         let tv = textView
         tv.font = .systemFont(ofSize: 11)
@@ -325,25 +229,25 @@ final class WikiLinkTextView: NSView, NSTextViewDelegate {
         tv.isVerticallyResizable = true
         tv.autoresizingMask = [.width]
         tv.delegate = self
-        scroll.documentView = tv
+        self.documentView = tv
 
-        NSLayoutConstraint.activate([
-            scroll.topAnchor.constraint(equalTo: topAnchor),
-            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
-            heightAnchor.constraint(equalToConstant: 24)
-        ])
+        // 视觉：自绘 1px 圆角边框（与 WikiLinkTextField / v2.2.40 一致）
+        self.wantsLayer = true
+        self.layer?.borderColor = NSColor.separatorColor.cgColor
+        self.layer?.borderWidth = 1
+        self.layer?.cornerRadius = 5
+        self.layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
+        // 固定 24px 高（与单行长字段纵向对齐，内容滚动）。
+        self.heightAnchor.constraint(equalToConstant: 24).isActive = true
     }
     required init?(coder: NSCoder) { nil }
 
     func textDidChange(_ notification: Notification) {
         onChange?()
-        // v2.2.43：编辑期间绝不重排 textStorage / selectedRanges / typingAttributes。
+        // v2.2.43/44：编辑期间绝不重排 textStorage / selectedRanges / typingAttributes。
     }
 
     /// 开始编辑 → 仅重置 typingAttributes 为普通文字（字号 11），保证在 [[...]] 内输入新字符不继承链接色/下划线。
-    /// **不剥离链接属性**：NSTextView 在 isEditable=true 下，点击 [[...]] 默认放光标而非激活链接，所以链接保持蓝色可点显示。
     func textDidBeginEditing(_ notification: Notification) {
         guard let tv = notification.object as? NSTextView, tv == textView else { return }
         tv.typingAttributes = [
@@ -365,9 +269,9 @@ final class WikiLinkTextView: NSView, NSTextViewDelegate {
         return false
     }
 
-    /// 扫描 [[Page]] 双链转蓝色超链接。仅加载（setStringValue）与失焦（textDidEndEditing）时调用。
+    /// 扫描 `[[Page]]` / `[[Page|alias]]` / `[[Page#anchor]]` / `[[Page|alias#anchor]]`，转成蓝色超链接。
+    /// 不修改用户输入字符，只在显示层加属性。仅在加载（setStringValue）与失焦（textDidEndEditing）时调用。
     /// v2.2.42：不再于 textDidChange 调用，消除编辑期重排导致焦点/输入错乱的根因。
-    /// v2.2.43：末尾重置 typingAttributes = baseAttrs，确保加载/失焦后输入新字符不继承链接色。
     private func highlightWikiLinks() {
         let raw = textView.string
         let baseAttrs: [NSAttributedString.Key: Any] = [
@@ -413,17 +317,8 @@ final class WikiLinkTextView: NSView, NSTextViewDelegate {
     }
 }
 
-// MARK: - 全站拦截超链接点击 → WikiLinkRouter
-//
-// 任何 NSTextView 触发 url 委派时（点击 meetinsight://open-wiki/Page）调用此处。
-// 既适用于 WikiLinkTextField/View，也适用于迁移期间系统后台弹出的页内 wikilink。
-class WikiLinkClickRouter: NSObject, NSTextViewDelegate {
-    weak var origDelegate: NSTextViewDelegate?
-    func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
-        if let url = link as? URL, handleMeetinsightLink(url) { return true }
-        return origDelegate?.textView?(textView, clickedOnLink: link, at: charIndex) ?? true
-    }
-}
+// MARK: - 全站双链点击路由已由各 NSTextView 的 `clickedOnLink` 直接转发到 handleMeetinsightLink
+// （见 WikiLinkTextView）。原 WikiLinkClickRouter 中间层从未被实例化，v2.2.44 已删除。
 
 // MARK: - TagFieldView（v2.2.33 改造：pill 行 + addField 独立下行）
 //
@@ -755,6 +650,16 @@ final class WikiPropertySheet: NSViewController {
         syncTypeSpecificVisibility()
     }
 
+    private var didInitialFocus = false
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        // v2.2.44：默认把光标放进「规范名」一栏（首次即聚焦，避免需手动点）。
+        // 仅聚焦一次，绝不抢回用户已主动移走的焦点。
+        guard !didInitialFocus else { return }
+        didInitialFocus = true
+        view.window?.makeFirstResponder(nameField)
+    }
+
     private func buildUI() {
         // —— 行模板辅助 ——
         func makeFieldRow(label: String, control: NSView, labelWidth: CGFloat = 78) -> NSStackView {
@@ -776,7 +681,7 @@ final class WikiPropertySheet: NSViewController {
         // —— 通用字段 ——
         nameField = WikiLinkTextField(frame: .zero)
         nameField.translatesAutoresizingMaskIntoConstraints = false
-        nameField.onChange = { [weak self] in self?.nameField.layer?.borderColor = NSColor.separatorColor.cgColor }
+        nameField.onChange = { [weak self] in self?.nameField.clearInvalid() }
 
         typeField = TypeFieldView(frame: .zero)
         typeField.translatesAutoresizingMaskIntoConstraints = false
@@ -1073,9 +978,8 @@ final class WikiPropertySheet: NSViewController {
         let s = gather()
         if s.name.isEmpty {
             NSSound.beep()
-            nameField.layer?.borderColor = NSColor.systemRed.cgColor
-            nameField.layer?.borderWidth = 1
-            view.window?.makeFirstResponder(nameField.textView)
+            nameField.markInvalid()
+            view.window?.makeFirstResponder(nameField)
             return
         }
         pendingResult = s
