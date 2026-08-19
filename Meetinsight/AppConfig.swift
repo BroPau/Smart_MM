@@ -110,10 +110,33 @@ final class AppConfig {
         isBaseDirAccessing = false
     }
 
+    // MARK: - Bundle 内置运行时（v2.2.57 分发版）
+    /// 分发版内嵌的 Python framework 解释器：
+    /// `Contents/Frameworks/Python.framework/Versions/3.11/bin/python3`（python.org
+    /// universal2 构建，依赖已预装进 framework 内 site-packages）。存在则优先于
+    /// 开发 venv / 系统 Python，使测试者机器无需安装任何 Python 环境。
+    static var bundledPythonURL: URL? {
+        guard let fw = Bundle.main.privateFrameworksURL else { return nil }
+        let py = fw.appendingPathComponent("Python.framework/Versions/3.11/bin/python3")
+        return FileManager.default.fileExists(atPath: py.path) ? py : nil
+    }
+
+    /// 分发版内嵌的静态 whisper-cli：
+    /// `Contents/Resources/bin/whisper-cli`（arm64 自包含单二进制，静态链接
+    /// libwhisper/libggml，无 @rpath 依赖）。存在则优先于开发机源码路径。
+    static var bundledWhisperCLIURL: URL? {
+        guard let res = Bundle.main.resourceURL else { return nil }
+        let cli = res.appendingPathComponent("bin/whisper-cli")
+        return FileManager.default.fileExists(atPath: cli.path) ? cli : nil
+    }
+
     /// whisper.cpp 二进制路径（WHISPER_CLI）。
+    /// 解析顺序：1) UserDefaults 显式指定；2) .app 内置静态二进制（分发版）；
+    /// 3) 开发机源码构建路径（仅本机调试）。
     var whisperCLI: URL {
         get {
             if let p = defaults.string(forKey: "WHISPER_CLI") { return URL(fileURLWithPath: p) }
+            if let bundled = Self.bundledWhisperCLIURL { return bundled }
             return URL(fileURLWithPath: "/Users/weilu/whisper.cpp/build/bin/whisper-cli")
         }
         set { defaults.set(newValue.path, forKey: "WHISPER_CLI") }
@@ -128,16 +151,26 @@ final class AppConfig {
         set { defaults.set(newValue.path, forKey: "WHISPER_MODEL") }
     }
 
+    /// 「恢复默认设置」用：清掉 UserDefaults 里的显式 whisper 路径覆盖，
+    /// 让 getter 重新走「内置二进制 → 开发机路径」解析顺序（v2.2.57）。
+    func resetWhisperPathOverrides() {
+        defaults.removeObject(forKey: "WHISPER_CLI")
+        defaults.removeObject(forKey: "WHISPER_MODEL")
+    }
+
     // MARK: - Python 引擎定位（v1：指向 PythonEngine 目录；正式打包时改为 Bundle 内嵌）
     /// Python 解释器解析顺序（与 SOP §运行环境 一致）：
     /// 1) UserDefaults 显式指定的 PYTHON_EXECUTABLE（最高优先级，便于临时切换）；
-    /// 2) PythonEngine/app/_deps_venv/bin/python3（本地 venv，存在则用，当前未构建）；
-    /// 3) 回退到系统 Python 3.11 `/usr/local/bin/python3`（已装 numpy/pypinyin/
+    /// 2) .app 内嵌 Python.framework（v2.2.57 分发版，精简依赖已预装进
+    ///    framework 内 site-packages，测试者机器零安装）；
+    /// 3) PythonEngine/app/_deps_venv/bin/python3（本地 venv，存在则用，当前未构建）；
+    /// 4) 回退到系统 Python 3.11 `/usr/local/bin/python3`（已装 numpy/pypinyin/
     ///    sentence-transformers/google-genai，**pipeline 要求的最低运行环境**，见 requirements.txt）。
     /// 注意：绝不可回退到 /usr/bin/python3（macOS 自带 3.9.6，无 numpy，会导致 import 失败、退出码 1）。
     var pythonExecutable: URL {
         get {
             if let p = defaults.string(forKey: "PYTHON_EXECUTABLE") { return URL(fileURLWithPath: p) }
+            if let bundled = Self.bundledPythonURL { return bundled }
             let venv = URL(fileURLWithPath:
                 "/Users/weilu/Downloads/ShareFolder/Meetinsight/PythonEngine/app/_deps_venv/bin/python3")
             if FileManager.default.fileExists(atPath: venv.path) { return venv }
@@ -342,6 +375,9 @@ final class AppConfig {
     // MARK: - 构造 pipeline.py 启动环境（契约 §2）
     func pipelineEnvironment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
+        // v2.2.57：分发版内嵌 Python.framework——禁止解释器往 bundle 内写 __pycache__，
+        // 否则运行一次后 app 签名校验失败（codesign 校验 bundle 字节）。
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["MM_BASE_DIR"] = baseDir.path
         env["MM_LLM_PROVIDER"] = llmProvider.rawValue
         env["MM_LLM_MODEL"] = llmModel

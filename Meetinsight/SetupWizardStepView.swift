@@ -137,6 +137,14 @@ final class Step1RuntimeView: WizardStepView {
     override func buildUI() {
         contentStack.addArrangedSubview(makeLabel(
             "Meetinsight 使用 whisper.cpp（C++）做语音转写，性能远优于纯 Python 方案，且无需庞大的 torch 依赖。", size: 12))
+        // v2.2.57：分发版已内置静态 arm64 二进制（Contents/Resources/bin/whisper-cli），
+        // 无需用户下载构建；仅未内置时（开发/精简异常）才显示下载按钮流程。
+        if AppConfig.bundledWhisperCLIURL != nil {
+            let bundled = makeLabel(
+                "✅ 已使用 app 内置的 whisper-cli（静态 arm64 二进制，无需下载构建）。", size: 12)
+            bundled.textColor = .systemGreen
+            contentStack.addArrangedSubview(bundled)
+        }
         contentStack.addArrangedSubview(makeLabel("whisper-cli 路径：", bold: true))
 
         pathField.stringValue = AppConfig.shared.whisperCLI.path
@@ -194,7 +202,8 @@ final class Step1RuntimeView: WizardStepView {
     }
 
     @objc private func downloadAndBuild() {
-        let dest = URL(fileURLWithPath: "/Users/weilu/whisper.cpp")
+        // v2.2.57：不再硬编码 /Users/weilu（测试者机器不存在该路径），改克隆到当前用户主目录。
+        let dest = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("whisper.cpp")
         let useMirror = AppConfig.shared.whisperGitUseMirror
         let cloneURL = useMirror
             ? "\(AppConfig.GIT_MIRROR_PREFIX)/ggerganov/whisper.cpp.git"
@@ -795,7 +804,11 @@ final class StepPythonEngineView: WizardStepView {
 
         validate = { [weak self] in self?.depsOK ?? false }
         showValidationError = { [weak self] in
-            self?.presentError("Python 依赖未就绪。请点击「安装依赖」自动安装，或确认本机 Python 3.11+ 已含 numpy / sentence-transformers / google-genai / openai / pypinyin。")
+            if AppConfig.bundledPythonURL != nil {
+                self?.presentError("内置运行时依赖异常。请点击「安装依赖」按精简集修复安装。")
+            } else {
+                self?.presentError("Python 依赖未就绪。请点击「安装依赖」自动安装，或确认本机 Python 3.11+ 已含 numpy / sentence-transformers / google-genai / openai / pypinyin。")
+            }
         }
 
         detect()
@@ -809,20 +822,30 @@ final class StepPythonEngineView: WizardStepView {
     }
 
     /// 后台检测 Python 版本与核心依赖是否齐全。
+    /// v2.2.57：内置精简运行时（.app 内嵌 Python.framework）不含 sentence-transformers
+    /// （RAG 栈 torch 体积过大，精简包刻意不装），检测集分两档：
+    /// - 内置运行时：numpy / pypinyin / google-genai / openai（精简集）
+    /// - 外部运行时：完整集（含 sentence-transformers）
     private func detect() {
         versionLabel.stringValue = "检测中…"
         depsLabel.stringValue = ""
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let py = AppConfig.shared.pythonExecutable.path
+            let bundled = AppConfig.bundledPythonURL != nil
+            let importSet = bundled
+                ? "import numpy, pypinyin, google.genai, openai; print('OK')"
+                : "import numpy, pypinyin, sentence_transformers, google.genai, openai; print('OK')"
             let (c1, o1) = runProcess(py, ["--version"])
             let ver = c1 == 0 ? o1 : "未找到（退出码 \(c1)）"
-            let (c2, o2) = runProcess(py, ["-c", "import numpy, pypinyin, sentence_transformers, google.genai, openai; print('OK')"])
+            let (c2, o2) = runProcess(py, ["-c", importSet])
             let ok = (c2 == 0)
             DispatchQueue.main.async {
                 self?.depsOK = ok
-                self?.versionLabel.stringValue = "版本：\(ver)"
+                self?.versionLabel.stringValue = "版本：\(ver)" + (bundled ? "（app 内置运行时）" : "")
                 self?.depsLabel.stringValue = ok
-                    ? "✅ 核心依赖已就绪（numpy / pypinyin / sentence-transformers / google-genai / openai）"
+                    ? (bundled
+                        ? "✅ 内置精简运行时已就绪（numpy / pypinyin / google-genai / openai；RAG 语义检索栈未内置）"
+                        : "✅ 核心依赖已就绪（numpy / pypinyin / sentence-transformers / google-genai / openai）")
                     : "⚠️ 依赖缺失：\(o2.isEmpty ? "请点击「安装依赖」" : o2)"
                 self?.depsLabel.textColor = ok ? .systemGreen : .secondaryLabelColor
             }
@@ -844,18 +867,27 @@ final class StepPythonEngineView: WizardStepView {
 
     @objc private func installDeps() {
         let py = AppConfig.shared.pythonExecutable.path
-        let req = AppConfig.shared.pipelineScript
-            .deletingLastPathComponent().appendingPathComponent("requirements.txt").path
-        guard FileManager.default.fileExists(atPath: req) else {
-            appendLog("⚠️ 未找到 requirements.txt：\(req)")
-            return
-        }
-        // 国内镜像加速 pip install（清华 TUNA）。
-        let useMirror = AppConfig.shared.pipUseMirror
-        let mirrorArgs = useMirror
+        // v2.2.57：内置精简运行时不能跑 `pip install -r requirements.txt`
+        // （requirements.txt 含 sentence-transformers→torch 1.5GB+，且内置 framework
+        // site-packages 预装完成，正常无需安装）。仅提供精简包列表的修复性安装。
+        let bundled = AppConfig.bundledPythonURL != nil
+        let mirrorArgs = AppConfig.shared.pipUseMirror
             ? "-i \(AppConfig.PIP_MIRROR_URL) --trusted-host \(AppConfig.PIP_MIRROR_HOST)"
             : ""
-        let cmd = "\(py) -m pip install \(mirrorArgs) -r '\(req)'"
+        let cmd: String
+        if bundled {
+            let pkgs = "numpy pypinyin google-genai openai"
+            cmd = "\(py) -m pip install \(mirrorArgs) --target '\(AppConfig.shared.pythonExecutable.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent())/lib/python3.11/site-packages' \(pkgs)"
+            appendLog("内置运行时缺依赖，按精简集修复安装（不含 RAG 栈）：\(pkgs)")
+        } else {
+            let req = AppConfig.shared.pipelineScript
+                .deletingLastPathComponent().appendingPathComponent("requirements.txt").path
+            guard FileManager.default.fileExists(atPath: req) else {
+                appendLog("⚠️ 未找到 requirements.txt：\(req)")
+                return
+            }
+            cmd = "\(py) -m pip install \(mirrorArgs) -r '\(req)'"
+        }
         appendLog("将执行：\(cmd)")
         let script = cmd
         let proc = Process()
@@ -917,6 +949,19 @@ final class StepEmbeddingModelView: WizardStepView {
     override func buildUI() {
         contentStack.addArrangedSubview(makeLabel(
             "该模型仅用于本地语义检索（把 WiKi 知识库切成向量，会议时按语义匹配背景资料），不会上传。向导会先检测本机是否已有缓存。", size: 12))
+
+        // v2.2.57：分发精简包未内置 RAG 栈（sentence-transformers/torch 体积过大），
+        // 此步骤下载的模型仅在外部完整运行时（开发机）下才能加载；内置运行时建议跳过。
+        if AppConfig.bundledPythonURL != nil {
+            let slimNote = makeLabel(
+                "ℹ️ 当前为内置精简运行时（未含 RAG 栈）。此步骤可跳过，跳过后 WiKi 检索"
+                + "降级为关键词匹配，其余功能不受影响；如后续需要语义检索，可在设置页"
+                + "重新下载并配置外部完整 Python 环境。", size: 11)
+            slimNote.textColor = .systemBlue
+            slimNote.maximumNumberOfLines = 0
+            slimNote.lineBreakMode = .byWordWrapping
+            contentStack.addArrangedSubview(slimNote)
+        }
 
         // 科学上网 / 国内镜像提示（关键：用户截图反馈默认走 HF 直连会失败）
         let notice = makeLabel(

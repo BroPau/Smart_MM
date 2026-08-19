@@ -305,7 +305,8 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
     }
 
     @objc private func buildWhisper() {
-        let dest = URL(fileURLWithPath: "/Users/weilu/whisper.cpp")
+        // v2.2.57：不再硬编码 /Users/weilu，改用当前用户主目录。
+        let dest = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("whisper.cpp")
         let useMirror = AppConfig.shared.whisperGitUseMirror
         let cloneURL = useMirror
             ? "\(AppConfig.GIT_MIRROR_PREFIX)/ggerganov/whisper.cpp.git"
@@ -360,7 +361,7 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
             let root = cli.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             dirs.append(root.appendingPathComponent("models"))
         }
-        dirs.append(URL(fileURLWithPath: "/Users/weilu/whisper.cpp/models"))
+        dirs.append(URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("whisper.cpp/models"))
 
         var found: [String: URL] = [:]
         for dir in dirs where fm.fileExists(atPath: dir.path) {
@@ -716,8 +717,8 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
         )
         guard resp == .alertFirstButtonReturn else { return }
 
-        AppConfig.shared.whisperCLI = URL(fileURLWithPath: "/Users/weilu/whisper.cpp/build/bin/whisper-cli")
-        AppConfig.shared.whisperModel = URL(fileURLWithPath: "/Users/weilu/whisper.cpp/models/ggml-large-v3.bin")
+        // v2.2.57：清掉显式覆盖，让 AppConfig 按内置→开发机顺序重新解析
+        AppConfig.shared.resetWhisperPathOverrides()
         AppConfig.shared.customSystemPrompt = nil
         // v2.2.50/51: 重置 RAG 嵌入模型
         AppConfig.shared.embeddingModelSkipped = false
