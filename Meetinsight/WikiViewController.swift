@@ -487,9 +487,14 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         guard row < pages.count else { return nil }
         let page = pages[row]
         let value = (tableColumn == nameColumn) ? page.name : page.type.capitalized
-        let cell = NSTextField(labelWithString: value)
-        cell.lineBreakMode = .byTruncatingTail
+        let cell = WikiRowCellView()
+        cell.titleField.stringValue = value
         return cell
+    }
+
+    /// v2.2.40：返回圆角高亮的 WikiRowView，让 IMX93_RM 这种被选中行从直角蓝条改成圆角框。
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        return WikiRowView()
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -963,5 +968,68 @@ extension WikiViewController: MarkdownEditorViewDelegate, SaveablePage {
         while j < lines.count && lines[j].trimmingCharacters(in: .whitespaces) != "---" { j += 1 }
         guard j < lines.count else { return md }
         return lines.dropFirst(j + 1).joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+// MARK: - 自定义行视图：圆角高亮 + 内边距
+/// v2.2.40：默认 NSTableView 的选中框是直角的，左对齐，本类把它改成圆角蓝色框（圆角半径 6，左右各 8 上下各 3 的内边距让圆角露出来），同时让单元格文本居中——IMX93_RM 不再被贴左边。样式参考会议纪要里 DropView / MinuteRowView 同款 cornerRadius=10 的圆角观感。
+final class WikiRowView: NSTableRowView {
+    /// 选中背景的左右内边距（让圆角从行边缘往内收一点，否则 100% 填满看不到圆度）。
+    private static let horizontalInset: CGFloat = 6
+    /// 选中背景的上下内边距。
+    private static let verticalInset: CGFloat = 2
+    /// 圆角半径。匹配会议纪要卡片圆角观感，但行更扁所以略小一点。
+    private static let cornerRadius: CGFloat = 6
+
+    override func drawBackground(in dirtyRect: NSRect) {
+        super.drawBackground(in: dirtyRect)
+    }
+
+    override func drawSelection(in dirtyRect: NSRect) {
+        guard selectionHighlightStyle != .none else { return }
+        // macOS 的 CGRect.insetBy 仅有 insetBy(dx:dy:)，手动算四角内缩矩形。
+        let rect = NSRect(x: bounds.minX + Self.horizontalInset,
+                          y: bounds.minY + Self.verticalInset,
+                          width: bounds.width - Self.horizontalInset * 2,
+                          height: bounds.height - Self.verticalInset * 2)
+        let path = NSBezierPath(roundedRect: rect, xRadius: Self.cornerRadius, yRadius: Self.cornerRadius)
+        // 选中：accentColor 蓝色填充（与系统选中观感一致，但圆角）；非激活窗口用稍淡的描边色
+        NSColor.controlAccentColor.setFill()
+        path.fill()
+    }
+}
+
+// MARK: - 自定义单元格：居中文本
+/// v2.2.40：把 [[Page]] / [Type] 的 NSTextField 都居中，呼应圆角高亮框的视觉重心。
+final class WikiRowCellView: NSTableCellView {
+    let titleField = NSTextField(labelWithString: "")
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setup()
+    }
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setup()
+    }
+
+    private func setup() {
+        titleField.isEditable = false
+        titleField.isSelectable = false
+        titleField.isBordered = false
+        titleField.drawsBackground = false
+        titleField.focusRingType = .none
+        titleField.font = NSFont.systemFont(ofSize: 13)
+        titleField.lineBreakMode = .byTruncatingTail
+        titleField.alignment = .center   // 居中
+        titleField.textColor = .labelColor
+        titleField.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(titleField)
+        textField = titleField
+        NSLayoutConstraint.activate([
+            titleField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            titleField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            titleField.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
     }
 }
