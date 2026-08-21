@@ -56,7 +56,8 @@ final class MinutesViewController: NSViewController,
     private let dropView = DropView()
     private let audioField = NSTextField(labelWithString: "尚未选择音频文件")
     private let pickBtn = NSButton(title: "选择音频文件…", target: nil, action: nil)
-    private let runBtn = NSButton(title: "开始生成", target: nil, action: nil)
+    private let runZhBtn = NSButton(title: "生成中文纪要", target: nil, action: nil)
+    private let runEnBtn = NSButton(title: "生成英文纪要", target: nil, action: nil)
     private let cancelBtn = NSButton(title: "取消", target: nil, action: nil)
     private let genProgressBar = NSProgressIndicator()
     private let genStatusLabel = NSTextField(labelWithString: "就绪")
@@ -286,21 +287,24 @@ final class MinutesViewController: NSViewController,
         audioField.lineBreakMode = .byTruncatingMiddle
         audioField.translatesAutoresizingMaskIntoConstraints = false
 
-        [pickBtn, runBtn, cancelBtn].forEach { b in
+        [pickBtn, runZhBtn, runEnBtn, cancelBtn].forEach { b in
             b.bezelStyle = .rounded
             b.alignment = .center
             b.font = NSFont.systemFont(ofSize: 12)
         }
         pickBtn.title = "选择音频…"
-        runBtn.title = "开始生成"
-        runBtn.keyEquivalent = ""
+        runZhBtn.title = "生成中文纪要"
+        runEnBtn.title = "生成英文纪要"
+        runZhBtn.keyEquivalent = ""
+        runEnBtn.keyEquivalent = ""
         pickBtn.target = self;  pickBtn.action = #selector(pickAudio)
-        runBtn.target = self;   runBtn.action = #selector(runPipeline)
+        runZhBtn.target = self; runZhBtn.action = #selector(runPipelineZh)
+        runEnBtn.target = self; runEnBtn.action = #selector(runPipelineEn)
         cancelBtn.target = self; cancelBtn.action = #selector(cancelRun)
         cancelBtn.isEnabled = false
         cancelBtn.isHidden = true       // 仅运行时出现
 
-        let controlRow = NSStackView(views: [pickBtn, runBtn, cancelBtn])
+        let controlRow = NSStackView(views: [pickBtn, runZhBtn, runEnBtn, cancelBtn])
         controlRow.orientation = .horizontal
         controlRow.spacing = 6
         controlRow.alignment = .centerY
@@ -364,7 +368,8 @@ final class MinutesViewController: NSViewController,
     /// 运行态切换：进度条 / 状态 / 日志仅在跑流程时展开，空闲时卡片保持薄身。
     private func setRunningUI(_ on: Bool) {
         running = on
-        runBtn.isEnabled = !on
+        runZhBtn.isEnabled = !on
+        runEnBtn.isEnabled = !on
         pickBtn.isEnabled = !on
         cancelBtn.isHidden = !on
         cancelBtn.isEnabled = on
@@ -694,7 +699,10 @@ final class MinutesViewController: NSViewController,
         }
     }
 
-    @objc private func runPipeline() {
+    @objc private func runPipelineZh() { runPipeline(lang: "zh") }
+    @objc private func runPipelineEn() { runPipeline(lang: "en") }
+
+    private func runPipeline(lang: String) {
         guard let audio = audioURL else {
             showAlert("请先选择一段音频文件（或拖入）。")
             return
@@ -716,10 +724,11 @@ final class MinutesViewController: NSViewController,
         setRunningUI(true)
         genProgressBar.doubleValue = 0
         genStatusLabel.stringValue = "启动中…"
-        appendLog("开始生成：\(audio.lastPathComponent)")
+        appendLog("开始生成（\(lang == "en" ? "英文" : "中文")）：\(audio.lastPathComponent)")
 
+        let langArg = (lang == "en") ? "en" : "zh"
         PipelineRunner.shared.run(
-            arguments: ["--json-log"],
+            arguments: ["--json-log", "--language", langArg],
             progress: { [weak self] p in self?.handleProgress(p) },
             completion: { [weak self] result in self?.handleCompletion(result) }
         )
