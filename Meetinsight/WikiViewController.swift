@@ -293,7 +293,9 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
     /// v2.2.55: 从 pipeline 读取页面列表。
     /// - silent=true：不显示 busy、不切换选中页、不打断编辑器，仅更新列表 + 写缓存（后台静默刷新）。
     /// - silent=false：显示 busy、完成后选中首页、处理 pendingOpenWikiName（等同原 loadPages）。
-    private func refreshPagesFromPipeline(silent: Bool) {
+    /// - reselectFile（v2.2.60）：非静默时若给出文件名，完成后改选中该文件对应页（用于编辑改名后
+    ///   跟随到新页），而非默认回首页；命中不到再退回首页。
+    private func refreshPagesFromPipeline(silent: Bool, reselectFile: String? = nil) {
         if !silent {
             setBusy(true, status: "读取页面列表…")
         }
@@ -349,10 +351,14 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
                 self.deleteSelBtn.isEnabled = (self.tableView.selectedRowIndexes.count > 0) && !self.busy
                 self.statusLabel.stringValue = "共 \(list.count) 个页面（后台已刷新）"
             } else {
-                // 非静默：选中首页 + 加载内容 + 处理 pending
+                // 非静默：选中目标页（默认首页）+ 加载内容 + 处理 pending
                 self.setBusy(false, status: "共 \(self.pages.count) 个页面（首页已置顶）")
-                self.tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-                self.selectPage(self.pages[0])
+                var row = 0
+                if let f = reselectFile, let idx = list.firstIndex(where: { $0.file == f }) {
+                    row = idx
+                }
+                self.tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+                self.selectPage(self.pages[row])
                 // 若此前有「会议纪要」页路由过来的待打开页，加载完成后打开它
                 if let pending = self.pendingOpenWikiName {
                     self.pendingOpenWikiName = nil
@@ -521,8 +527,11 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         PipelineRunner.shared.run(script: nil, arguments: arguments) { _ in }
         completion: { [weak self] result in
             guard let self else { return }
-            self.setBusy(false, status: result.error == nil ? "已保存" : "保存失败")
-            if let err = result.error { self.showAlert("WiKi 页操作失败：\(err.localizedDescription)") }
+            // v2.2.56：pipeline 的业务错误（重名、type 不支持等）写在 stdout 的 "ERR …" 并以退出码 2 退出，
+            // 只读 error.localizedDescription 会退化成「退出码 2」，用户无从判断原因。
+            let reason = Self.pipelineErrorReason(result.stdout) ?? result.error?.localizedDescription
+            self.setBusy(false, status: reason == nil ? "已保存" : "保存失败")
+            if let reason = reason { self.showAlert("WiKi 页操作失败：\(reason)") }
             self.loadPages()
         }
     }
@@ -811,20 +820,84 @@ extension WikiViewController: MarkdownEditorViewDelegate, SaveablePage {
     func markdownEditorDidRequestSave(_ editor: MarkdownEditorView, markdown: String) {
         guard let page = pendingSavePage else { return }
         pendingSavePage = nil
-        let url = page.isHome ? homeFile : wikiPagesDir.appendingPathComponent(page.file)
-        do {
-            try markdown.write(to: url, atomically: true, encoding: .utf8)
-            statusLabel.stringValue = "已保存 · \(page.name)"
-        } catch {
-            let msg = "保存失败：\(error.localizedDescription)"
-            // 写入失败多半也是工作目录授权失效（EPERM），引导重设。
-            if error.localizedDescription.contains("Operation not permitted")
-                || error.localizedDescription.contains("permission") {
-                presentBaseDirAccessReset(message: msg)
+        // WiKi 首页（WiKi首页.md）是 --build-index 生成的导航页，没有实体 frontmatter
+        // （无 Type / CanonicalName），不适用 --edit-wiki-page 契约，保持直写。
+        if page.isHome {
+            do {
+                try markdown.write(to: homeFile, atomically: true, encoding: .utf8)
+                statusLabel.stringValue = "已保存 · \(page.name)"
+            } catch {
+                let msg = "保存失败：\(error.localizedDescription)"
+                // 写入失败多半也是工作目录授权失效（EPERM），引导重设。
+                if error.localizedDescription.contains("Operation not permitted")
+                    || error.localizedDescription.contains("permission") {
+                    presentBaseDirAccessReset(message: msg)
+                } else {
+                    showAlert(msg)
+                }
+            }
+            return
+        }
+        // 实体页：统一走 pipeline.py --edit-wiki-page（v2.2.60 起 Swift 侧改为唯一写入口；pipeline 侧自 v2.2.56 已支持）。
+        // 此前直写文件会绕过 _sync_wiki_to_dicts —— 改了别名/公司不进脱敏词典、WiKi 首页也不刷新，
+        // 造成「App 写的页」与「pipeline 认的实体」双轨漂移。改为传整篇 markdown，
+        // 由 pipeline 解析 frontmatter 重渲染 + 原样保留正文。
+        saveEntityPageViaPipeline(page: page, markdown: markdown)
+    }
+
+    /// v2.2.60：实体 Wiki 页保存 —— 调 `--edit-wiki-page` 的 markdown 形态
+    /// （payload = `{original_name, markdown}`，见 pipeline.py `_spec_from_markdown`）。
+    /// 失败时【绝不】刷新列表或重载编辑器：用户正文原样留在编辑器里，修正后可再次保存。
+    private func saveEntityPageViaPipeline(page: WikiPage, markdown: String) {
+        setBusy(true, status: "保存中…")
+        let payload: [String: Any] = ["original_name": page.name, "markdown": markdown]
+        PipelineRunner.shared.run(script: nil, arguments: ["--edit-wiki-page", jsonString(payload)]) { _ in }
+        completion: { [weak self] result in
+            guard let self else { return }
+            // pipeline 的业务错误写在 stdout 的 "ERR …"（退出码 2），stderr 只有 JSON 进度日志，
+            // 所以必须从 stdout 取真正原因，否则用户只能看到「异常退出，退出码 2」。
+            if let reason = Self.pipelineErrorReason(result.stdout) ?? result.error?.localizedDescription {
+                self.setBusy(false, status: "保存失败")
+                if reason.contains("Operation not permitted") || reason.contains("permission") {
+                    self.presentBaseDirAccessReset(message: "保存失败：\(reason)")
+                } else {
+                    self.showAlert("保存失败：\(reason)\n\n当前编辑内容仍保留在编辑器中，修正后可再次保存。")
+                }
+                return
+            }
+            self.setBusy(false, status: "已保存 · \(page.name)")
+            // 成功：stdout 为 "OK <新文件绝对路径>"。改名时文件名会变，用回传文件名回选目标页
+            // 并重载正文（让用户看到规范化后的 frontmatter）；未改名则只静默刷新列表
+            // （同步别名/共享索引），不动编辑器，避免光标与滚动位置被重置。
+            let savedFile = Self.pipelineOKPath(result.stdout).map { ($0 as NSString).lastPathComponent }
+            if let f = savedFile, f != page.file {
+                self.refreshPagesFromPipeline(silent: false, reselectFile: f)
             } else {
-                showAlert(msg)
+                self.refreshPagesFromPipeline(silent: true)
             }
         }
+    }
+
+    /// 从 pipeline stdout 取业务错误原因（约定：末行 `ERR <原因>`）；没有错误则返回 nil。
+    static func pipelineErrorReason(_ stdout: String) -> String? {
+        for line in stdout.components(separatedBy: .newlines).reversed() {
+            let s = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard s.hasPrefix("ERR") else { continue }
+            let reason = String(s.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+            return reason.isEmpty ? "未知错误" : reason
+        }
+        return nil
+    }
+
+    /// 从 pipeline stdout 取 `OK <路径>` 里的路径部分（`--edit-wiki-page` 回传新页面绝对路径）。
+    static func pipelineOKPath(_ stdout: String) -> String? {
+        for line in stdout.components(separatedBy: .newlines).reversed() {
+            let s = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard s.hasPrefix("OK ") else { continue }
+            let p = String(s.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+            return p.isEmpty ? nil : p
+        }
+        return nil
     }
 
     func markdownEditorDidClickWikilink(_ editor: MarkdownEditorView, name: String, anchor: String?) {
@@ -924,186 +997,17 @@ extension WikiViewController: MarkdownEditorViewDelegate, SaveablePage {
         return body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : body
     }
 
-    // MARK: - frontmatter ↔ WikiPageSpec 互转（与 pipeline.py render_wiki_page 对齐）
-
-    /// 从 markdown 中拆出 frontmatter 块，按 WikiPageSpec.asDictForPython() 的字段映射为 spec。
-    static func parseWikiPageSpec(fromMarkdown md: String, fallbackName: String) -> WikiPageSpec {
-        let lines = md.replacingOccurrences(of: "\r\n", with: "\n").split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        guard let first = lines.first?.trimmingCharacters(in: .whitespaces), first == "---" else {
-            return WikiPageSpec(
-                name: fallbackName, type: "Person",
-                aliases: [], tags: [], updated: "", backlinks: [],
-                chineseName: "",
-                company: "", jobTitle: "", role: "",
-                companyType: "", industry: "", companyIntro: "",
-                brand: "", model: "", category: "",
-                functionDesc: "", status: "", replacement: ""
-            )
-        }
-        var j = 1
-        while j < lines.count && lines[j].trimmingCharacters(in: .whitespaces) != "---" { j += 1 }
-        let fmLines: [String] = (j < lines.count) ? Array(lines[1..<j]) : []
-        let dict = parseFrontmatterDict(fmLines)
-        let t = (dict["Type"] as? String) ?? "Person"
-        let name = (dict["CanonicalName"] as? String) ?? fallbackName
-        let aliases = (dict["Aliases"] as? [String]) ?? []
-        var tags = (dict["Tags"] as? [String]) ?? []
-        // 去掉内务标签，只保留人工标签给 UI 展示（类型 token 大小写不敏感）
-        tags = tags.filter { $0.lowercased() != "wiki" && $0.lowercased() != t.lowercased() }
-        let updated = (dict["Updated"] as? String) ?? ""
-        let backlinks = (dict["Backlinks"] as? [String]) ?? []
-        let chineseName = (dict["中文名"] as? String) ?? ""
-        let company = (dict["Company"] as? String) ?? ""
-        let jobTitle = (dict["Title"] as? String) ?? ""
-        let role = (dict["职能范围"] as? String) ?? ""
-        let companyType = (dict["公司类型"] as? String) ?? ""
-        let industry = (dict["所属行业"] as? String) ?? ""
-        let companyIntro = (dict["公司简介"] as? String) ?? ""
-        let brand = (dict["品牌"] as? String) ?? ""
-        let model = (dict["具体型号"] as? String) ?? ""
-        let category = (dict["类别"] as? String) ?? ""
-        let functionDesc = (dict["功能简述"] as? String) ?? ""
-        let status = (dict["状态"] as? String) ?? ""
-        let replacement = (dict["替代料"] as? String) ?? ""
-        return WikiPageSpec(
-            name: name, type: t,
-            aliases: aliases, tags: tags, updated: updated, backlinks: backlinks, chineseName: chineseName,
-            company: company, jobTitle: jobTitle, role: role,
-            companyType: companyType, industry: industry, companyIntro: companyIntro,
-            brand: brand, model: model, category: category,
-            functionDesc: functionDesc, status: status, replacement: replacement
-        )
-    }
-
-    /// 极简 YAML frontmatter 解析器（仅支持 WikiPropertySheet 写回的格式）：
-    ///   - key: scalar
-    ///   - key: [a, b, c]           → [String]
-    ///   - key:\n  - a\n  - b       → [String]
-    /// 不依赖 YAML 库，避免 Swift 包管理负担。
-    private static func parseFrontmatterDict(_ lines: [String]) -> [String: Any] {
-        var out: [String: Any] = [:]
-        var i = 0
-        while i < lines.count {
-            let line = lines[i]
-            if let m = line.range(of: #"^([A-Za-z0-9_一-鿿]+):\s*(.*)$"#, options: .regularExpression) {
-                let key = String(line[line.startIndex..<line.index(m.lowerBound, offsetBy: 0)])
-                // 取 : 前的部分（上面正则只匹配了首部，这里直接 split）
-                if let colonIdx = line.firstIndex(of: ":") {
-                    let k = String(line[line.startIndex..<colonIdx]).trimmingCharacters(in: .whitespaces)
-                    let v = String(line[line.index(after: colonIdx)...]).trimmingCharacters(in: .whitespaces)
-                    if v.isEmpty {
-                        // 块状列表
-                        var items: [String] = []
-                        var j = i + 1
-                        while j < lines.count {
-                            let s = lines[j]
-                            if let sm = s.range(of: #"^\s+-\s+(.*)$"#, options: .regularExpression) {
-                                let raw = String(s[s.startIndex..<sm.upperBound])
-                                if let dashIdx = raw.firstIndex(of: "-") {
-                                    items.append(String(raw[raw.index(after: dashIdx)...]).trimmingCharacters(in: .whitespaces))
-                                }
-                                j += 1
-                            } else if s.trimmingCharacters(in: .whitespaces).isEmpty {
-                                j += 1
-                            } else { break }
-                        }
-                        out[k] = items
-                        i = j
-                    } else if v.hasPrefix("[") && v.hasSuffix("]") {
-                        // 内联列表 [a, b, "c"]
-                        let inner = String(v.dropFirst().dropLast())
-                        let items = inner
-                            .split(separator: ",")
-                            .map { $0.trimmingCharacters(in: .whitespaces) }
-                            .map { stripQuoted($0) }
-                            .filter { !$0.isEmpty }
-                        out[k] = items
-                        i += 1
-                    } else {
-                        out[k] = stripQuoted(v)
-                        i += 1
-                    }
-                } else {
-                    i += 1
-                }
-            } else {
-                i += 1
-            }
-        }
-        return out
-    }
-
-    private static func stripQuoted(_ s: String) -> String {
-        var t = s.trimmingCharacters(in: .whitespaces)
-        if (t.hasPrefix("\"") && t.hasSuffix("\"")) || (t.hasPrefix("'") && t.hasSuffix("'")) {
-            t = String(t.dropFirst().dropLast())
-        }
-        return t
-    }
-
-    /// 把 frontmatter dict + body 拼回 markdown。键值渲染顺序与 WikiPropertySheet.asDictForPython() 一致。
-    static func composeMarkdown(frontmatterDict: [String: Any], body: String) -> String {
-        let PLACEHOLDER = "（待补全）"
-        let type = (frontmatterDict["type"] as? String ?? "person").lowercased()
-        let name = (frontmatterDict["canonical_name"] as? String ?? "").trimmingCharacters(in: .whitespaces)
-        let aliases = (frontmatterDict["aliases"] as? [String]) ?? []
-        var fm: [String] = ["---", "type: \(type)", "canonical_name: \(name)"]
-        fm.append(_blockList("aliases", aliases))
-        switch type {
-        case "person":
-            fm.append("company: \((frontmatterDict["company"] as? String ?? "").trimmingCharacters(in: .whitespaces))")
-            fm.append("title: \((frontmatterDict["title"] as? String ?? "").trimmingCharacters(in: .whitespaces))")
-            fm.append("职能范围: \((frontmatterDict["职能范围"] as? String ?? "").trimmingCharacters(in: .whitespaces))")
-        case "company":
-            fm.append("公司类型: \((frontmatterDict["公司类型"] as? String ?? "").trimmingCharacters(in: .whitespaces))")
-            fm.append("所属行业: \((frontmatterDict["所属行业"] as? String ?? "").trimmingCharacters(in: .whitespaces))")
-            fm.append("公司简介: \((frontmatterDict["公司简介"] as? String ?? "").trimmingCharacters(in: .whitespaces))")
-        case "chip":
-            for k in ["品牌", "具体型号", "类别", "功能简述", "状态", "替代料"] {
-                fm.append("\(k): \((frontmatterDict[k] as? String ?? "").trimmingCharacters(in: .whitespaces))")
-            }
-        default: break
-        }
-        let tags = (frontmatterDict["tags"] as? [String]) ?? []
-        fm.append("tags: [" + tags.map { "\"\($0)\"" }.joined(separator: ", ") + "]")
-        fm.append("updated: \((frontmatterDict["updated"] as? String ?? "").trimmingCharacters(in: .whitespaces))")
-        let backlinks = (frontmatterDict["backlinks"] as? [String]) ?? []
-        if backlinks.isEmpty {
-            fm.append("backlinks: []")
-        } else {
-            fm.append("backlinks:")
-            for b in backlinks { fm.append("  - \(b)") }
-        }
-        // 兜底：把空白占位替换为 PLACEHOLDER（与 pipeline.py 渲染一致）
-        for i in 0..<fm.count {
-            if let colon = fm[i].firstIndex(of: ":") {
-                let k = String(fm[i][fm[i].startIndex..<colon])
-                let v = String(fm[i][fm[i].index(after: colon)...]).trimmingCharacters(in: .whitespaces)
-                // tags / updated / type / canonical_name / aliases / backlinks 不参与占位
-                let skip = ["type", "canonical_name", "aliases", "tags", "updated", "backlinks", "中文名"]
-                if !skip.contains(k) && (v.isEmpty || v == "[]") {
-                    fm[i] = "\(k): \(PLACEHOLDER)"
-                }
-            }
-        }
-        fm.append("---")
-        return fm.joined(separator: "\n") + "\n\n" + body
-    }
-
-    private static func _blockList(_ key: String, _ items: [String]) -> String {
-        if items.isEmpty { return "\(key): []" }
-        return key + ":\n" + items.map { "  - \($0)" }.joined(separator: "\n")
-    }
-
-    /// 从完整 markdown 中抠出 frontmatter 之后的正文；如果原本没有 frontmatter，返回全文。
-    static func extractBody(afterFrontmatter md: String) -> String {
-        let lines = md.replacingOccurrences(of: "\r\n", with: "\n").split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        guard let first = lines.first?.trimmingCharacters(in: .whitespaces), first == "---" else { return md }
-        var j = 1
-        while j < lines.count && lines[j].trimmingCharacters(in: .whitespaces) != "---" { j += 1 }
-        guard j < lines.count else { return md }
-        return lines.dropFirst(j + 1).joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-    }
+    // MARK: - frontmatter 解析/渲染的唯一出口在 pipeline.py
+    //
+    // v2.2.60 移除：parseWikiPageSpec / parseFrontmatterDict / stripQuoted /
+    // composeMarkdown / _blockList / extractBody（六个 Swift 侧 frontmatter 互转函数）。
+    // 移除理由（契约审计）：
+    //   ① 零调用点 —— 全工程 grep 确认互相调用、无任何外部调用方（App 从未真正用过）；
+    //   ② 契约漂移 —— composeMarkdown 写的是小写键（type/canonical_name/tags/updated），
+    //      而 v2.2.33 起磁盘契约已是 TitleCase（Type/CanonicalName/Tags/Updated）+ 中文字段，
+    //      留着等于埋了一颗「哪天接上就写坏数据」的雷。
+    // 现在的分工：读 frontmatter → 编辑器内 JS（MarkdownEditorView 的 renderFrontmatterBanner，
+    // 原样 round-trip 保留键名大小写）；写 frontmatter → 只有 pipeline.py render_wiki_page 一个出口。
 }
 
 // MARK: - 自定义行视图：圆角高亮 + 内边距
