@@ -90,6 +90,8 @@ final class MinutesViewController: NSViewController,
     // 生成流程
     private var audioURL: URL?
     private var running = false
+    /// 是否正在生成会议纪要（供 App 关窗 / 退出拦截判断）。
+    var isGenerating: Bool { running }
 
     // 自动跳转
     private var programmaticSelect = false

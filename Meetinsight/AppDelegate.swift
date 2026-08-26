@@ -5,7 +5,7 @@
 
 import Cocoa
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// 强引用向导控制器，避免窗口被关闭前控制器被释放。
     private var setupWizard: SetupWizardWindowController?
@@ -13,6 +13,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var mainWindow: NSWindow?
     /// 主容器控制器（分页切换 / 菜单调用）。
     private var mainContainer: MainContainerViewController?
+    /// 退出确认标记：由红 X 路径确认过退出后，避免 applicationShouldTerminate 二次弹框。
+    private var exitConfirmed = false
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
         // v2.2.13：先恢复对工作目录的 sandbox 授权（解析持久化 security-scoped bookmark）。
@@ -77,6 +79,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             window.title = "Meetinsight"
             window.minSize = NSSize(width: minW, height: minH)
             window.isReleasedWhenClosed = false
+            window.delegate = self
             let container = MainContainerViewController()
             window.contentViewController = container
             mainContainer = container
@@ -104,6 +107,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ aNotification: Notification) {
+        // 退出前终止可能仍在运行的 pipeline 子进程（如生成任务被强制结束）。
+        PipelineRunner.shared.cancel()
         // 释放对工作目录的 sandbox 授权（与 applicationDidFinishLaunching 的 start 配对）。
         AppConfig.shared.stopAccessingBaseDir()
     }
@@ -122,6 +127,41 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
         return true
+    }
+
+    // MARK: - 关窗 / 退出拦截（生成任务进行中提醒）
+
+    /// 生成任务进行中时，询问用户是否确认退出。
+    /// - Returns: `true` 表示用户确认退出；`false` 表示取消（继续运行）。
+    private func confirmExitWhileGenerating() -> Bool {
+        let resp = AppAlert.show(
+            message: "任务进行中",
+            informative: "生成会议纪要正在进行，退出将中断当前任务。确定要退出吗？",
+            icon: .question,
+            style: .warning,
+            buttons: ["取消", "退出"]
+        )
+        // AppAlert.show 返回第一个按钮（「取消」）对应的 .alertFirstButtonReturn；
+        // 用户点击「退出」（第二个按钮）才视为确认。
+        return resp != .alertFirstButtonReturn
+    }
+
+    /// 点击窗口红 X：若纪要正在生成，先询问是否退出，避免误关中断任务。
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard mainContainer?.isMinutesGenerating == true else { return true }
+        if confirmExitWhileGenerating() {
+            exitConfirmed = true
+            NSApp.terminate(nil)   // 交回 applicationShouldTerminate 处理（已设 exitConfirmed，不二次弹框）
+            return false
+        }
+        return false               // 取消退出：保持窗口
+    }
+
+    /// Cmd+Q / 菜单「退出」：若纪要正在生成，先询问是否退出。
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard mainContainer?.isMinutesGenerating == true else { return .terminateNow }
+        if exitConfirmed { return .terminateNow }   // 红 X 路径已确认过，避免重复弹框
+        return confirmExitWhileGenerating() ? .terminateNow : .terminateCancel
     }
 
     // MARK: - 主菜单（含标准 Edit 菜单，确保系统快捷键可用）

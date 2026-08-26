@@ -201,4 +201,9 @@ final class MainContainerViewController: NSViewController {
         selectTab(.wiki)
         wikiVC.openWikiPageResolved(name, anchor: anchor)
     }
+
+    // MARK: - 供退出拦截查询
+
+    /// 会议纪要是否正在生成（供 AppDelegate 在关窗 / 退出时拦截）。
+    var isMinutesGenerating: Bool { minutesVC.isGenerating }
 }

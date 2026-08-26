@@ -109,19 +109,31 @@ extension WikiPageSpec {
     static let typeTokens = ["Person", "Company", "Chip", "Project", "Topic", "Method"]
 
     func asDictForPython() -> [String: Any] {
+        // v2.2.63：改用英文 key（type/canonical_name/aliases/tags/backlinks/...）以匹配 pipeline.py 的 spec 键契约，
+        //     此前用中文 key（"类型"/"规范名"/...）会让 spec.get("type") 永远 None → "type 必须是 ...，收到：空"。
+        //     值仍保持 PascalCase（Person/Company/Chip/...），与磁盘 YAML `type: Person`、UI picker、错误消息一致。
+        //     中文 key 同步发送作为兜底（pipeline v2.2.63 起容错，同时接受 type/类型 等中英键）。
         var d: [String: Any] = [
+            "type": type,
             "类型": type,
+            "canonical_name": name,
             "规范名": name,
+            "aliases": aliases,
             "别名": aliases,
+            "tags": tags,
             "标签": tags,
+            "updated": updated,
             "更新时间": updated,
+            "backlinks": backlinks,
             "反向链接": backlinks
         ]
         switch type {
         case "Person":
             d["中文名"]    = chineseName
             d["公司"]      = company
+            d["company"]  = company   // pipeline 读英文键
             d["职位"]      = jobTitle
+            d["title"]    = jobTitle  // pipeline 读英文键
             d["职能范围"]  = role
         case "Company":
             d["公司类型"]  = companyType
@@ -134,7 +146,7 @@ extension WikiPageSpec {
             d["功能简述"]  = functionDesc
             d["状态"]      = status
             d["替代料"]    = replacement
-        default: break
+        default: break  // Project/Topic/Method 无专属字段
         }
         return d
     }
