@@ -351,9 +351,22 @@ final class WikiLinkTextView: NSScrollView, NSTextViewDelegate {
 final class TagFieldView: NSView {
     private let pillScroll = NSScrollView()
     private let pillContainer = NSStackView()
-    private let addField = NSTextField()
+    private let addField = ReturnInterceptField()
     private var pills: [String] = []
     var onChange: (() -> Void)?
+
+    // 拦截 Return 的 NSTextField 子类：在别名/标签 addField 中按 Enter 时直接 commitAdd，
+    // 避免被底部「确定」按钮的默认等价键抢走焦点，导致新 chip 不进数组（v2.2.64）。
+    fileprivate final class ReturnInterceptField: NSTextField {
+        weak var interceptTarget: TagFieldView?
+        override func keyDown(with event: NSEvent) {
+            if event.keyCode == 36 /* Return */ || event.characters == "\r" {
+                interceptTarget?.commitAdd()
+                return
+            }
+            super.keyDown(with: event)
+        }
+    }
 
     var tags: [String] { pills }
 
@@ -392,6 +405,7 @@ final class TagFieldView: NSView {
         addField.bezelStyle = .roundedBezel
         addField.target = self
         addField.action = #selector(commitAdd)
+        addField.interceptTarget = self
         addSubview(addField)
 
         NSLayoutConstraint.activate([
@@ -467,6 +481,15 @@ final class TagFieldView: NSView {
         addField.stringValue = ""
         rebuildPills()
         onChange?()
+        // 新 chip 加完后自动滚到最右，确保用户能看到刚添加的别名/标签（v2.2.64）
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            let docWidth = self.pillScroll.documentView?.frame.width ?? 0
+            let visibleWidth = self.pillScroll.contentView.bounds.width
+            let x = max(0, docWidth - visibleWidth)
+            self.pillScroll.contentView.scroll(to: NSPoint(x: x, y: 0))
+            self.pillScroll.flashScrollers()
+        }
     }
 
     @objc private func removePill(_ sender: NSButton) {
@@ -561,7 +584,7 @@ final class WikiPropertySheet: NSViewController {
     // person 字段
     private var personRows: NSStackView!
     private var chineseNameField: WikiLinkTextField!
-    private var companyField: WikiLinkTextField!
+    private var companyField: WikiLinkTextView!
     private var jobTitleField: WikiLinkTextField!
     private var roleField: WikiLinkTextField!
 
@@ -728,7 +751,7 @@ final class WikiPropertySheet: NSViewController {
 
         // —— person 字段 ——
         chineseNameField = WikiLinkTextField(frame: .zero); chineseNameField.translatesAutoresizingMaskIntoConstraints = false
-        companyField  = WikiLinkTextField(frame: .zero); companyField.translatesAutoresizingMaskIntoConstraints = false
+        companyField  = WikiLinkTextView(frame: .zero); companyField.translatesAutoresizingMaskIntoConstraints = false
         jobTitleField = WikiLinkTextField(frame: .zero); jobTitleField.translatesAutoresizingMaskIntoConstraints = false
         roleField     = WikiLinkTextField(frame: .zero); roleField.translatesAutoresizingMaskIntoConstraints = false
 
@@ -800,6 +823,7 @@ final class WikiPropertySheet: NSViewController {
         confirmBtn.bezelStyle = .rounded
         confirmBtn.font = .systemFont(ofSize: 12)
         confirmBtn.keyEquivalent = "\r"
+        confirmBtn.keyEquivalentModifierMask = .command // v2.2.64：改为 Cmd+Enter 提交，避免抢走 addField 的 Enter
         confirmBtn.translatesAutoresizingMaskIntoConstraints = false
         cancelBtn = NSButton(title: "取消", target: self, action: #selector(cancel))
         cancelBtn.bezelStyle = .rounded
