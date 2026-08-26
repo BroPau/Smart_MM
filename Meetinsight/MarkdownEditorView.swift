@@ -403,6 +403,8 @@ fileprivate enum EditorHTML {
       .fm-table td { color: #1c1c1e; word-break: break-word; }
       /* Vditor 容器：Obsidian 风格留白 */
       #editor { max-width: 860px; margin: 0 auto; }
+      /* v2.2.66：公司反向引用表格容器（运行时装饰，不进 .md；默认隐藏，有内容时由 JS 显示） */
+      #fmCompanyRefsContainer { max-width: 860px; margin: 10px auto 0; display: none; }
       .vditor { border: none !important; box-shadow: none !important; background: transparent !important; }
       .vditor-toolbar { background: #fafafc !important; border-bottom: 1px solid #e8e8ee !important; padding: 4px 6px !important; }
       .vditor-toolbar--pin { background: #fafafc !important; }
@@ -438,6 +440,7 @@ fileprivate enum EditorHTML {
     </head>
     <body>
     <details id="fmBanner" class="fm-banner" open><summary>笔记属性</summary><div id="fmBody"></div></details>
+    <div id="fmCompanyRefsContainer"></div>
     <div id="editor"></div>
     <script src="%VDITOR_CDN%/dist/index.min.js"></script>
     <script>
@@ -817,6 +820,21 @@ fileprivate enum TipTapEditorHTML {
       .fm-backlink-item { display: inline-flex; align-items: center; margin: 1px 4px 1px 0; background: #eef3ff; color: #2f6fdb; border: 1px solid #c8d6f5; border-radius: 4px; padding: 1px 2px 1px 8px; font-size: 12px; }
       .fm-backlink-x { border: none; background: transparent; color: #c0392b; cursor: pointer; font-size: 13px; line-height: 1; padding: 0 4px; }
       .fm-backlink-x:hover { color: #e74c3c; }
+      /* v2.2.66：反向链接编辑区（自动发现只读 + 手动可编辑 textarea） */
+      .fm-backlinks-edit { line-height: 1.5; }
+      .fm-bl-sub { margin: 4px 0; }
+      .fm-bl-tag {
+        display: inline-block; font-size: 11px; font-weight: 600; color: #6b6b75;
+        background: #eef0f4; border-radius: 4px; padding: 1px 7px; margin-right: 8px;
+      }
+      .fm-bl-edit {
+        width: 100%; box-sizing: border-box; font-family: inherit; font-size: 13px;
+        padding: 6px 8px; border: 1px solid #e2e3e8; border-radius: 6px; background: #fff;
+        color: #1c1c1e; resize: vertical; line-height: 1.6; margin-top: 4px;
+      }
+      .fm-bl-edit:focus { outline: none; border-color: #2f6fdb; box-shadow: 0 0 0 2px rgba(47,111,219,0.12); }
+      /* v2.2.66：公司反向引用表格容器（介于 banner 与正文之间，运行时装饰不进 .md） */
+      #fmCompanyRefsContainer { max-width: 860px; margin: 10px auto 0; display: none; }
       /* 所有「添加」输入行与第 2 列（值列）对齐，与上方其余输入框保持一致宽度 */
       .fm-add-row { grid-column: 2; margin-top: 6px; }
       .fm-add-prop {
@@ -966,6 +984,8 @@ fileprivate enum TipTapEditorHTML {
       .fm-backlink-item { display: inline-flex; align-items: center; margin: 1px 4px 1px 0; background: rgba(116,177,255,0.15); color: #74b1ff; border: 1px solid #3a4a5e; border-radius: 4px; padding: 1px 2px 1px 8px; font-size: 12px; }
       .fm-backlink-x { border: none; background: transparent; color: #ff7a7a; cursor: pointer; font-size: 13px; line-height: 1; padding: 0 4px; }
       .fm-backlink-x:hover { color: #ff9a9a; }
+      /* v2.2.66：反向链接编辑区（深色） */
+      .fm-bl-tag { background: #2c2c32; color: #b8b8c0; }
       .ProseMirror code { background: #2a2a2e; }
         .ProseMirror pre { background: #26262b; }
         .ProseMirror blockquote { border-left-color: #3a3a40; color: #b8b8c0; }
@@ -986,6 +1006,7 @@ fileprivate enum TipTapEditorHTML {
     </head>
     <body>
     <details id="fmBanner" class="fm-banner" open><summary>笔记属性</summary><div id="fmBody"></div></details>
+    <div id="fmCompanyRefsContainer"></div>
     <div id="editor"></div>
     <script src="%TIPTAP_BASE%/tiptap.bundle.js"></script>
     <script>

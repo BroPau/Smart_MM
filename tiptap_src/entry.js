@@ -1249,11 +1249,9 @@ function renderBanner() {
     const html = renderFrontmatterBanner(currentFM)
     if (html) { body.innerHTML = html } else { det.style.display = 'none'; body.innerHTML = '' }
   }
-  // v2.2.65：公司页在 banner 下方嵌入「引用此公司的页面」表格（可点击回跳）
-  if (isCompanyType(currentFM['type'])) {
-    const sec = renderCompanyRefsSection()
-    if (sec) body.innerHTML += sec
-  }
+  // v2.2.66：公司页「引用此公司的页面」表格不再塞进 banner（反链条目）内，
+  // 改为注入 banner 与正文之间的独立容器 #fmCompanyRefsContainer（运行时装饰，不进 .md）
+  renderCompanyRefsIntoContainer()
 }
 
 // 判断 page type 是否为公司（大小写不敏感，兼容 Company / company）
@@ -1291,6 +1289,16 @@ function renderCompanyRefsSection() {
     '<tbody>' + rows + '</tbody></table></div>'
 }
 
+// v2.2.66：把公司「引用此公司的页面」表注入 banner 与正文间的独立容器（运行时装饰，不进 .md）。
+// 容器节点由 MarkdownEditorView 模板在 #fmBanner 与 #editor 之间提供；无容器（如 vditor 回退）则静默跳过。
+function renderCompanyRefsIntoContainer() {
+  const el = document.getElementById('fmCompanyRefsContainer')
+  if (!el) return
+  const sec = renderCompanyRefsSection()
+  el.innerHTML = sec || ''
+  el.style.display = sec ? 'block' : 'none'
+}
+
 // 防抖保存（标量 / chip / 新增属性 改动后统一调用）
 let _bannerSaveTimer = null
 function scheduleSave() {
@@ -1322,7 +1330,8 @@ function wireBannerForm(root) {
       const kind = el.getAttribute('data-kind')
       const v = el.value
       if (kind === 'list') {
-        currentFM[k] = v.split(/[,，、]/).map(s => s.trim()).filter(Boolean)
+        // v2.2.66：列表字段（含手动反链 textarea）支持换行分隔，一行一条
+        currentFM[k] = v.split(/[\n,，、]/).map(s => s.trim()).filter(Boolean)
       } else {
         currentFM[k] = v.trim()
       }
@@ -1522,15 +1531,20 @@ function renderBannerEditForm(fm) {
       const dv = (fm[k] || '').toString().trim()
       valHtml = '<input type="date" data-fm="' + escapeAttr(k) + '" data-kind="scalar" value="' + escapeAttr(dv) + '" class="fm-date">'
     } else if (t === 'readonly') {
-      // 反向链接：合并 incoming（被哪些页引用）+ 手动 backlinks 字段，均以可点击双链呈现
-      const merged = backlinksMerged(fm[k])
-      const blHtml = merged.length
-        ? renderBacklinks(merged)
-        : '<span class="fm-empty">（暂无反向链接）</span>'
-      valHtml = '<div class="fm-readonly">' + blHtml + '</div>'
+      // 反向链接分两部分（v2.2.66 改为可编辑）：
+      // 1) 自动发现（incoming，来自其他页面正文的 [[本页]] 扫描）—— 只读、可点击回跳
+      // 2) 手动维护（currentFM['backlinks'] 字段）—— 可直接编辑的 textarea，一行一条 [[Page]]
+      const incoming = Array.isArray(window.__backlinks) ? window.__backlinks.filter(Boolean) : []
+      let inner = '<div class="fm-bl-sub"><span class="fm-bl-tag">自动发现</span>'
+      inner += incoming.length ? renderBacklinks(incoming) : '<span class="fm-empty">（暂无其他页面引用）</span>'
+      inner += '</div>'
+      const manual = fmListItems(fm[k])
+      const taRows = Math.max(2, Math.min(12, manual.length + 1))
+      inner += '<div class="fm-bl-sub"><span class="fm-bl-tag">手动维护</span>' +
+        '<textarea data-fm="' + escapeAttr(k) + '" data-kind="list" class="fm-bl-edit" rows="' + taRows + '" placeholder="一行一条，支持 [[页面]] / [[页面|别名]] / [[页面#章节]]">' +
+        escapeHtml(manual.join('\n')) + '</textarea></div>'
+      valHtml = '<div class="fm-backlinks-edit">' + inner + '</div>'
       html += fmRowHtml(icon, label, valHtml)
-      // 「添加引用此页的页面」另起一行，统一 .fm-add-input 风格，对齐第 2 列
-      html += '<div class="fm-add-row"><input type="text" class="fm-add-input" data-add-backlink="1" placeholder="＋ 添加引用此页的页面（手动维护）"></div>'
       return
     } else if (t === 'longtext') {
       // 长文本与其他属性同列对齐（不再跨整行顶格），编辑框宽度/高度与下方其余输入框一致
