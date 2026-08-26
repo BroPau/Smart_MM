@@ -1098,6 +1098,30 @@ function wireEditorDom() {
       }
     })
   }
+  // v2.2.67：正文末尾反链表格容器内的双链（含表内页面名链接）同样委托点击/悬停跳转，
+  // 使表格中的 [[页面]] 链接与正文、banner 一致，可互相跳转。
+  const refsContainer = document.getElementById('fmCompanyRefsContainer')
+  if (refsContainer) {
+    refsContainer.addEventListener('mouseover', e => {
+      const el = e.target.closest && e.target.closest('a.wikilink')
+      if (el) showPreviewFor(el)
+    })
+    refsContainer.addEventListener('mouseout', e => {
+      const el = e.target.closest && e.target.closest('a.wikilink')
+      if (el) hidePreviewSoon()
+    })
+    refsContainer.addEventListener('click', e => {
+      const el = e.target.closest && e.target.closest('a.wikilink')
+      if (el) {
+        e.preventDefault()
+        const name = el.getAttribute('data-page')
+        const anchor = el.getAttribute('data-anchor') || ''
+        if (name && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.editorBridge) {
+          window.webkit.messageHandlers.editorBridge.postMessage({ type: 'wikilink', name: name, anchor: anchor })
+        }
+      }
+    })
+  }
 }
 
 // ————————————————————————————————————————————————————————————————
@@ -1121,8 +1145,8 @@ window.MMEditor = {
     currentEditable = editable !== false
     // 每次加载新页重置「incoming 反向链接」（由宿主 selectPage 重新下发），避免跨页残留
     window.__backlinks = []
-    // v2.2.65：公司页反向引用明细同样随页面重置（setCompanyReferences 再下发）
-    window.__companyRefs = []
+    // v2.2.67：引用此页面的页面明细同样随页面重置（setPageReferences 再下发）
+    window.__pageRefs = []
     // 顶部属性 banner：属性表单**始终内联可编辑**（与正文同处一个编辑器窗口），
     // 不再需要"编辑属性"按钮，也不再弹独立窗口。只读场景（搜索结果）仍展示只读表。
     renderBanner()
@@ -1186,10 +1210,10 @@ window.MMEditor = {
     window.__backlinks = Array.isArray(arr) ? arr : []
     renderBanner()
   },
-  // v2.2.65：宿主下发的「引用了某公司页」的页面明细（名称 + 类型 + 关键属性）；
-  // 仅 Company 页使用，下发后重渲染 banner 以嵌入可点击回跳的反链表格。
-  setCompanyReferences(arr) {
-    window.__companyRefs = Array.isArray(arr) ? arr : []
+  // v2.2.67：宿主下发的「引用此页面的页面」明细（名称 + 类型 + 关键属性）；
+  // 适用于所有类型，下发后重渲染 banner 并注入正文末尾的反链表格。
+  setPageReferences(arr) {
+    window.__pageRefs = Array.isArray(arr) ? arr : []
     renderBanner()
   },
   // 推送「自动双链」目标名（仅 Wiki 页名），加载纪要时把裸词包裹成 [[名称]]
@@ -1249,20 +1273,14 @@ function renderBanner() {
     const html = renderFrontmatterBanner(currentFM)
     if (html) { body.innerHTML = html } else { det.style.display = 'none'; body.innerHTML = '' }
   }
-  // v2.2.66：公司页「引用此公司的页面」表格不再塞进 banner（反链条目）内，
-  // 改为注入 banner 与正文之间的独立容器 #fmCompanyRefsContainer（运行时装饰，不进 .md）
-  renderCompanyRefsIntoContainer()
+  // v2.2.67：当前页「引用此页面的页面」表格注入正文末尾的独立容器 #fmCompanyRefsContainer（运行时装饰，不进 .md）
+  renderPageRefsIntoContainer()
 }
 
-// 判断 page type 是否为公司（大小写不敏感，兼容 Company / company）
-function isCompanyType(t) {
-  return String(t || '').trim().toLowerCase() === 'company'
-}
-
-// v2.2.65：渲染「引用此公司的页面」嵌入表格（仅 Company 页）。
-// 每行：页面名（可点击双链回跳）→ 类型 → 关键属性（公司/职位/品牌/型号等，值内 [[Page]] 亦链接化）。
-function renderCompanyRefsSection() {
-  const refs = window.__companyRefs || []
+// v2.2.67：渲染「引用此页面的页面」嵌入表格（所有类型）。
+// 每行：页面名（可点击双链回跳）→ 类型 → 关键属性（人员含职位/电话/邮箱等，值内 [[Page]] 亦链接化）。
+function renderPageRefsSection() {
+  const refs = window.__pageRefs || []
   if (!refs.length) return ''
   const rows = refs.map(r => {
     const name = String(r.name || '').trim()
@@ -1284,17 +1302,17 @@ function renderCompanyRefsSection() {
   }).filter(Boolean).join('')
   if (!rows) return ''
   return '<div class="fm-company-refs">' +
-    '<div class="fm-ref-title">🔗 引用此公司的页面</div>' +
+    '<div class="fm-ref-title">🔗 引用此页面的页面</div>' +
     '<table class="fm-ref-table"><thead><tr><th>页面</th><th>类型</th><th>关键属性</th></tr></thead>' +
     '<tbody>' + rows + '</tbody></table></div>'
 }
 
 // v2.2.66：把公司「引用此公司的页面」表注入 banner 与正文间的独立容器（运行时装饰，不进 .md）。
 // 容器节点由 MarkdownEditorView 模板在 #fmBanner 与 #editor 之间提供；无容器（如 vditor 回退）则静默跳过。
-function renderCompanyRefsIntoContainer() {
+function renderPageRefsIntoContainer() {
   const el = document.getElementById('fmCompanyRefsContainer')
   if (!el) return
-  const sec = renderCompanyRefsSection()
+  const sec = renderPageRefsSection()
   el.innerHTML = sec || ''
   el.style.display = sec ? 'block' : 'none'
 }

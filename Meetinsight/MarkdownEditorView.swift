@@ -185,14 +185,13 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
         webView.evaluateJavaScript("MMEditor.setBacklinks(\(js))")
     }
 
-    /// v2.2.65：推送「引用了某公司的页面」明细（含类型 + 关键属性）给 JS，
-    /// 供公司页 banner 下方渲染可点击回跳的反链嵌入表格。仅在当前页 type=Company 时下发，
-    /// 其余类型下发空数组（JS 侧 loadMarkdown 已复位，这里兜底清空）。
-    func setCompanyReferences(_ refs: [[String: Any]]) {
+    /// v2.2.67：推送「引用此页面的页面」明细（含类型 + 关键属性）给 JS，
+    /// 供当前页正文末尾渲染可点击回跳的反链嵌入表格。适用于所有类型（不再局限于 Company）。
+    func setPageReferences(_ refs: [[String: Any]]) {
         guard Self.engine == "tiptap" else { return }
         let json = (try? JSONSerialization.data(withJSONObject: refs)) ?? Data("[]".utf8)
         let js = String(data: json, encoding: .utf8) ?? "[]"
-        webView.evaluateJavaScript("MMEditor.setCompanyReferences(\(js))")
+        webView.evaluateJavaScript("MMEditor.setPageReferences(\(js))")
     }
 
     /// 跳转到 Wiki 页内某标题锚点（Obsidian 式 [[Page#Heading]]）；无匹配标题时静默忽略。
@@ -403,8 +402,8 @@ fileprivate enum EditorHTML {
       .fm-table td { color: #1c1c1e; word-break: break-word; }
       /* Vditor 容器：Obsidian 风格留白 */
       #editor { max-width: 860px; margin: 0 auto; }
-      /* v2.2.66：公司反向引用表格容器（运行时装饰，不进 .md；默认隐藏，有内容时由 JS 显示） */
-      #fmCompanyRefsContainer { max-width: 860px; margin: 10px auto 0; display: none; }
+      /* v2.2.67：引用此页面的页面表格容器（运行时装饰，不进 .md；默认隐藏，有内容时由 JS 显示在正文末尾） */
+      #fmCompanyRefsContainer { max-width: 860px; margin: 16px auto 0; display: none; }
       .vditor { border: none !important; box-shadow: none !important; background: transparent !important; }
       .vditor-toolbar { background: #fafafc !important; border-bottom: 1px solid #e8e8ee !important; padding: 4px 6px !important; }
       .vditor-toolbar--pin { background: #fafafc !important; }
@@ -440,8 +439,8 @@ fileprivate enum EditorHTML {
     </head>
     <body>
     <details id="fmBanner" class="fm-banner" open><summary>笔记属性</summary><div id="fmBody"></div></details>
-    <div id="fmCompanyRefsContainer"></div>
     <div id="editor"></div>
+    <div id="fmCompanyRefsContainer"></div>
     <script src="%VDITOR_CDN%/dist/index.min.js"></script>
     <script>
     var VDITOR_CDN = "%VDITOR_CDN%";
@@ -833,8 +832,8 @@ fileprivate enum TipTapEditorHTML {
         color: #1c1c1e; resize: vertical; line-height: 1.6; margin-top: 4px;
       }
       .fm-bl-edit:focus { outline: none; border-color: #2f6fdb; box-shadow: 0 0 0 2px rgba(47,111,219,0.12); }
-      /* v2.2.66：公司反向引用表格容器（介于 banner 与正文之间，运行时装饰不进 .md） */
-      #fmCompanyRefsContainer { max-width: 860px; margin: 10px auto 0; display: none; }
+      /* v2.2.67：引用此页面的页面表格容器（位于正文末尾，运行时装饰不进 .md） */
+      #fmCompanyRefsContainer { max-width: 860px; margin: 16px auto 0; display: none; }
       /* 所有「添加」输入行与第 2 列（值列）对齐，与上方其余输入框保持一致宽度 */
       .fm-add-row { grid-column: 2; margin-top: 6px; }
       .fm-add-prop {
@@ -1006,8 +1005,8 @@ fileprivate enum TipTapEditorHTML {
     </head>
     <body>
     <details id="fmBanner" class="fm-banner" open><summary>笔记属性</summary><div id="fmBody"></div></details>
-    <div id="fmCompanyRefsContainer"></div>
     <div id="editor"></div>
+    <div id="fmCompanyRefsContainer"></div>
     <script src="%TIPTAP_BASE%/tiptap.bundle.js"></script>
     <script>
       function mmIsDark(){ return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches; }

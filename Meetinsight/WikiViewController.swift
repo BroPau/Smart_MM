@@ -399,18 +399,18 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         return found
     }
 
-    // MARK: - 公司页反向引用明细（用于嵌入表格）
+    // MARK: - 引用此页面的页面明细（用于嵌入表格）
 
-    /// v2.2.65：扫描其他页面正文里 [[引用了本公司]] 的页面，返回其「名称 + 类型 + 关键属性」明细，
-    /// 供公司页 banner 下方渲染可点击回跳的嵌入表格。仅 Company 页调用。
-    private func companyReferences(for company: WikiPage) -> [[String: Any]] {
-        let targets = Set(([company.name] + company.aliases).map { $0.lowercased() })
+    /// v2.2.67：扫描其他页面正文里 [[引用了本页]] 的页面，返回其「名称 + 类型 + 关键属性」明细，
+    /// 供当前页正文末尾渲染可点击回跳的嵌入表格。适用于所有类型（不再局限于 Company）。
+    private func referencesToThis(for page: WikiPage) -> [[String: Any]] {
+        let targets = Set(([page.name] + page.aliases).map { $0.lowercased() })
         guard !targets.isEmpty else { return [] }
         let regex = try? NSRegularExpression(pattern: #"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]"#, options: [])
         var out: [[String: Any]] = []
         var seen = Set<String>()
-        for page in pages where page.file != company.file {
-            let url = page.isHome ? homeFile : wikiPagesDir.appendingPathComponent(page.file)
+        for p in pages where p.file != page.file {
+            let url = p.isHome ? homeFile : wikiPagesDir.appendingPathComponent(p.file)
             guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
             let range = NSRange(text.startIndex..., in: text)
             var hit = false
@@ -420,29 +420,38 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
                 if targets.contains(target) { hit = true }
             }
             guard hit else { continue }
-            let key = page.name.lowercased()
+            let key = p.name.lowercased()
             guard !seen.contains(key) else { continue }
             seen.insert(key)
 
             var fields: [[String: String]] = []
             let fm = parseFrontmatterScalar(text)
             let t = (fm["type"] ?? "").lowercased()
-            let wanted: [String]
-            if t == "person" { wanted = ["company", "title"] }
-            else if t == "chip" { wanted = ["品牌", "具体型号"] }
-            else if t == "company" { wanted = ["所属行业"] }
-            else if t == "project" { wanted = ["概要", "summary"] }
-            else { wanted = [] }
+            let wanted = WikiViewController.referenceWantedKeys(for: t)
             for w in wanted {
                 if let v = fm[w], !v.isEmpty {
                     fields.append(["label": backlinkFieldLabel(w), "value": v])
                 }
             }
-            var dict: [String: Any] = ["name": page.name, "type": page.type]
+            var dict: [String: Any] = ["name": p.name, "type": p.type]
             if !fields.isEmpty { dict["fields"] = fields }
             out.append(dict)
         }
         return out
+    }
+
+    /// v2.2.67：按类型枚举「引用此页面的页面」表格应展示的 frontmatter 字段键。
+    /// 人员(Person) 重点展示职位/电话/电子邮箱等；其余类型由前端约定择优展示。
+    private static func referenceWantedKeys(for type: String) -> [String] {
+        switch type {
+        case "person":  return ["company", "title", "phone", "email", "department"]
+        case "company": return ["所属行业", "官网", "联系人"]
+        case "chip":    return ["品牌", "具体型号", "厂商", "工艺节点"]
+        case "project": return ["概要", "summary", "status", "负责人", "时间"]
+        case "topic":   return ["分类", "领域"]
+        case "method":  return ["类别", "应用"]
+        default:        return []
+        }
     }
 
     /// 轻量 frontmatter 标量解析（仅需提取少数展示字段，不处理列表/多行）。
@@ -473,10 +482,24 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         switch key {
         case "company": return "公司"
         case "title": return "职位"
+        case "phone": return "电话"
+        case "email": return "电子邮箱"
+        case "department": return "部门"
         case "品牌": return "品牌"
         case "具体型号": return "型号"
+        case "厂商": return "厂商"
+        case "工艺节点": return "工艺节点"
         case "所属行业": return "行业"
+        case "官网": return "官网"
+        case "联系人": return "联系人"
         case "概要", "summary": return "概要"
+        case "status": return "状态"
+        case "负责人": return "负责人"
+        case "时间": return "时间"
+        case "分类": return "分类"
+        case "领域": return "领域"
+        case "类别": return "类别"
+        case "应用": return "应用"
         case "职能范围": return "职能范围"
         default: return key
         }
@@ -504,8 +527,8 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         editor.setWikiPages(pages.flatMap { [$0.name] + $0.aliases })
         // 推送 incoming 反向链接（被哪些页 [[引用]]），供 banner「反向链接」自动展示
         editor.setBacklinks(computeIncomingBacklinks(for: page))
-        // v2.2.65：公司页下发反向引用明细，渲染嵌入表格
-        editor.setCompanyReferences(page.type.lowercased() == "company" ? companyReferences(for: page) : [])
+        // v2.2.67：下发引用此页面的页面明细（所有类型），渲染正文末尾嵌入表格
+        editor.setPageReferences(referencesToThis(for: page))
         return
         }
         // 普通页面：显示编辑器
@@ -524,8 +547,8 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         editor.setWikiPages(pages.flatMap { [$0.name] + $0.aliases })
         // 推送 incoming 反向链接（被哪些页 [[引用]]），供 banner「反向链接」自动展示
         editor.setBacklinks(computeIncomingBacklinks(for: page))
-        // v2.2.65：公司页下发反向引用明细，渲染嵌入表格
-        editor.setCompanyReferences(page.type.lowercased() == "company" ? companyReferences(for: page) : [])
+        // v2.2.67：下发引用此页面的页面明细（所有类型），渲染正文末尾嵌入表格
+        editor.setPageReferences(referencesToThis(for: page))
     }
 
     // MARK: - 搜索
