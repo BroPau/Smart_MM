@@ -267,7 +267,11 @@ final class WikiLinkTextView: NSScrollView, NSTextViewDelegate {
 
     func textDidChange(_ notification: Notification) {
         onChange?()
-        // v2.2.43/44：编辑期间绝不重排 textStorage / selectedRanges / typingAttributes。
+        // v2.2.65：编辑期实时高亮 [[Page]] 双链。仅在非 IME 组字态下重排显示属性
+        // （hasMarkedText 时不碰 storage，避免破坏拼音组字 / 光标定位）；仅改属性不改字符，
+        // 不移动光标、不破坏 first-responder 链，与 v2.2.42 防护目标一致。
+        guard !textView.hasMarkedText() else { return }
+        highlightWikiLinks()
     }
 
     /// 开始编辑 → 仅重置 typingAttributes 为普通文字（字号 11），保证在 [[...]] 内输入新字符不继承链接色/下划线。
@@ -337,6 +341,17 @@ final class WikiLinkTextView: NSScrollView, NSTextViewDelegate {
         storage.endEditing()
         // 重置 typingAttributes → 输入新字符为普通文字色，不继承链接色/下划线。
         textView.typingAttributes = baseAttrs
+    }
+
+    /// 校验失败：在 layer 自绘边框之上叠红色边框（之后用户编辑会由 onChange 调 clearInvalid 复位）。
+    func markInvalid() {
+        self.layer?.borderColor = NSColor.systemRed.cgColor
+        self.layer?.borderWidth = 1.5
+    }
+    /// 复位：恢复分隔色细边框（正常外观）。
+    func clearInvalid() {
+        self.layer?.borderColor = NSColor.separatorColor.cgColor
+        self.layer?.borderWidth = 1
     }
 }
 
@@ -573,35 +588,37 @@ final class WikiPropertySheet: NSViewController {
     private var initial: WikiPageSpec?
 
     // 通用字段
-    private var nameField: WikiLinkTextField!
+    // v2.2.65：nameField / updatedField 等全部单行字段改为 WikiLinkTextView，
+    // 使「所有可输入文本处」都实时支持 [[双链]]（原 WikiLinkTextField 不支持双链渲染）。
+    private var nameField: WikiLinkTextView!
     private var typeField: TypeFieldView!
     private var customTypes: [String] = []
     private var aliasesField: TagFieldView!
     private var tagsField: TagFieldView!
-    private var updatedField: WikiLinkTextField!
+    private var updatedField: WikiLinkTextView!
     private var backlinksView: WikiLinkTextView!
 
     // person 字段
     private var personRows: NSStackView!
-    private var chineseNameField: WikiLinkTextField!
+    private var chineseNameField: WikiLinkTextView!
     private var companyField: WikiLinkTextView!
-    private var jobTitleField: WikiLinkTextField!
-    private var roleField: WikiLinkTextField!
+    private var jobTitleField: WikiLinkTextView!
+    private var roleField: WikiLinkTextView!
 
     // company 字段
     private var companyRows: NSStackView!
-    private var companyTypeField: WikiLinkTextField!
-    private var industryField: WikiLinkTextField!
+    private var companyTypeField: WikiLinkTextView!
+    private var industryField: WikiLinkTextView!
     private var companyIntroView: WikiLinkTextView!
 
     // chip 字段
     private var chipRows: NSStackView!
-    private var brandField: WikiLinkTextField!
-    private var modelField: WikiLinkTextField!
-    private var categoryField: WikiLinkTextField!
+    private var brandField: WikiLinkTextView!
+    private var modelField: WikiLinkTextView!
+    private var categoryField: WikiLinkTextView!
     private var functionView: WikiLinkTextView!
-    private var statusField: WikiLinkTextField!
-    private var replacementField: WikiLinkTextField!
+    private var statusField: WikiLinkTextView!
+    private var replacementField: WikiLinkTextView!
 
     private var confirmBtn: NSButton!
     private var cancelBtn: NSButton!
@@ -703,7 +720,9 @@ final class WikiPropertySheet: NSViewController {
         // 仅聚焦一次，绝不抢回用户已主动移走的焦点。
         guard !didInitialFocus else { return }
         didInitialFocus = true
-        view.window?.makeFirstResponder(nameField)
+        // v2.2.65：nameField 现为 WikiLinkTextView（NSScrollView 子类），
+        // 须聚焦其内嵌 textView，否则首响者落在 scrollView 上无法输入。
+        view.window?.makeFirstResponder(nameField.textView)
     }
 
     private func buildUI() {
@@ -725,7 +744,7 @@ final class WikiPropertySheet: NSViewController {
         }
 
         // —— 通用字段 ——
-        nameField = WikiLinkTextField(frame: .zero)
+        nameField = WikiLinkTextView(frame: .zero)
         nameField.translatesAutoresizingMaskIntoConstraints = false
         nameField.onChange = { [weak self] in self?.nameField.clearInvalid() }
 
@@ -743,17 +762,17 @@ final class WikiPropertySheet: NSViewController {
         tagsField = TagFieldView(frame: .zero)
         tagsField.translatesAutoresizingMaskIntoConstraints = false
 
-        updatedField = WikiLinkTextField(frame: .zero)
+        updatedField = WikiLinkTextView(frame: .zero)
         updatedField.translatesAutoresizingMaskIntoConstraints = false
 
         backlinksView = WikiLinkTextView(frame: .zero)
         backlinksView.translatesAutoresizingMaskIntoConstraints = false
 
         // —— person 字段 ——
-        chineseNameField = WikiLinkTextField(frame: .zero); chineseNameField.translatesAutoresizingMaskIntoConstraints = false
+        chineseNameField = WikiLinkTextView(frame: .zero); chineseNameField.translatesAutoresizingMaskIntoConstraints = false
         companyField  = WikiLinkTextView(frame: .zero); companyField.translatesAutoresizingMaskIntoConstraints = false
-        jobTitleField = WikiLinkTextField(frame: .zero); jobTitleField.translatesAutoresizingMaskIntoConstraints = false
-        roleField     = WikiLinkTextField(frame: .zero); roleField.translatesAutoresizingMaskIntoConstraints = false
+        jobTitleField = WikiLinkTextView(frame: .zero); jobTitleField.translatesAutoresizingMaskIntoConstraints = false
+        roleField     = WikiLinkTextView(frame: .zero); roleField.translatesAutoresizingMaskIntoConstraints = false
 
         personRows = NSStackView(views: [
             makeFieldRow(label: "中文名", control: chineseNameField),
@@ -766,8 +785,8 @@ final class WikiPropertySheet: NSViewController {
         personRows.translatesAutoresizingMaskIntoConstraints = false
 
         // —— company 字段 ——
-        companyTypeField = WikiLinkTextField(frame: .zero); companyTypeField.translatesAutoresizingMaskIntoConstraints = false
-        industryField    = WikiLinkTextField(frame: .zero); industryField.translatesAutoresizingMaskIntoConstraints = false
+        companyTypeField = WikiLinkTextView(frame: .zero); companyTypeField.translatesAutoresizingMaskIntoConstraints = false
+        industryField    = WikiLinkTextView(frame: .zero); industryField.translatesAutoresizingMaskIntoConstraints = false
         companyIntroView = WikiLinkTextView(frame: .zero);  companyIntroView.translatesAutoresizingMaskIntoConstraints = false
 
         companyRows = NSStackView(views: [
@@ -780,12 +799,12 @@ final class WikiPropertySheet: NSViewController {
         companyRows.translatesAutoresizingMaskIntoConstraints = false
 
         // —— chip 字段 ——
-        brandField       = WikiLinkTextField(frame: .zero); brandField.translatesAutoresizingMaskIntoConstraints = false
-        modelField       = WikiLinkTextField(frame: .zero); modelField.translatesAutoresizingMaskIntoConstraints = false
-        categoryField    = WikiLinkTextField(frame: .zero); categoryField.translatesAutoresizingMaskIntoConstraints = false
+        brandField       = WikiLinkTextView(frame: .zero); brandField.translatesAutoresizingMaskIntoConstraints = false
+        modelField       = WikiLinkTextView(frame: .zero); modelField.translatesAutoresizingMaskIntoConstraints = false
+        categoryField    = WikiLinkTextView(frame: .zero); categoryField.translatesAutoresizingMaskIntoConstraints = false
         functionView     = WikiLinkTextView(frame: .zero);  functionView.translatesAutoresizingMaskIntoConstraints = false
-        statusField      = WikiLinkTextField(frame: .zero); statusField.translatesAutoresizingMaskIntoConstraints = false
-        replacementField = WikiLinkTextField(frame: .zero); replacementField.translatesAutoresizingMaskIntoConstraints = false
+        statusField      = WikiLinkTextView(frame: .zero); statusField.translatesAutoresizingMaskIntoConstraints = false
+        replacementField = WikiLinkTextView(frame: .zero); replacementField.translatesAutoresizingMaskIntoConstraints = false
 
         chipRows = NSStackView(views: [
             makeFieldRow(label: "品牌", control: brandField),

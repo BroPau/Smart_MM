@@ -1011,6 +1011,12 @@ function buildEditor(editable) {
     onUpdate: () => {
       // 注意：缺失页装饰由 ProseMirror 在每次状态变化时自动重算，
       // 这里切勿再 dispatch 事务，否则会触发 onUpdate → 再 dispatch 的死循环。
+      // v2.2.65：用户编辑正文 → 经 editorBridge 推送 {type:'dirty'} 供宿主切页自动保存判定；
+      // 程序化加载（loadMarkdown 的 setContent）期间置 __suppressUpdate 跳过，避免误标脏。
+      if (window.__suppressUpdate) return
+      if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.editorBridge) {
+        window.webkit.messageHandlers.editorBridge.postMessage({ type: 'dirty' })
+      }
     }
   })
   wireEditorDom()
@@ -1115,6 +1121,8 @@ window.MMEditor = {
     currentEditable = editable !== false
     // 每次加载新页重置「incoming 反向链接」（由宿主 selectPage 重新下发），避免跨页残留
     window.__backlinks = []
+    // v2.2.65：公司页反向引用明细同样随页面重置（setCompanyReferences 再下发）
+    window.__companyRefs = []
     // 顶部属性 banner：属性表单**始终内联可编辑**（与正文同处一个编辑器窗口），
     // 不再需要"编辑属性"按钮，也不再弹独立窗口。只读场景（搜索结果）仍展示只读表。
     renderBanner()
@@ -1130,8 +1138,12 @@ window.MMEditor = {
     // md → html → 编辑器
     const html = md.render(body)
     if (!editor) buildEditor(editable !== false)
+    // v2.2.65：setContent 会触发 onUpdate；加载期间置 __suppressUpdate 跳过 dirty 推送，
+    // 避免把「载入新页」误判为「用户编辑」（切页自动保存依赖 isDirty 准确性）。
+    window.__suppressUpdate = true
     editor.commands.setContent(html, false)
     editor.setEditable(editable !== false)
+    window.__suppressUpdate = false
     // 抓取当前页所有 h1-h6 标题，供 [[]] 自动补齐建议同时列出「页面 + 段落」候选
     try {
       const heads = []
@@ -1172,6 +1184,12 @@ window.MMEditor = {
   // 宿主下发的 incoming 反向链接（其他页面正文里 [[本页]] 的扫描结果）；下发后重渲染 banner 以合并展示
   setBacklinks(arr) {
     window.__backlinks = Array.isArray(arr) ? arr : []
+    renderBanner()
+  },
+  // v2.2.65：宿主下发的「引用了某公司页」的页面明细（名称 + 类型 + 关键属性）；
+  // 仅 Company 页使用，下发后重渲染 banner 以嵌入可点击回跳的反链表格。
+  setCompanyReferences(arr) {
+    window.__companyRefs = Array.isArray(arr) ? arr : []
     renderBanner()
   },
   // 推送「自动双链」目标名（仅 Wiki 页名），加载纪要时把裸词包裹成 [[名称]]
@@ -1231,6 +1249,46 @@ function renderBanner() {
     const html = renderFrontmatterBanner(currentFM)
     if (html) { body.innerHTML = html } else { det.style.display = 'none'; body.innerHTML = '' }
   }
+  // v2.2.65：公司页在 banner 下方嵌入「引用此公司的页面」表格（可点击回跳）
+  if (isCompanyType(currentFM['type'])) {
+    const sec = renderCompanyRefsSection()
+    if (sec) body.innerHTML += sec
+  }
+}
+
+// 判断 page type 是否为公司（大小写不敏感，兼容 Company / company）
+function isCompanyType(t) {
+  return String(t || '').trim().toLowerCase() === 'company'
+}
+
+// v2.2.65：渲染「引用此公司的页面」嵌入表格（仅 Company 页）。
+// 每行：页面名（可点击双链回跳）→ 类型 → 关键属性（公司/职位/品牌/型号等，值内 [[Page]] 亦链接化）。
+function renderCompanyRefsSection() {
+  const refs = window.__companyRefs || []
+  if (!refs.length) return ''
+  const rows = refs.map(r => {
+    const name = String(r.name || '').trim()
+    if (!name) return ''
+    const type = String(r.type || '').trim()
+    const fields = Array.isArray(r.fields) ? r.fields : []
+    const fieldCell = fields.map(f => {
+      const lbl = String(f.label || '')
+      const val = String(f.value || '')
+      return lbl + '：' + val
+    }).filter(Boolean).join('、')
+    const nameCell = '<a class="wikilink" data-wikilink data-page="' + escapeAttr(name) + '">' + escapeHtml(name) + '</a>'
+    const fieldsCell = fieldCell ? '<td class="fm-ref-fields">' + renderWikiText(fieldCell) + '</td>' : '<td class="fm-ref-fields fm-empty">—</td>'
+    return '<tr>' +
+      '<td class="fm-ref-name">' + nameCell + '</td>' +
+      '<td class="fm-ref-type">' + escapeHtml(type) + '</td>' +
+      fieldsCell +
+      '</tr>'
+  }).filter(Boolean).join('')
+  if (!rows) return ''
+  return '<div class="fm-company-refs">' +
+    '<div class="fm-ref-title">🔗 引用此公司的页面</div>' +
+    '<table class="fm-ref-table"><thead><tr><th>页面</th><th>类型</th><th>关键属性</th></tr></thead>' +
+    '<tbody>' + rows + '</tbody></table></div>'
 }
 
 // 防抖保存（标量 / chip / 新增属性 改动后统一调用）

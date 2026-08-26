@@ -62,6 +62,11 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
     private var pendingAutoLink: Bool = false
     private var pendingPageName: String = ""
 
+    /// v2.2.65：当前页是否有未保存改动（切页自动保存用）。
+    /// JS 编辑触发 onUpdate → 经 editorBridge 推送 {type:'dirty'} 置 true；
+    /// 载入新页（load）/ 显式保存（requestSave）复位 false。
+    var isDirty: Bool = false
+
     override init(frame frameRect: NSRect) {
         let cfg = WKWebViewConfiguration()
         let uc = WKUserContentController()
@@ -132,6 +137,7 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
     /// mode 可选：'ir'(实时预览,默认) / 'wysiwyg'(真·所见即所得) / 'sv'(分屏)。
     /// autoLink=true 时（仅纪要页单人纪要用），加载时会把正文里出现的已知 Wiki 页名裸词自动包裹为 [[名称]]。
     func load(markdown: String, editable: Bool = true, mode: String = "ir", autoLink: Bool = false, pageName: String = "") {
+        isDirty = false
         pendingMarkdown = markdown
         pendingEditable = editable
         pendingMode = mode
@@ -150,6 +156,7 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
 
     /// 触发保存：读取当前编辑内容（含 frontmatter）并回传宿主。
     func requestSave() {
+        isDirty = false
         webView.evaluateJavaScript("requestSave()")
     }
 
@@ -176,6 +183,16 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
         let json = (try? JSONSerialization.data(withJSONObject: names)) ?? Data("[]".utf8)
         let js = String(data: json, encoding: .utf8) ?? "[]"
         webView.evaluateJavaScript("MMEditor.setBacklinks(\(js))")
+    }
+
+    /// v2.2.65：推送「引用了某公司的页面」明细（含类型 + 关键属性）给 JS，
+    /// 供公司页 banner 下方渲染可点击回跳的反链嵌入表格。仅在当前页 type=Company 时下发，
+    /// 其余类型下发空数组（JS 侧 loadMarkdown 已复位，这里兜底清空）。
+    func setCompanyReferences(_ refs: [[String: Any]]) {
+        guard Self.engine == "tiptap" else { return }
+        let json = (try? JSONSerialization.data(withJSONObject: refs)) ?? Data("[]".utf8)
+        let js = String(data: json, encoding: .utf8) ?? "[]"
+        webView.evaluateJavaScript("MMEditor.setCompanyReferences(\(js))")
     }
 
     /// 跳转到 Wiki 页内某标题锚点（Obsidian 式 [[Page#Heading]]）；无匹配标题时静默忽略。
@@ -211,6 +228,9 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
                 let anchor = message["anchor"] as? String
                 delegate?.markdownEditorDidClickWikilink(self, name: name, anchor: anchor)
             }
+        case "dirty":
+            // v2.2.65：编辑器正文被用户编辑（onUpdate）→ 标记脏，供切页自动保存判定。
+            isDirty = true
         case "getPages":
             let pages = delegate?.markdownEditorRequestsPageList(self) ?? []
             setWikiPages(pages)
@@ -782,6 +802,21 @@ fileprivate enum TipTapEditorHTML {
         background: #eef3ff; color: #2f6fdb; border: 1px solid #c8d6f5; border-radius: 4px;
         font-size: 12px; font-family: inherit;
       }
+      /* v2.2.65：公司页反向引用嵌入表格 */
+      .fm-company-refs { margin-top: 8px; padding-top: 8px; border-top: 1px dashed #e2e3e8; }
+      .fm-ref-title { font-size: 12px; color: #6b6b73; margin-bottom: 4px; font-weight: 600; }
+      .fm-ref-table { border-collapse: collapse; width: 100%; font-size: 12px; }
+      .fm-ref-table th, .fm-ref-table td { border: 1px solid #e2e3e8; padding: 4px 8px; text-align: left; vertical-align: top; }
+      .fm-ref-table th { background: #f5f6f8; color: #3a3a40; font-weight: 600; }
+      .fm-ref-type { color: #6b6b73; white-space: nowrap; }
+      .fm-ref-fields { color: #1c1c1e; }
+      .fm-ref-fields .fm-ref-label { color: #6b6b73; margin-right: 2px; }
+      /* v2.2.65：反向链接改为可编辑（手动项可删除 ×；incoming 只读） */
+      .fm-backlink-group { margin: 2px 0; }
+      .fm-backlink-grp-label { color: #9a9aa2; margin-right: 4px; }
+      .fm-backlink-item { display: inline-flex; align-items: center; margin: 1px 4px 1px 0; background: #eef3ff; color: #2f6fdb; border: 1px solid #c8d6f5; border-radius: 4px; padding: 1px 2px 1px 8px; font-size: 12px; }
+      .fm-backlink-x { border: none; background: transparent; color: #c0392b; cursor: pointer; font-size: 13px; line-height: 1; padding: 0 4px; }
+      .fm-backlink-x:hover { color: #e74c3c; }
       /* 所有「添加」输入行与第 2 列（值列）对齐，与上方其余输入框保持一致宽度 */
       .fm-add-row { grid-column: 2; margin-top: 6px; }
       .fm-add-prop {
@@ -916,6 +951,21 @@ fileprivate enum TipTapEditorHTML {
           background: rgba(116,177,255,0.15); color: #74b1ff; border: 1px solid #3a4a5e; border-radius: 4px;
           font-size: 12px; font-family: inherit;
       }
+      /* v2.2.65：公司页反向引用嵌入表格（深色） */
+      .fm-company-refs { margin-top: 8px; padding-top: 8px; border-top: 1px dashed #3a3a3e; }
+      .fm-ref-title { font-size: 12px; color: #b8b8c0; margin-bottom: 4px; font-weight: 600; }
+      .fm-ref-table { border-collapse: collapse; width: 100%; font-size: 12px; }
+      .fm-ref-table th, .fm-ref-table td { border: 1px solid #3a3a3e; padding: 4px 8px; text-align: left; vertical-align: top; }
+      .fm-ref-table th { background: #26262b; color: #ebebf0; font-weight: 600; }
+      .fm-ref-type { color: #b8b8c0; white-space: nowrap; }
+      .fm-ref-fields { color: #ebebf0; }
+      .fm-ref-fields .fm-ref-label { color: #b8b8c0; margin-right: 2px; }
+      /* v2.2.65：反向链接可编辑（深色） */
+      .fm-backlink-group { margin: 2px 0; }
+      .fm-backlink-grp-label { color: #7a7a82; margin-right: 4px; }
+      .fm-backlink-item { display: inline-flex; align-items: center; margin: 1px 4px 1px 0; background: rgba(116,177,255,0.15); color: #74b1ff; border: 1px solid #3a4a5e; border-radius: 4px; padding: 1px 2px 1px 8px; font-size: 12px; }
+      .fm-backlink-x { border: none; background: transparent; color: #ff7a7a; cursor: pointer; font-size: 13px; line-height: 1; padding: 0 4px; }
+      .fm-backlink-x:hover { color: #ff9a9a; }
       .ProseMirror code { background: #2a2a2e; }
         .ProseMirror pre { background: #26262b; }
         .ProseMirror blockquote { border-left-color: #3a3a40; color: #b8b8c0; }

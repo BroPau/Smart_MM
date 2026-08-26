@@ -390,12 +390,105 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
                 let target = String(text[r]).trimmingCharacters(in: .whitespaces).lowercased()
                 if targets.contains(target) { hit = true }
             }
-            if hit { found.append(page.name) }
+            // v2.2.65：过滤空名 + 去重，杜绝「空链接」噪声。
+            if hit {
+                let n = page.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !n.isEmpty && !found.contains(n) { found.append(n) }
+            }
         }
         return found
     }
 
+    // MARK: - 公司页反向引用明细（用于嵌入表格）
+
+    /// v2.2.65：扫描其他页面正文里 [[引用了本公司]] 的页面，返回其「名称 + 类型 + 关键属性」明细，
+    /// 供公司页 banner 下方渲染可点击回跳的嵌入表格。仅 Company 页调用。
+    private func companyReferences(for company: WikiPage) -> [[String: Any]] {
+        let targets = Set(([company.name] + company.aliases).map { $0.lowercased() })
+        guard !targets.isEmpty else { return [] }
+        let regex = try? NSRegularExpression(pattern: #"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]"#, options: [])
+        var out: [[String: Any]] = []
+        var seen = Set<String>()
+        for page in pages where page.file != company.file {
+            let url = page.isHome ? homeFile : wikiPagesDir.appendingPathComponent(page.file)
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            let range = NSRange(text.startIndex..., in: text)
+            var hit = false
+            regex?.enumerateMatches(in: text, options: [], range: range) { match, _, _ in
+                guard let match, let r = Range(match.range(at: 1), in: text) else { return }
+                let target = String(text[r]).trimmingCharacters(in: .whitespaces).lowercased()
+                if targets.contains(target) { hit = true }
+            }
+            guard hit else { continue }
+            let key = page.name.lowercased()
+            guard !seen.contains(key) else { continue }
+            seen.insert(key)
+
+            var fields: [[String: String]] = []
+            let fm = parseFrontmatterScalar(text)
+            let t = (fm["type"] ?? "").lowercased()
+            let wanted: [String]
+            if t == "person" { wanted = ["company", "title"] }
+            else if t == "chip" { wanted = ["品牌", "具体型号"] }
+            else if t == "company" { wanted = ["所属行业"] }
+            else if t == "project" { wanted = ["概要", "summary"] }
+            else { wanted = [] }
+            for w in wanted {
+                if let v = fm[w], !v.isEmpty {
+                    fields.append(["label": backlinkFieldLabel(w), "value": v])
+                }
+            }
+            var dict: [String: Any] = ["name": page.name, "type": page.type]
+            if !fields.isEmpty { dict["fields"] = fields }
+            out.append(dict)
+        }
+        return out
+    }
+
+    /// 轻量 frontmatter 标量解析（仅需提取少数展示字段，不处理列表/多行）。
+    private func parseFrontmatterScalar(_ text: String) -> [String: String] {
+        let lines = text.components(separatedBy: "\n")
+        guard lines.first?.trimmingCharacters(in: .whitespaces) == "---" else { return [:] }
+        var result: [String: String] = [:]
+        var i = 1
+        while i < lines.count {
+            let s = lines[i]
+            let trimmed = s.trimmingCharacters(in: .whitespaces)
+            if trimmed == "---" { break }
+            // 列表项（以 "  - " 开头）跳过；仅取顶层「key: value」
+            if s.hasPrefix(" ") || s.hasPrefix("\t") { i += 1; continue }
+            if let colon = s.range(of: ":") {
+                let k = String(s[s.startIndex..<colon.lowerBound]).trimmingCharacters(in: .whitespaces)
+                let v = String(s[s.index(after: colon.lowerBound)...]).trimmingCharacters(in: .whitespaces)
+                if !k.isEmpty, !v.isEmpty, !v.hasPrefix("-") {
+                    result[k] = v
+                }
+            }
+            i += 1
+        }
+        return result
+    }
+
+    private func backlinkFieldLabel(_ key: String) -> String {
+        switch key {
+        case "company": return "公司"
+        case "title": return "职位"
+        case "品牌": return "品牌"
+        case "具体型号": return "型号"
+        case "所属行业": return "行业"
+        case "概要", "summary": return "概要"
+        case "职能范围": return "职能范围"
+        default: return key
+        }
+    }
+
     private func selectPage(_ page: WikiPage) {
+        // v2.2.65：切页前若当前页有未保存改动，先自动保存（无需手动点保存键）。
+        // 此时 selectedPage 仍是上一页（尚未被本函数改写），editor 仍呈现上一页内容，
+        // saveCurrent() 会经 editorBridge 把上一页正文回传落盘。
+        if !showingSearch, let current = selectedPage, editor.isDirty {
+            saveCurrent()
+        }
         showingSearch = false
         selectedPage = page
         // 首页：始终以 markdown 原文呈现（含分类表格 + 可点击双链），不再提供 NSTableView 表格模式
@@ -408,10 +501,12 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
                 editor.load(markdown: "（无法读取文件：\(homeFile.path)）", editable: false, pageName: "")
                 presentBaseDirAccessReset(message: "无法读取文件：\(homeFile.path)")
             }
-            editor.setWikiPages(pages.flatMap { [$0.name] + $0.aliases })
-            // 推送 incoming 反向链接（被哪些页 [[引用]]），供 banner「反向链接」自动展示
-            editor.setBacklinks(computeIncomingBacklinks(for: page))
-            return
+        editor.setWikiPages(pages.flatMap { [$0.name] + $0.aliases })
+        // 推送 incoming 反向链接（被哪些页 [[引用]]），供 banner「反向链接」自动展示
+        editor.setBacklinks(computeIncomingBacklinks(for: page))
+        // v2.2.65：公司页下发反向引用明细，渲染嵌入表格
+        editor.setCompanyReferences(page.type.lowercased() == "company" ? companyReferences(for: page) : [])
+        return
         }
         // 普通页面：显示编辑器
         editor.isHidden = false
@@ -429,6 +524,8 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         editor.setWikiPages(pages.flatMap { [$0.name] + $0.aliases })
         // 推送 incoming 反向链接（被哪些页 [[引用]]），供 banner「反向链接」自动展示
         editor.setBacklinks(computeIncomingBacklinks(for: page))
+        // v2.2.65：公司页下发反向引用明细，渲染嵌入表格
+        editor.setCompanyReferences(page.type.lowercased() == "company" ? companyReferences(for: page) : [])
     }
 
     // MARK: - 搜索
