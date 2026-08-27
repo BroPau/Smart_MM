@@ -639,15 +639,30 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         }
     }
 
-    /// 重新计算当前页的出链 / 入链明细并下发表格（写回后刷新视图）
-    private func refreshCurrentRefs() {
-        guard let page = selectedPage else { return }
-        let outgoing = referencesFromThis(for: page)
-        let incoming = referencesToThis(for: page)
-        currentOutgoing = outgoing
-        currentIncoming = incoming
-        editor.setPageReferencesOut(outgoing)
-        editor.setPageReferences(incoming)
+    /// v2.2.70：把「出链 / 入链」明细渲染为原生 Markdown 段（## 本页引用的页面 / ## 反向链接），
+    /// 注入正文末尾，由编辑器直接呈现为可点击 [[双链]]。单一真相源 = .md，
+    /// 保存时由 JS 的 frontmatterFencedToDashed 剥离这两个段，不落盘、不耦合 pipeline。
+    private func renderRefsSections(incoming: [[String: Any]], outgoing: [[String: Any]]) -> String {
+        var parts: [String] = []
+        if !outgoing.isEmpty {
+            var s = "## 本页引用的页面\n"
+            for r in outgoing {
+                if let name = r["name"] as? String, !name.isEmpty {
+                    s += "- [[" + name + "]]\n"
+                }
+            }
+            parts.append(s)
+        }
+        if !incoming.isEmpty {
+            var s = "## 反向链接\n"
+            for r in incoming {
+                if let name = r["name"] as? String, !name.isEmpty {
+                    s += "- [[" + name + "]]\n"
+                }
+            }
+            parts.append(s)
+        }
+        return parts.isEmpty ? "" : "\n\n" + parts.joined(separator: "\n")
     }
 
     private func selectPage(_ page: WikiPage) {
@@ -663,27 +678,27 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         if page.isHome {
             editor.isHidden = false
             if let text = try? String(contentsOf: homeFile, encoding: .utf8) {
-                editor.load(markdown: text, editable: true, pageName: page.name)
+                // v2.2.70：出链 / 入链明细渲染为原生 Markdown 段注入正文（## 本页引用的页面 / ## 反向链接），
+                // 单一真相源 = .md，保存时由 JS 剥离，不落盘。
+                let loadMd = text + renderRefsSections(incoming: referencesToThis(for: page),
+                                                      outgoing: referencesFromThis(for: page))
+                editor.load(markdown: loadMd, editable: true, pageName: page.name)
                 statusLabel.stringValue = "WiKi 首页"
             } else {
                 editor.load(markdown: "（无法读取文件：\(homeFile.path)）", editable: false, pageName: "")
                 presentBaseDirAccessReset(message: "无法读取文件：\(homeFile.path)")
             }
         editor.setWikiPages(pages.flatMap { [$0.name] + $0.aliases })
-        // v2.2.68：下发「本页引用的页面」（出链）+「引用本页的页面」（入链）明细，渲染正文末尾双向双链表格
-        let outgoing = referencesFromThis(for: page)
-        let incoming = referencesToThis(for: page)
-        currentOutgoing = outgoing
-        currentIncoming = incoming
-        editor.setPageReferencesOut(outgoing)
-        editor.setPageReferences(incoming)
         return
         }
         // 普通页面：显示编辑器
         editor.isHidden = false
         let url = wikiPagesDir.appendingPathComponent(page.file)
         if let text = try? String(contentsOf: url, encoding: .utf8) {
-            editor.load(markdown: text, editable: true, pageName: page.name)
+            // v2.2.70：出链 / 入链明细渲染为原生 Markdown 段注入正文（## 本页引用的页面 / ## 反向链接）
+            let loadMd = text + renderRefsSections(incoming: referencesToThis(for: page),
+                                                  outgoing: referencesFromThis(for: page))
+            editor.load(markdown: loadMd, editable: true, pageName: page.name)
             statusLabel.stringValue = "\(page.name)（\(page.type.capitalized)）"
         } else {
             editor.load(markdown: "（无法读取文件：\(url.path)）", editable: false, pageName: "")
@@ -693,13 +708,6 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         }
         // 把现有页面名（含别名）推给编辑器，供双链自动完成 + 缺失页判定。
         editor.setWikiPages(pages.flatMap { [$0.name] + $0.aliases })
-        // v2.2.68：下发「本页引用的页面」（出链）+「引用本页的页面」（入链）明细，渲染正文末尾双向双链表格
-        let outgoing = referencesFromThis(for: page)
-        let incoming = referencesToThis(for: page)
-        currentOutgoing = outgoing
-        currentIncoming = incoming
-        editor.setPageReferencesOut(outgoing)
-        editor.setPageReferences(incoming)
     }
 
     // MARK: - 搜索
@@ -792,10 +800,6 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
     }
 
     private var pendingSavePage: WikiPage?
-
-    // v2.2.68：缓存当前页的「出链 / 入链」明细，供表格「添加双链」时就地刷新（无需整页重载）
-    private var currentOutgoing: [[String: Any]] = []
-    private var currentIncoming: [[String: Any]] = []
 
     private func submitPageCommand(arguments: [String]) {
         setBusy(true, status: "写入中…")
@@ -1241,113 +1245,7 @@ extension WikiViewController: MarkdownEditorViewDelegate, SaveablePage {
         resolveOrPromptWikiPage(name, anchor: anchor)
     }
 
-    /// v2.2.68：用户在正文末尾「双链关系」表格输入页面名并回车 → 建立双链。
-    /// - mode "out"：在当前页正文末尾插入 [[name]]（目标页不存在则先自动新建），即「本页引用该页」。
-    /// - mode "in"：在目标页正文追加 [[当前页]]（目标页不存在则先自动新建），即「该页引用本页」。
-    /// 两种模式都就地刷新对应表格区（内存更新），无需整页重载，避免丢失编辑器中的未保存改动。
-    func markdownEditorDidRequestAddPageLink(_ editor: MarkdownEditorView, mode: String, name: String) {
-        let target = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !target.isEmpty else { return }
-        guard let current = selectedPage else { return }
-        resolveOrCreatePage(named: target) { [weak self] page in
-            guard let self, let page = page else { return }
-            if mode == "in" {
-                // 目标页正文追加 [[当前页]]，使其成为「引用本页的页面」
-                self.appendLinkToPageBody(page.file, linkName: current.name, isHome: page.isHome)
-                // 立即刷入链表（内存）
-                var inc = self.currentIncoming
-                if !inc.contains(where: { ($0["name"] as? String)?.lowercased() == page.name.lowercased() }) {
-                    var fields: [[String: String]] = []
-                    if let tText = try? String(contentsOf: page.isHome ? self.homeFile : self.wikiPagesDir.appendingPathComponent(page.file), encoding: .utf8) {
-                        let fm = self.parseFrontmatterScalar(tText)
-                        let t = (fm["type"] ?? page.type).lowercased()
-                        for w in WikiViewController.referenceWantedKeys(for: t) {
-                            if let v = fm[w], !v.isEmpty { fields.append(["label": self.backlinkFieldLabel(w), "value": v]) }
-                        }
-                    }
-                    var dict: [String: Any] = ["name": page.name, "type": page.type]
-                    if !fields.isEmpty { dict["fields"] = fields }
-                    inc.append(dict)
-                    self.currentIncoming = inc
-                    self.editor.setPageReferences(inc)
-                }
-            } else {
-                // out：在当前编辑器正文末尾插入 [[page.name]]（保活，不重载）
-                self.editor.appendWikiLink(page.name)
-                // 立即刷出链表（内存）
-                var out = self.currentOutgoing
-                if !out.contains(where: { ($0["name"] as? String)?.lowercased() == page.name.lowercased() }) {
-                    var dict: [String: Any] = ["name": page.name, "type": page.type]
-                    out.append(dict)
-                    self.currentOutgoing = out
-                    self.editor.setPageReferencesOut(out)
-                }
-            }
-            // 新建的页已入库：刷新页面名列表（双链自动补全 / 缺失页判定）
-            self.editor.setWikiPages(self.pages.flatMap { [$0.name] + $0.aliases })
-        }
-    }
 
-    /// v2.2.69：双链可编辑表格单元格写回 .md。
-    /// - field "name"：out 改当前页正文 [[oldName]]→[[value]]（同步 DOM 后保存）；in 改对方页里指向当前页的 [[当前页]]→[[value]]。
-    /// - field "type"：写回 rowFile 的 type frontmatter。
-    /// - field "attr"/"customval"：写回 rowFile 的指定 frontmatter 键（空值删键）。
-    /// - field "customadd"：rowFile 新增自定义 frontmatter 键=value。
-    /// - field "customdel"：删除 rowFile 的指定 frontmatter 键。
-    /// rowFile 即表格该行对应 wiki 页文件名；name(out) 时忽略 rowFile，改写当前页。
-    func markdownEditorDidRequestEditPageRef(_ editor: MarkdownEditorView, mode: String, oldName: String, field: String, fmKey: String?, value: String?, rowFile: String?) {
-        let v = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        switch field {
-        case "name":
-            guard let current = selectedPage else { return }
-            if mode == "in" {
-                // 改写对方页（rowFile）里指向当前页的 [[当前页]] → [[新名]
-                guard let rf = rowFile, !rf.isEmpty else { return }
-                relabelWikiLinkInFile(file: rf, oldLink: current.name, newLink: v, isHome: false) { [weak self] in
-                    self?.refreshCurrentRefs()
-                }
-            } else {
-                // out：改写当前页正文里的 [[oldName]] → [[新名]]，同步编辑器 DOM 后保存（写当前页）
-                self.pendingSavePage = current
-                self.editor.replaceWikiLink(oldName, v)
-                self.editor.requestSave()
-                // 保存为异步，稍后刷新表格以反映新链接
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
-                    self?.refreshCurrentRefs()
-                }
-            }
-        case "type":
-            guard let rf = rowFile, !rf.isEmpty else { return }
-            rewriteFrontmatter(of: rf, isHome: false, mutate: { fm in
-                var fm = fm
-                if v.isEmpty { removeFMValue(&fm, key: "type") } else { setFMValue(&fm, key: "type", scalar: v) }
-                return fm
-            }) { [weak self] in self?.refreshCurrentRefs() }
-        case "attr", "customval":
-            guard let rf = rowFile, !rf.isEmpty, let k = fmKey, !k.isEmpty else { return }
-            rewriteFrontmatter(of: rf, isHome: false, mutate: { fm in
-                var fm = fm
-                if v.isEmpty { removeFMValue(&fm, key: k) } else { setFMValue(&fm, key: k, scalar: v) }
-                return fm
-            }) { [weak self] in self?.refreshCurrentRefs() }
-        case "customadd":
-            guard let rf = rowFile, !rf.isEmpty, let k = fmKey, !k.isEmpty else { return }
-            rewriteFrontmatter(of: rf, isHome: false, mutate: { fm in
-                var fm = fm
-                setFMValue(&fm, key: k, scalar: v)
-                return fm
-            }) { [weak self] in self?.refreshCurrentRefs() }
-        case "customdel":
-            guard let rf = rowFile, !rf.isEmpty, let k = fmKey, !k.isEmpty else { return }
-            rewriteFrontmatter(of: rf, isHome: false, mutate: { fm in
-                var fm = fm
-                removeFMValue(&fm, key: k)
-                return fm
-            }) { [weak self] in self?.refreshCurrentRefs() }
-        default:
-            break
-        }
-    }
 
     /// 解析并跳转，未命中则礼貌提示新建（供纪要页路由与本页点击复用）。anchor 为 [[Page#Heading]] 的标题锚点。
     private func resolveOrPromptWikiPage(_ name: String, anchor: String? = nil) {

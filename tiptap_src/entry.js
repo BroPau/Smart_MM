@@ -59,186 +59,6 @@ function splitFrontmatter(md) {
   }
   return { fmRaw: '', body: md || '' }
 }
-function parseFrontmatter(lines) {
-  const fm = {}
-  let i = 0
-  while (i < lines.length) {
-    const s = lines[i]
-    const m = s.match(/^([^\s:]+):\s*(.*)$/)
-    if (!m) { i++; continue }
-    const key = m[1]
-    let val = m[2].trim()
-    if (val === '') {
-      const items = []
-      let j = i + 1
-      while (j < lines.length) {
-        const st = lines[j].match(/^\s+-\s+(.*)$/)
-        if (st) { items.push(st[1].trim()); j++; continue }
-        break
-      }
-      if (items.length) fm[key] = items
-      i = j
-    } else { fm[key] = val; i++ }
-  }
-  return fm
-}
-// ————————————————————————————————————————————————————————————————
-//  双兼容 key 归一化（v2.2.32）：用户 wiki page frontmatter 改为中文 key；
-//  pipeline 写入路径仍可能写出 PascalCase，因此展示层统一折叠到内部 canonical key。
-//  仅做只读展示，不会改写已保存的 frontmatter 文件（保存路径走 serializeFrontmatter 用原 key 名）。
-// ————————————————————————————————————————————————————————————————
-const KEY_ALIASES = {
-  类型: 'type', Type: 'type', type: 'type',
-  规范名: 'canonical_name', CanonicalName: 'canonical_name', canonical_name: 'canonical_name', canonicalname: 'canonical_name',
-  别名: 'aliases', Aliases: 'aliases', aliases: 'aliases',
-  标签: 'tags', Tags: 'tags', tags: 'tags',
-  更新时间: 'updated', Updated: 'updated', updated: 'updated',
-  反向链接: 'backlinks', Backlinks: 'backlinks', backlinks: 'backlinks',
-  公司: 'company', Company: 'company', company: 'company',
-  职位: 'title', Title: 'title', title: 'title'
-}
-function fmCanonical(k) { return KEY_ALIASES[k] || k }
-function fmNormalize(fm) {
-  const out = {}
-  const seen = new Set()
-  for (const k of Object.keys(fm)) {
-    const c = fmCanonical(k)
-    if (!seen.has(c)) { out[c] = fm[k]; seen.add(c) }
-  }
-  return out
-}
-// ————————————————————————————————————————————————————————————————
-//  frontmatter 属性 banner（数据驱动：读 page 实际 frontmatter 键 → 全部显示 → 仅做键名→中文翻译）
-// ————————————————————————————————————————————————————————————————
-// 已知键的展示顺序；page 中出现的未知键保持原顺序追加到末尾（backlinks 固定最后）
-// 顺序约定（用户要求 v2.2.30，v2.2.33 与 WikiPropertySheet 完全对齐）：
-//   1) 标识/链接类在最前：类型 → 规范名 → 别名
-//   2) 描述类（按 type 动态出现，person→中文名/公司/职位/职能范围；company→公司类型/所属行业/公司简介；chip→品牌/...）放在 aliases 与 tags 之间
-//   3) 元信息收尾：标签 → 更新时间 → 反向链接
-const FM_ORDER = [
-  'type', 'canonical_name', 'aliases',
-  '中文名', 'company', 'title', '职能范围',
-  '公司类型', '所属行业', '公司简介',
-  '品牌', '具体型号', '类别', '功能简述', '状态', '替代料',
-  'tags', 'updated'
-]
-// 内部标记键，不展示（如 MOC 首页的 wiki_首页 标志；backlinks 反向链接已移出 banner，改由正文末尾「双链关系」表格呈现）
-const FM_SKIP = { wiki_首页: 1, backlinks: 1 }
-// 英文键 → 中文标签（统一界面语言，避免中英混合）。中文键原样透传。
-const FM_LABEL_CN = {
-  type: '类型',
-  canonical_name: '规范名',
-  company: '公司',
-  title: '职位',
-  aliases: '别名',
-  tags: '标签',
-  updated: '更新时间'
-}
-function fmLabel(k) { return FM_LABEL_CN[k] || k }
-
-// 字段类型推断（决定渲染控件与图标）。page 有什么字段就显示什么字段，不猜测、不丢弃。
-function fmFieldType(key, value) {
-  if (key === 'type') return 'select'
-  if (key === 'aliases' || key === 'tags') return 'list'
-  const kl = String(key).toLowerCase()
-  if (kl === 'updated' || kl === 'created' || kl === 'date' || kl.endsWith('_date')) return 'date'
-  if (key === '公司简介' || key === '职能范围' || key === '功能简述' || key === '概要' || key === 'summary' || key === 'description') return 'longtext'
-  return 'text'
-}
-// Obsidian 风格字段图标（左侧小图标）
-function fmFieldIcon(type, key) {
-  if (type === 'list' && key === 'tags') return '🏷'   // 标签
-  if (type === 'list') return '↗'                       // 别名（列表）
-  if (type === 'date') return '📅'                      // 日期
-  if (type === 'select') return '≡'                     // 类型
-  return '≡'                                             // 文本 / 长文本
-}
-
-// 按 FM_ORDER 排序已知键，未知键按出现顺序追加（剔除 FM_SKIP）
-function fmOrderedKeys(fm) {
-  const known = FM_ORDER.filter(k => Object.prototype.hasOwnProperty.call(fm, k))
-  const unknown = Object.keys(fm).filter(k => !FM_ORDER.includes(k) && !FM_SKIP[k])
-  return known.concat(unknown)
-}
-// 值 → 展示字符串（数组用「、」连接；剥离外层 [] / () / 引号）
-function fmDisplay(v) {
-  if (v === undefined || v === null) return ''
-  let s = Array.isArray(v) ? v.map(x => String(x).trim()).filter(Boolean).join('、') : String(v).trim()
-  s = s.replace(/^[\[\(](.*)[\]\)]$/, '$1').replace(/^["“”']|["“”']$/g, '')
-  return s
-}
-// 列表字段 → 非空白项数组（兼容真实数组与 '[]' / '[a, b]' 字符串写法）
-function fmListItems(v) {
-  if (Array.isArray(v)) return v.map(x => String(x).trim()).filter(Boolean)
-  if (v == null) return []
-  let s = String(v).trim().replace(/^[\[\(](.*)[\]\)]$/, '$1').trim()
-  if (!s) return []
-  return s.split(/[,，、]/).map(x => x.trim()).filter(Boolean)
-}
-// 把标量 / 长文本值里的 [[Page]] / [[Page|alias]] / [[Page#anchor]] 渲染成可点击双向链接（只读展示用）
-function renderWikiText(s) {
-  if (!s) return ''
-  const esc = escapeHtml(s)
-  return esc.replace(/\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]/g, (m, p, a) => {
-    const target = (p || '').trim()
-    const alias = (a || '').trim()
-    if (!target) return m
-    // 支持 [[Page#anchor]] / [[Page|alias#anchor]]
-    let page = target, anchor = ''
-    const h = target.indexOf('#')
-    if (h >= 0) {
-      page = target.slice(0, h).trim()
-      anchor = target.slice(h + 1).trim()
-      if (!page) page = anchor
-    }
-    if (!page) return m
-    const anchorAttr = anchor ? ' data-anchor="' + escapeAttr(anchor) + '"' : ''
-    return '<a class="wikilink" data-wikilink data-page="' + escapeAttr(page) + '"' +
-      (alias ? ' data-alias="' + escapeAttr(alias) + '"' : '') +
-      anchorAttr + '>' + escapeHtml(alias || page) + '</a>'
-  })
-}
-// 只读 banner（Obsidian 风格）：遍历 page 实际键全部显示；列表→chip、日期→日历
-function renderFrontmatterBanner(fm) {
-  if (!fm || Object.keys(fm).length === 0) return ''
-  const rows = []
-  fmOrderedKeys(fm).forEach(k => {
-    if (FM_SKIP[k]) return
-    const t = fmFieldType(k, fm[k])
-    const icon = fmFieldIcon(t, k)
-    const label = fmLabel(k)
-    if (t === 'list') {
-      const items = fmListItems(fm[k])
-      if (!items.length) return
-      const chips = '<span class="fm-chips readonly">' + items.map(it => '<span class="fm-chip">' + escapeHtml(it) + '</span>').join('') + '</span>'
-      rows.push(fmRowHtml(icon, label, chips))
-    } else if (t === 'date') {
-      const dv = (fm[k] || '').toString().trim()
-      if (!dv) return
-      rows.push(fmRowHtml(icon, label, '<span class="fm-date-val">' + escapeHtml(dv) + '</span>'))
-    } else if (t === 'longtext') {
-      const dv = (fm[k] == null ? '' : String(fm[k])).trim()
-      // 长文本与其他字段同列对齐（不再跨整行顶格）；值内的 [[Page]] 渲染为可点击双链
-      const inner = dv
-        ? '<div class="fm-longtext-val">' + renderWikiText(dv) + '</div>'
-        : '<div class="fm-longtext-val fm-empty">（空）</div>'
-      rows.push(fmRowHtml(icon, label, inner))
-    } else {
-      const dv = fmDisplay(fm[k])
-      if (!dv) return
-      // 标量值内的 [[Page]] 同样渲染为可点击双链（双向链接）
-      rows.push(fmRowHtml(icon, label, '<span class="fm-scalar-val">' + renderWikiText(dv) + '</span>'))
-    }
-  })
-  if (rows.length === 0) return ''
-  return '<div class="fm-grid">' + rows.join('') + '</div>'
-}
-// 共享：单行 [图标 + 标签] + [值]；long=true 时整行跨列（label 一行 + value 一行）
-function fmRowHtml(icon, label, valueHtml, opts) {
-  const cls = (opts && opts.long) ? 'fm-row fm-row-long' : 'fm-row'
-  return '<div class="' + cls + '"><div class="fm-row-label"><span class="fm-icon">' + icon + '</span><span class="fm-key">' + escapeHtml(label) + '</span></div>' +
-    '<div class="fm-row-value">' + valueHtml + '</div></div>'
-}
 
 // ————————————————————————————————————————————————————————————————
 //  MarkdownIt：把 [[Page]] / [[Page|alias]] 解析为 <a data-wikilink>
@@ -911,9 +731,11 @@ window.MMEditor_showPreview = function (name, html) {
 //  编辑器实例
 // ————————————————————————————————————————————————————————————————
 let editor = null
-let pendingFrontmatter = ''
-let currentFM = {}
 let currentEditable = true
+
+// 构建版本标记（部署校验用：rsync 前断言打包产物含此字符串，防止误取陈旧 DerivedData 副本）
+// 用 window 全局赋值（而非 const），避免 esbuild tree-shaking 把未引用的标记抖掉。
+window.MM_EDITOR_BUILD = '2.2.70'
 
 function buildEditor(editable) {
   if (editor) { editor.destroy(); editor = null }
@@ -998,6 +820,51 @@ function getBubbleMenuEl() {
   return el
 }
 
+// v2.2.70：frontmatter 双向转换（磁盘 ---...--- ⇄ 编辑器内原生 ```yaml 代码块）
+// 以及由宿主注入的「双链关系」派生段（## 反向链接 / ## 本页引用的页面）保存前剥离，不落盘。
+
+// 剥离由宿主注入的派生段：## 反向链接 / ## 本页引用的页面（命中即跳到下一个标题或文末）
+function stripRefsSections(md) {
+  if (typeof md !== 'string') return md || ''
+  const lines = md.split(/\r?\n/)
+  const out = []
+  let skipping = false
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^(#{1,6})\s+(.*)$/)
+    if (m) {
+      const title = m[2].trim()
+      if (title === '反向链接' || title === '本页引用的页面') { skipping = true; continue }
+      skipping = false
+    }
+    if (!skipping) out.push(lines[i])
+  }
+  return out.join('\n')
+}
+
+// 磁盘 → 编辑器：顶部 ---...--- frontmatter 包成 ```yaml 代码块（单真相源 = .md，编辑代码块即编辑 frontmatter）
+function frontmatterDashedToFenced(md) {
+  if (typeof md !== 'string') return md || ''
+  const s = md.replace(/\r\n/g, '\n')
+  const fm = s.match(/^---\n([\s\S]*?)\n---\n?/)
+  if (fm) {
+    const rest = s.slice(fm[0].length)
+    return '```yaml\n' + fm[1] + '\n```\n\n' + rest
+  }
+  return s
+}
+
+// 编辑器 → 磁盘：顶部 ```yaml 代码块还原为 ---...---；并剥离双链派生段（不落盘）
+function frontmatterFencedToDashed(body) {
+  let s = (body || '').replace(/\r\n/g, '\n')
+  s = stripRefsSections(s)
+  const fence = s.match(/^```yaml\n([\s\S]*?)\n```\n?/)
+  if (fence) {
+    const rest = s.slice(fence[0].length)
+    return '---\n' + fence[1] + '\n---\n\n' + rest
+  }
+  return s
+}
+
 function wireEditorDom() {
   const dom = editor.view.dom
   dom.addEventListener('mouseover', e => {
@@ -1019,116 +886,8 @@ function wireEditorDom() {
       }
     }
   })
-  // 顶部属性 banner（只读态反向链接、标量 / 长文本值，以及编辑态字段值）内的双链点击：
-  // 委托到持久存在的 #fmBanner 容器，统一路由到宿主跳转（与正文双链同机制）
-  const banner = document.getElementById('fmBanner')
-  if (banner) {
-    banner.addEventListener('click', e => {
-      const el = e.target.closest && e.target.closest('a.wikilink')
-      if (el) {
-        e.preventDefault()
-        const name = el.getAttribute('data-page')
-        const anchor = el.getAttribute('data-anchor') || ''
-        if (name && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.editorBridge) {
-          window.webkit.messageHandlers.editorBridge.postMessage({ type: 'wikilink', name: name, anchor: anchor })
-        }
-      }
-    })
-  }
-  // v2.2.68：正文末尾「双链关系」表格容器内的双链（含表内页面名链接）同样委托点击/悬停跳转，
-  // 使表格中的 [[页面]] 链接与正文、banner 一致，可互相跳转。
-  const refsContainer = document.getElementById('fmPageRefsContainer')
-  if (refsContainer) {
-    refsContainer.addEventListener('mouseover', e => {
-      const el = e.target.closest && e.target.closest('a.wikilink')
-      if (el) showPreviewFor(el)
-    })
-    refsContainer.addEventListener('mouseout', e => {
-      const el = e.target.closest && e.target.closest('a.wikilink')
-      if (el) hidePreviewSoon()
-    })
-    refsContainer.addEventListener('click', e => {
-      const el = e.target.closest && e.target.closest('a.wikilink')
-      if (el) {
-        e.preventDefault()
-        const name = el.getAttribute('data-page')
-        const anchor = el.getAttribute('data-anchor') || ''
-        if (name && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.editorBridge) {
-          window.webkit.messageHandlers.editorBridge.postMessage({ type: 'wikilink', name: name, anchor: anchor })
-        }
-      }
-    })
-    // v2.2.68：表格内「添加双链」输入框回车 → 通知宿主建链（目标页不存在则自动新建 WiKi 页）
-    refsContainer.addEventListener('keydown', e => {
-      if (e.key !== 'Enter') return
-      const inp = e.target.closest && e.target.closest('input.fm-ref-add-input')
-      if (!inp) return
-      e.preventDefault()
-      const mode = inp.getAttribute('data-add-link') || 'out'
-      const name = (inp.value || '').trim()
-      if (name && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.editorBridge) {
-        window.webkit.messageHandlers.editorBridge.postMessage({ type: 'addPageLink', mode: mode, name: name })
-      }
-      inp.value = ''
-    })
-  }
-  // v2.2.69：可编辑单元格改动 → 上报宿主写回 .md（页面名改写 [[链接]]；类型/属性/自定义属性写 frontmatter）
-  refsContainer.addEventListener('change', e => {
-    const el = e.target.closest && e.target.closest('.fm-ref-input')
-    if (!el) return
-    const field = el.getAttribute('data-field')
-    if (!field) return
-    const mode = el.getAttribute('data-mode') || ''
-    const oldName = el.getAttribute('data-oldname') || ''
-    const rowFile = el.getAttribute('data-rowfile') || ''
-    const fmKey = el.getAttribute('data-fm') || ''
-    const value = (el.value || '').trim()
-    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.editorBridge) {
-      window.webkit.messageHandlers.editorBridge.postMessage({ type: 'editPageRef', mode: mode, oldName: oldName, field: field, fmKey: fmKey, value: value, rowFile: rowFile })
-    }
-  })
-  // 自定义属性：＋ 添加（内联插入 键=值 行），删除（×）
-  refsContainer.addEventListener('click', e => {
-    const addBtn = e.target.closest && e.target.closest('.fm-ref-cadd')
-    if (addBtn) {
-      const mode = addBtn.getAttribute('data-mode') || ''
-      const oldName = addBtn.getAttribute('data-oldname') || ''
-      const rowFile = addBtn.getAttribute('data-rowfile') || ''
-      const wrap = addBtn.closest('.fm-ref-custom')
-      if (wrap && !wrap.querySelector('.fm-ref-cnew')) {
-        const row = document.createElement('div')
-        row.className = 'fm-ref-custom-row fm-ref-cnew'
-        row.innerHTML = '<input type="text" class="fm-ref-input fm-ref-cnewkey" placeholder="属性名">' +
-          '<input type="text" class="fm-ref-input fm-ref-cnewval" placeholder="值">' +
-          '<button type="button" class="fm-ref-cok">添加</button>'
-        wrap.insertBefore(row, addBtn)
-        const ok = row.querySelector('.fm-ref-cok')
-        const commit = () => {
-          const nk = row.querySelector('.fm-ref-cnewkey').value.trim()
-          const nv = row.querySelector('.fm-ref-cnewval').value.trim()
-          if (!nk) { if (row.parentNode) row.parentNode.removeChild(row); return }
-          if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.editorBridge) {
-            window.webkit.messageHandlers.editorBridge.postMessage({ type: 'editPageRef', mode: mode, oldName: oldName, field: 'customadd', fmKey: nk, value: nv, rowFile: rowFile })
-          }
-          if (row.parentNode) row.parentNode.removeChild(row)
-        }
-        ok.addEventListener('click', commit)
-      }
-      return
-    }
-    const delBtn = e.target.closest && e.target.closest('.fm-ref-cdel')
-    if (delBtn) {
-      const mode = delBtn.getAttribute('data-mode') || ''
-      const oldName = delBtn.getAttribute('data-oldname') || ''
-      const rowFile = delBtn.getAttribute('data-rowfile') || ''
-      const fmKey = delBtn.getAttribute('data-fm') || ''
-      if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.editorBridge) {
-        window.webkit.messageHandlers.editorBridge.postMessage({ type: 'editPageRef', mode: mode, oldName: oldName, field: 'customdel', fmKey: fmKey, value: '', rowFile: rowFile })
-      }
-      const rowEl = delBtn.closest('.fm-ref-custom-row')
-      if (rowEl && rowEl.parentNode) rowEl.parentNode.removeChild(rowEl)
-    }
-  })
+  // v2.2.70：属性/双链均为编辑器内原生 markdown（顶部 ```yaml 代码块 + 正文 ## 反向链接 段），
+  // 不再有 #fmBanner / #fmPageRefsContainer 注入式 DOM；双链点击统一由编辑器正文委托处理（见上）。
 }
 
 // ————————————————————————————————————————————————————————————————
@@ -1146,28 +905,16 @@ window.MMEditor = {
     // 记录当前页名（宿主下发），供 [[#Heading]] 同页锚点渲染时兜底 data-page，
     // 以及自动补全选中 #Heading 候选时拼出 [[Page#Heading]]。
     window.__currentPageName = (typeof pageName === 'string' && pageName.trim()) ? pageName.trim() : ''
-    const sp = splitFrontmatter(mdText || '')
-    pendingFrontmatter = sp.fmRaw
-    currentFM = sp.fmRaw ? fmNormalize(parseFrontmatter(sp.fmRaw.split('\n').slice(1, -1))) : {}
     currentEditable = editable !== false
-    // 每次加载新页重置「出链 / 入链」明细（由宿主 selectPage 重新下发），避免跨页残留
-    window.__pageRefsOut = []
-    // v2.2.67：引用此页面的页面明细同样随页面重置（setPageReferences 再下发）
-    window.__pageRefs = []
-    // 顶部属性 banner：属性表单**始终内联可编辑**（与正文同处一个编辑器窗口），
-    // 不再需要"编辑属性"按钮，也不再弹独立窗口。只读场景（搜索结果）仍展示只读表。
-    renderBanner()
-    // 拉取宿主侧的自定义类型（共享自 custom_types.json），并入类型下拉
-    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.editorBridge) {
-      window.webkit.messageHandlers.editorBridge.postMessage({ type: 'getCustomTypes' })
-    }
     // 自动双链：加载单人纪要时，把正文里出现的已知 Wiki 页名裸词包裹成 [[名称]]（点击即跳 Wiki）
-    let body = sp.body || ''
+    let md = mdText || ''
     if (autoLink && window.__autoLinkNames && window.__autoLinkNames.length) {
-      body = autoLinkWiki(body, window.__autoLinkNames)
+      md = autoLinkWiki(md, window.__autoLinkNames)
     }
-    // md → html → 编辑器
-    const html = md.render(body)
+    // v2.2.70：顶部 YAML 属性（磁盘 --- frontmatter）转成编辑器内原生 ```yaml 代码块——
+    // 单一真相源 = .md，编辑代码块即编辑 frontmatter，不再有注入式 banner DOM。
+    const editorMd = frontmatterDashedToFenced(md)
+    const html = md.render(editorMd)
     if (!editor) buildEditor(editable !== false)
     // v2.2.65：setContent 会触发 onUpdate；加载期间置 __suppressUpdate 跳过 dirty 推送，
     // 避免把「载入新页」误判为「用户编辑」（切页自动保存依赖 isDirty 准确性）。
@@ -1194,79 +941,28 @@ window.MMEditor = {
     const html = editor.getHTML()
     let body = turndownService.turndown(html)
     body = body.replace(/\n{3,}/g, '\n\n').replace(/[ \t]+$/gm, '')
-    const out = (pendingFrontmatter ? pendingFrontmatter + '\n' : '') + body
+    // v2.2.70：编辑器内首个 ```yaml 属性块 → 磁盘 --- frontmatter（保持 Obsidian / pipeline 兼容）
+    const out = frontmatterFencedToDashed(body.trimEnd())
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.editorBridge) {
-      window.webkit.messageHandlers.editorBridge.postMessage({ type: 'save', markdown: out.trimEnd() })
+      window.webkit.messageHandlers.editorBridge.postMessage({ type: 'save', markdown: out })
     }
   },
   /// 取出"当前页面的完整 Markdown（含 frontmatter）"，用于宿主侧属性编辑面板预填。
   requestCurrentMarkdown() {
-    if (!editor) return pendingFrontmatter || ''
+    if (!editor) return ''
     const html = editor.getHTML()
     let body = turndownService.turndown(html)
     body = body.replace(/\n{3,}/g, '\n\n').replace(/[ \t]+$/gm, '')
-    return (pendingFrontmatter ? pendingFrontmatter + '\n' : '') + body.trimEnd()
+    return frontmatterFencedToDashed(body.trimEnd())
   },
   setMode() { /* TipTap 始终为真·WYSIWYG，无需切换 */ },
   setWikiPages(arr) {
     window.__wikiPages = Array.isArray(arr) ? arr : []
     if (editor) editor.view.dispatch(editor.state.tr.setMeta(missingKey, { recompute: true }))
   },
-  // v2.2.68：宿主下发的「本页引用的页面」明细（出链：当前页正文 [[链接]] 到的页面，含名称 + 类型 + 关键属性）；
-  // 适用于所有类型，下发后重渲染 banner 并注入正文末尾的双链关系表格（出链区）。
-  setPageReferencesOut(arr) {
-    window.__pageRefsOut = Array.isArray(arr) ? arr : []
-    renderBanner()
-  },
-  // v2.2.67：宿主下发的「引用此页面的页面」明细（入链：其他页正文 [[本页]] 的扫描结果，含名称 + 类型 + 关键属性）；
-  // 适用于所有类型，下发后重渲染 banner 并注入正文末尾的双链关系表格（入链区）。
-  setPageReferences(arr) {
-    window.__pageRefs = Array.isArray(arr) ? arr : []
-    renderBanner()
-  },
-  // v2.2.68：在当前编辑器正文末尾插入一条 [[Page]] 双链并触发保存（用于「本页引用的页面」添加）。
-  // 直接写入编辑器 DOM（不重载），保留用户光标与未保存改动；保存后落盘，下次 selectPage 会据此重算入链。
-  appendWikiLink(name) {
-    if (!editor) return
-    const target = (name || '').trim()
-    if (!target) return
-    const txt = '[[' + target + ']]'
-    try {
-      editor.chain().focus('end').insertContent(txt).run()
-    } catch (e) {
-      // 容错：insertContent 失败时不阻塞，交由用户手动补链
-    }
-    if (window.MMEditor && window.MMEditor.requestSave) window.MMEditor.requestSave()
-  },
-  // v2.2.69：把编辑器 DOM 里指向 oldName 的双链改写为 newName（同步 data-page 与文本），用于出链改名后即时刷新视图；
-  // turndown 规则确保随后保存时 [[newName]] 落盘还原。
-  replaceWikiLink(oldName, newName) {
-    if (!editor) return
-    const target = (newName || '').trim()
-    if (!target) return
-    const old = (oldName || '').trim()
-    if (!old) return
-    let sel
-    try { sel = CSS.escape(old) } catch (e) { sel = old.replace(/"/g, '\\"') }
-    const links = editor.view.dom.querySelectorAll('a.wikilink[data-page="' + sel + '"]')
-    links.forEach(a => {
-      a.setAttribute('data-page', target)
-      // 仅当显示文本恰好等于旧名（非别名）时才同步改名，避免误改别名展示
-      if (a.textContent.trim() === old) a.textContent = target
-    })
-  },
   // 推送「自动双链」目标名（仅 Wiki 页名），加载纪要时把裸词包裹成 [[名称]]
   setAutoLinkNames(arr) {
     window.__autoLinkNames = Array.isArray(arr) ? arr : []
-  },
-  // 宿主下发自定义类型列表（共享自 custom_types.json），并入类型下拉；可选 selectName 自动选中新类型
-  setCustomTypes(arr, selectName) {
-    CUSTOM_TYPES = Array.isArray(arr) ? arr : []
-    renderBanner()
-    if (selectName) {
-      const sel = document.querySelector('select[data-fm="type"]')
-      if (sel) { sel.value = selectName; sel.dispatchEvent(new Event('change', { bubbles: true })) }
-    }
   },
   showPreview(name, html) { window.MMEditor_showPreview(name, html) },
   // 双链点击后跳转到 Wiki 页并滚动到锚点标题（Obsidian 式 [[Page#Heading]]）
@@ -1290,418 +986,6 @@ document.addEventListener('keydown', e => {
     window.MMEditor.requestSave()
   }
 })
-
-// 顶部属性 banner：属性表单**始终内联可编辑**（与正文同处一个编辑器窗口）。
-// 不再有"编辑属性"按钮，也不再弹独立窗口；任意字段改动即自动写回 frontmatter 并保存。
-let CUSTOM_TYPES = []  // 宿主下发的自定义类型（来自 custom_types.json），并入类型下拉
-function renderBanner() {
-  const det = document.getElementById('fmBanner')
-  const body = document.getElementById('fmBody')
-  if (!det || !body) return
-  if (!currentFM || Object.keys(currentFM).length === 0) {
-    det.style.display = 'none'
-    body.innerHTML = ''
-    return
-  }
-  det.style.display = ''
-  det.open = true
-  if (currentEditable) {
-    body.innerHTML = renderBannerEditForm(currentFM)
-    wireBannerForm(body)
-  } else {
-    const html = renderFrontmatterBanner(currentFM)
-    if (html) { body.innerHTML = html } else { det.style.display = 'none'; body.innerHTML = '' }
-  }
-  // v2.2.68：当前页「双链关系」表格注入正文末尾的独立容器 #fmPageRefsContainer（运行时装饰，不进 .md）
-  renderPageRefsIntoContainer()
-}
-
-// v2.2.69：可编辑「双链关系」嵌入表格（双向分区，所有类型）。
-// 每个类型一张子表，列 = 页面 / 类型 / 该类型专属属性列（data-fm 映射真实 frontmatter 键）。
-// 单元格全部可编辑：页面名 → 改写 [[链接]] 文本；类型 / 属性 → 写回对应页 frontmatter（banner 数据驱动自动同步）；
-// 每页还可在「自定义属性」区编辑 / 新增 / 删除 frontmatter 键。所有编辑经 editorBridge 上报宿主落盘。
-const REF_ALL_TYPES = ['Person', 'Company', 'Chip', 'Project', 'Topic', 'Method']
-// 每类型专属属性列：key = 真实 frontmatter 键，label = 中文列名
-const REF_COLUMNS = {
-  person:  [{ key: '职位', label: '职位' }, { key: '电话', label: '电话' }, { key: '邮箱', label: '邮箱' }],
-  company: [{ key: '公司类型', label: '公司类型' }, { key: '所属行业', label: '所属行业' }],
-  chip:    [{ key: '品牌', label: '品牌' }, { key: '类别', label: '类别' }],
-  project: [{ key: '概要', label: '概要' }, { key: '状态', label: '状态' }, { key: '负责人', label: '负责人' }, { key: '时间', label: '时间' }],
-  topic:   [{ key: '分类', label: '分类' }, { key: '领域', label: '领域' }],
-  method:  [{ key: '类别', label: '类别' }, { key: '应用', label: '应用' }]
-}
-// 系统 / 预定义键，不计入「自定义属性」
-const REF_SYSTEM_KEYS = new Set([
-  'type', '类型', 'canonical_name', '规范名', 'name', 'file', 'fm',
-  'aliases', '别名', 'tags', '标签', 'updated', '更新时间', 'backlinks', '反向链接', 'wiki'
-])
-
-function renderPageRefsSection() {
-  const out = renderPageRefsBlock('↗ 本页引用的页面', window.__pageRefsOut || [], 'out')
-  const inc = renderPageRefsBlock('🔗 引用本页的页面', window.__pageRefs || [], 'in')
-  return out + inc
-}
-
-// 把一个 mode 下的 refs 按类型分组，每种类型渲染一张可编辑子表
-function renderPageRefsBlock(title, refs, mode) {
-  const groups = {}
-  ;(refs || []).forEach(r => {
-    const t = String(r.type || 'Topic').toLowerCase()
-    ;(groups[t] = groups[t] || []).push(r)
-  })
-  let body = ''
-  const types = Object.keys(groups)
-  if (types.length === 0) {
-    body = '<div class="fm-ref-empty-block">（暂无，可在下方输入页面名，回车即建立双链）</div>'
-  } else {
-    types.forEach(t => {
-      const cap = t.charAt(0).toUpperCase() + t.slice(1)
-      const label = REF_ALL_TYPES.includes(cap) ? cap : 'Topic'
-      body += renderPageRefsOneType(groups[t], mode, t, label)
-    })
-  }
-  return '<div class="fm-company-refs">' +
-    '<div class="fm-ref-title">' + title + '</div>' +
-    body +
-    '<div class="fm-ref-add">' +
-    '<input type="text" class="fm-ref-add-input" data-add-link="' + escapeAttr(mode) + '" placeholder="＋ 添加双链：输入页面名，回车即建立链接（不存在则自动新建）">' +
-    '</div></div>'
-}
-
-// 单张可编辑子表：表头 页面 / 类型 / 该类型属性列；每行一页，单元格可编辑
-function renderPageRefsOneType(refs, mode, typeKey, typeLabel) {
-  const cols = REF_COLUMNS[typeKey] || []
-  const header = '<th>页面</th><th>类型</th>' + cols.map(c => '<th>' + escapeHtml(c.label) + '</th>').join('')
-  const rows = (refs || []).map(r => {
-    const file = String(r.file || '')
-    const name = String(r.name || '')
-    const t = String(r.type || typeLabel)
-    const fm = (r.fm && typeof r.fm === 'object') ? r.fm : {}
-    const nameCell = '<td class="fm-ref-name"><input type="text" class="fm-ref-input" data-field="name" data-mode="' + escapeAttr(mode) + '" data-oldname="' + escapeAttr(name) + '" data-rowfile="' + escapeAttr(file) + '" value="' + escapeAttr(name) + '"></td>'
-    const typeCell = '<td class="fm-ref-type"><select class="fm-ref-input" data-field="type" data-mode="' + escapeAttr(mode) + '" data-oldname="' + escapeAttr(name) + '" data-rowfile="' + escapeAttr(file) + '">' + REF_ALL_TYPES.map(tp => '<option value="' + escapeAttr(tp) + '"' + (tp === t ? ' selected' : '') + '>' + escapeHtml(tp) + '</option>').join('') + '</select></td>'
-    const attrCells = cols.map(c => {
-      const val = String(fm[c.key] != null ? fm[c.key] : '')
-      return '<td class="fm-ref-attr"><input type="text" class="fm-ref-input" data-field="attr" data-fm="' + escapeAttr(c.key) + '" data-mode="' + escapeAttr(mode) + '" data-oldname="' + escapeAttr(name) + '" data-rowfile="' + escapeAttr(file) + '" value="' + escapeAttr(val) + '"></td>'
-    }).join('')
-    return '<tr>' + nameCell + typeCell + attrCells + '</tr>'
-  }).join('') || '<tr><td colspan="' + (cols.length + 2) + '" class="fm-ref-empty">（暂无）</td></tr>'
-  const custom = renderCustomProps(refs, mode)
-  return '<div class="fm-ref-subtable">' +
-    (typeLabel !== 'Topic' ? '<div class="fm-ref-subtitle">' + escapeHtml(typeLabel) + '</div>' : '') +
-    '<table class="fm-ref-table"><thead><tr>' + header + '</tr></thead><tbody>' + rows + '</tbody></table>' +
-    custom +
-    '</div>'
-}
-
-// 每页的「自定义属性」编辑区：值可改、可删、可新增（frontmatter 中既非系统键、也非本类型预定义列的键）
-function renderCustomProps(refs, mode) {
-  let html = ''
-  ;(refs || []).forEach(r => {
-    const file = String(r.file || '')
-    const name = String(r.name || '')
-    const t = String(r.type || '').toLowerCase()
-    const fm = (r.fm && typeof r.fm === 'object') ? r.fm : {}
-    const predefined = new Set((REF_COLUMNS[t] || []).map(c => c.key))
-    const customKeys = Object.keys(fm).filter(k => !REF_SYSTEM_KEYS.has(k) && !predefined.has(k))
-    const rows = customKeys.map(k => {
-      const v = String(fm[k] != null ? fm[k] : '')
-      return '<div class="fm-ref-custom-row">' +
-        '<span class="fm-ref-ckey-label">' + escapeHtml(k) + '</span>' +
-        '<input type="text" class="fm-ref-input fm-ref-cval" data-field="customval" data-fm="' + escapeAttr(k) + '" data-mode="' + escapeAttr(mode) + '" data-oldname="' + escapeAttr(name) + '" data-rowfile="' + escapeAttr(file) + '" value="' + escapeAttr(v) + '">' +
-        '<button type="button" class="fm-ref-cdel" data-field="customdel" data-fm="' + escapeAttr(k) + '" data-mode="' + escapeAttr(mode) + '" data-oldname="' + escapeAttr(name) + '" data-rowfile="' + escapeAttr(file) + '">删除</button>' +
-        '</div>'
-    }).join('')
-    html += '<div class="fm-ref-custom" data-name="' + escapeAttr(name) + '">' +
-      (customKeys.length ? '<div class="fm-ref-custom-title">自定义属性</div>' + rows : '') +
-      '<button type="button" class="fm-ref-cadd" data-mode="' + escapeAttr(mode) + '" data-oldname="' + escapeAttr(name) + '" data-rowfile="' + escapeAttr(file) + '">＋ 添加自定义属性</button>' +
-      '</div>'
-  })
-  return html
-}
-
-// v2.2.69：把「双链关系」表注入正文末尾的独立容器（运行时装饰，不进 .md）。
-function renderPageRefsIntoContainer() {
-  const el = document.getElementById('fmPageRefsContainer')
-  if (!el) return
-  const sec = renderPageRefsSection()
-  el.innerHTML = sec || ''
-  el.style.display = sec ? 'block' : 'none'
-}
-
-// 防抖保存（标量 / chip / 新增属性 改动后统一调用）
-let _bannerSaveTimer = null
-function scheduleSave() {
-  if (_bannerSaveTimer) clearTimeout(_bannerSaveTimer)
-  _bannerSaveTimer = setTimeout(() => {
-    if (window.MMEditor && window.MMEditor.requestSave) window.MMEditor.requestSave()
-  }, 400)
-}
-// 动态创建的 chip × 按钮：删除列表项
-function onChipRemove(e) {
-  const btn = e.currentTarget
-  const k = btn.getAttribute('data-remove-chip')
-  const v = btn.getAttribute('data-val')
-  if (Array.isArray(currentFM[k])) {
-    currentFM[k] = currentFM[k].filter(x => x !== v)
-    pendingFrontmatter = serializeFrontmatter(currentFM)
-    const chip = btn.closest('.fm-chip')
-    if (chip && chip.parentNode) chip.parentNode.removeChild(chip)
-    scheduleSave()
-  }
-}
-
-// 给表单每个字段绑定事件：标量/下拉/日期/长文本实时写回；chip 增删；添加属性。
-function wireBannerForm(root) {
-  if (!root) return
-  root.querySelectorAll('[data-fm]').forEach(el => {
-    const onEdit = () => {
-      const k = el.getAttribute('data-fm')
-      const kind = el.getAttribute('data-kind')
-      const v = el.value
-      if (kind === 'list') {
-        // v2.2.66：列表字段（含手动反链 textarea）支持换行分隔，一行一条
-        currentFM[k] = v.split(/[\n,，、]/).map(s => s.trim()).filter(Boolean)
-      } else {
-        currentFM[k] = v.trim()
-      }
-      pendingFrontmatter = serializeFrontmatter(currentFM)
-      scheduleSave()
-    }
-    el.addEventListener('input', onEdit)
-    el.addEventListener('change', onEdit)
-    // 「类型」select 改变后整段重渲染 banner（数据驱动：字段来自 page 实际 frontmatter，不再按类型显隐）
-    if (el.tagName === 'SELECT' && el.getAttribute('data-fm') === 'type') {
-      el.addEventListener('change', () => {
-        setTimeout(renderBanner, 0)
-        // 同步 tags：剔除旧类型 token，追加新类型
-        const newType = (currentFM['type'] || '').toString().trim()
-        const TYPE_TOKENS = ['Person', 'Company', 'Chip', 'Project', 'Topic', 'Method', 'person', 'company', 'chip', 'project', 'product', 'topic', 'method']
-        if (Array.isArray(currentFM['tags'])) {
-          currentFM['tags'] = currentFM['tags'].filter(t => t && t !== 'wiki' && !TYPE_TOKENS.includes(t))
-          if (newType && !currentFM['tags'].includes(newType)) currentFM['tags'].push(newType)
-        }
-        pendingFrontmatter = serializeFrontmatter(currentFM)
-      })
-    }
-  })
-  // 类型「新增自定义类型」：内联输入框，回车 / 失焦直接新增（不再弹窗）
-  root.querySelectorAll('[data-addtype-input]').forEach(inp => {
-    const addType = () => {
-      const name = inp.value.trim()
-      if (!name) return
-      if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.editorBridge) {
-        window.webkit.messageHandlers.editorBridge.postMessage({ type: 'addCustomType', name: name })
-      }
-      inp.value = ''
-    }
-    inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addType() } })
-    inp.addEventListener('blur', addType)
-  })
-  // 列表字段：chip × 删除
-  root.querySelectorAll('[data-remove-chip]').forEach(btn => {
-    btn.addEventListener('click', onChipRemove)
-  })
-  // 列表字段：输入回车 / 失焦 新增 chip
-  root.querySelectorAll('[data-add-chip]').forEach(inp => {
-    const addItem = () => {
-      const k = inp.getAttribute('data-add-chip')
-      const v = inp.value.trim()
-      if (!v) return
-      if (!Array.isArray(currentFM[k])) currentFM[k] = []
-      if (!currentFM[k].includes(v)) {
-        currentFM[k].push(v)
-        const chip = document.createElement('span')
-        chip.className = 'fm-chip'
-        chip.setAttribute('data-val', v)
-        chip.innerHTML = '<span>' + escapeHtml(v) + '</span><button type="button" class="fm-chip-x" data-remove-chip="' + escapeAttr(k) + '" data-val="' + escapeAttr(v) + '">×</button>'
-        inp.parentNode.insertBefore(chip, inp)
-        chip.querySelector('.fm-chip-x').addEventListener('click', onChipRemove)
-        pendingFrontmatter = serializeFrontmatter(currentFM)
-        scheduleSave()
-      }
-      inp.value = ''
-    }
-    inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addItem() } })
-    inp.addEventListener('blur', addItem)
-  })
-  // 添加笔记属性：一行「属性名 + 值」，回车提交为新 frontmatter 键
-  root.querySelectorAll('[data-add-prop]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const form = btn.closest('.fm-grid.edit') || root
-      const row = document.createElement('div')
-      row.className = 'fm-row fm-row-new'
-      row.innerHTML = '<div class="fm-row-label"><span class="fm-icon">≡</span><input type="text" class="fm-newkey" placeholder="属性名"></div>' +
-        '<div class="fm-row-value"><input type="text" class="fm-newval" placeholder="值"></div>'
-      form.insertBefore(row, btn.closest('.fm-add-row'))
-      const keyInput = row.querySelector('.fm-newkey')
-      const valInput = row.querySelector('.fm-newval')
-      keyInput.focus()
-      // 统一收尾：属性名非空 → 提交为新 frontmatter 键；属性名为空 → 视为空行，移除之
-      const finishRow = () => {
-        if (!row.parentNode) return  // 已移除，幂等保护
-        const nk = keyInput.value.trim()
-        const nv = valInput.value.trim()
-        if (nk) {
-          currentFM[nk] = nv
-          pendingFrontmatter = serializeFrontmatter(currentFM)
-          renderBanner()
-          scheduleSave()
-        } else if (row.parentNode) {
-          row.parentNode.removeChild(row)
-        }
-      }
-      // 失焦收尾：带焦点稳定检查，避免从属性名框→值框的内部跳转误触发关闭
-      const onBlur = () => {
-        setTimeout(() => { if (!row.contains(document.activeElement)) finishRow() }, 0)
-      }
-      keyInput.addEventListener('blur', onBlur)
-      valInput.addEventListener('blur', onBlur)
-      // 按 Esc → 退出添加（无论是否输入，立即关闭该空行）
-      const onEscape = (e) => {
-        if (e.key === 'Escape') {
-          e.preventDefault()
-          if (row.parentNode) row.parentNode.removeChild(row)
-        }
-      }
-      keyInput.addEventListener('keydown', e => {
-        if (e.key === 'Enter') { e.preventDefault(); valInput.focus(); return }
-        onEscape(e)
-      })
-      valInput.addEventListener('keydown', e => {
-        if (e.key === 'Enter') { e.preventDefault(); finishRow(); return }
-        onEscape(e)
-      })
-    })
-  })
-  // 反向链接：手动「添加引用此页的页面」→ 写入本页 backlinks 字段（手动维护，区别于自动发现的 incoming）
-  // 输入支持 Obsidian 式 [[Page]] / [[Page|alias]] / [[Page#Section]] / [[Page|alias#Section]] 或纯文本；
-  // 统一规范化为 [[Page[|alias][#Section]]] 后存储，避免「在 [[]] 中的内容被识别成 URL」之类的脏数据。
-  root.querySelectorAll('[data-add-backlink]').forEach(inp => {
-    const normalize = (raw) => {
-      const v = String(raw || '').trim()
-      if (!v) return ''
-      const m = v.match(/^\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]$/)
-      let page = '', alias = '', anchor = ''
-      if (m) {
-        const target = (m[1] || '').trim()
-        alias = (m[2] || '').trim()
-        const h = target.indexOf('#')
-        if (h >= 0) {
-          page = target.slice(0, h).trim()
-          anchor = target.slice(h + 1).trim()
-        } else {
-          page = target
-        }
-      } else {
-        const h = v.indexOf('#')
-        if (h >= 0) {
-          page = v.slice(0, h).trim()
-          anchor = v.slice(h + 1).trim()
-        } else {
-          page = v
-        }
-      }
-      if (!page) return ''
-      return '[[' + page + (alias ? '|' + alias : '') + (anchor ? '#' + anchor : '') + ']]'
-    }
-    const addBl = () => {
-      const v = normalize(inp.value)
-      if (!v) { inp.value = ''; return }
-      if (!Array.isArray(currentFM['backlinks'])) currentFM['backlinks'] = []
-      const exists = currentFM['backlinks'].map(x => String(x).trim().toLowerCase()).includes(v.toLowerCase())
-      if (!exists) {
-        currentFM['backlinks'].push(v)
-        pendingFrontmatter = serializeFrontmatter(currentFM)
-        renderBanner()      // 重渲染：手动项立即出现在合并列表里（与 incoming 去重）
-        scheduleSave()
-      }
-      inp.value = ''
-    }
-    inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addBl() } })
-    inp.addEventListener('blur', addBl)
-  })
-}
-
-// 可编辑属性表单（Obsidian 风格）：遍历 page 实际 frontmatter 的全部键全部可编辑显示；
-// 列表→chip、日期→date、类型→select、长文本→textarea；page 有什么字段就显示什么字段。
-function renderBannerEditForm(fm) {
-  if (!fm) fm = {}
-  const TYPES = ['Person', 'Company', 'Chip', 'Project', 'Topic', 'Method']
-  const rawType = (fm['type'] || '').toString().trim()
-
-  let html = '<div class="fm-grid edit">'
-  fmOrderedKeys(fm).forEach(k => {
-    if (FM_SKIP[k]) return
-    const t = fmFieldType(k, fm[k])
-    const icon = fmFieldIcon(t, k)
-    const label = fmLabel(k)
-    let valHtml = ''
-    if (t === 'select') {
-      // 把 legacy 小写 / product 旧值也列出来，避免下拉里没有当前值导致选不中
-      const base = TYPES.slice()
-      if (rawType && !base.includes(rawType)) base.push(rawType)
-      const opts = base.concat(CUSTOM_TYPES.filter(x => !base.includes(x)))
-      // 类型下拉与其他属性输入框同宽同高（不再内嵌 ＋ 按钮）
-      valHtml = '<select data-fm="type" data-kind="scalar" class="fm-select">' +
-        opts.map(o => '<option value="' + escapeAttr(o) + '"' + (rawType === o ? ' selected' : '') + '>' + escapeHtml(o) + '</option>').join('') + '</select>'
-      html += fmRowHtml(icon, label, valHtml)
-      // 「新增自定义类型」另起一行，统一使用 .fm-add-input 风格
-      html += '<div class="fm-add-row"><input type="text" class="fm-add-input" data-addtype-input="1" placeholder="＋ 新增自定义类型（共享到所有 WiKi 页）"></div>'
-      return
-    } else if (t === 'list') {
-      const items = fmListItems(fm[k])
-      // 列表字段：chips 仅展示 + 删除；新增输入另起一行，风格与其他「添加」框一致
-      valHtml = '<div class="fm-chips" data-list="' + escapeAttr(k) + '">' +
-        items.map(it => '<span class="fm-chip" data-val="' + escapeAttr(it) + '"><span>' + escapeHtml(it) + '</span><button type="button" class="fm-chip-x" data-remove-chip="' + escapeAttr(k) + '" data-val="' + escapeAttr(it) + '">×</button></span>').join('') + '</div>'
-      html += fmRowHtml(icon, label, valHtml)
-      html += '<div class="fm-add-row"><input type="text" class="fm-add-input" data-add-chip="' + escapeAttr(k) + '" placeholder="添加…"></div>'
-      return
-    } else if (t === 'date') {
-      const dv = (fm[k] || '').toString().trim()
-      valHtml = '<input type="date" data-fm="' + escapeAttr(k) + '" data-kind="scalar" value="' + escapeAttr(dv) + '" class="fm-date">'
-    } else if (t === 'longtext') {
-      // 长文本与其他属性同列对齐（不再跨整行顶格），编辑框宽度/高度与下方其余输入框一致
-      valHtml = '<textarea data-fm="' + escapeAttr(k) + '" data-kind="scalar" class="fm-textarea" placeholder="（空）" rows="3">' + escapeHtml(fm[k] == null ? '' : String(fm[k])) + '</textarea>'
-      html += fmRowHtml(icon, label, valHtml)
-      return  // 跳到下一次 forEach（已写入）
-    } else {
-      valHtml = '<input type="text" data-fm="' + escapeAttr(k) + '" data-kind="scalar" value="' + escapeAttr(fm[k] == null ? '' : String(fm[k])) + '" class="fm-text">'
-    }
-    html += fmRowHtml(icon, label, valHtml)
-  })
-  // 添加笔记属性：点击插入一行「属性名 + 值」输入，回车即提交为新的 frontmatter 键
-  html += '<div class="fm-add-row"><button type="button" class="fm-add-prop" data-add-prop="1">+ 添加笔记属性</button></div>'
-  html += '</div>'
-  return html
-}
-
-function serializeFrontmatter(fm) {
-  if (!fm || Object.keys(fm).length === 0) return ''
-  const lines = ['---']
-  Object.keys(fm).forEach(k => {
-    const v = fm[k]
-    if (v === undefined || v === null) return
-    if (Array.isArray(v)) {
-      if (v.length === 0) { lines.push(k + ': []'); return }
-      lines.push(k + ':')
-      v.forEach(item => lines.push('  - ' + yamlScalar(item)))
-    } else {
-      const s = String(v)
-      if (s === '') { lines.push(k + ': ""'); return }
-      lines.push(k + ': ' + yamlScalar(s))
-    }
-  })
-  lines.push('---')
-  return lines.join('\n')
-}
-
-function yamlScalar(s) {
-  s = String(s).replace(/\r?\n/g, ' ')
-  if (/[:#\[\]{}",]/.test(s) || /^ | $/.test(s) || /^[!\-*?&|>#%@`]/.test(s)) {
-    return '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
-  }
-  return s
-}
 
 // 跟随系统深色模式：重建编辑器以拾取 CSS 变量
 if (window.matchMedia) {

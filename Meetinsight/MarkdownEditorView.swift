@@ -9,8 +9,8 @@
 //  - 工具栏「模式」按钮可在 IR(实时预览) / WYSIWYG(Typora 真·所见即所得) / SV(分屏) 间切换。
 //  - [[双链]] 渲染为可点击 pill，点击经 editorBridge 通知宿主跳转。
 //  - [[name|alias]] 解析为：跳转目标 = 左侧 name，显示文字 = 右侧 alias。
-//  - YAML frontmatter 顶部渲染为「页面属性」信息卡（与旧版一致），编辑区只放正文，
-//    保存时自动回贴 frontmatter，源文件不被破坏。
+//  - YAML frontmatter 在编辑器内以原生 ```yaml 代码块呈现（单一真相源 = .md，直接编辑代码块即编辑 frontmatter），
+//    保存时还原为 --- 分隔；双链关系（反向链接 / 出链）由宿主在打开时注入正文 ## 段、保存前剥离，不落盘。
 //  - 通过 WKWebView messageHandlers 与宿主双向通信；深色模式跟随系统外观。
 //
 
@@ -29,14 +29,6 @@ protocol MarkdownEditorViewDelegate: AnyObject {
     /// 用户点击 banner 上的「✏️ 编辑属性」按钮，宿主应当弹出属性编辑面板并落盘新 frontmatter。
     /// （默认 no-op —— 仅 WikiViewController 关心；纪要页未实现。）
     func markdownEditorDidRequestEditProperties(_ editor: MarkdownEditorView, markdown: String)
-    /// v2.2.68：用户在正文末尾「双链关系」表格里输入页面名并回车，请求建立双链。
-    /// mode = "out" 表示「本页引用该页」，mode = "in" 表示「该页引用本页」；name 为页面名（不存在则自动新建 WiKi 页）。
-    func markdownEditorDidRequestAddPageLink(_ editor: MarkdownEditorView, mode: String, name: String)
-    /// v2.2.69：用户在正文末尾「双链关系」可编辑表格里改动单元格，请求写回 .md。
-    /// - field: "name"(改 [[链接]] 文本) / "type"(改类型) / "attr"(改预定义属性) / "customval"(改自定义属性值) / "customadd"(新增自定义属性) / "customdel"(删除自定义属性)
-    /// - fmKey: 属性对应的真实 frontmatter 键（attr/custom* 时有效）
-    /// - rowFile: 该行对应 wiki 页的文件名（类型/属性/自定义属性写回目标；name 出链时忽略，写当前页）
-    func markdownEditorDidRequestEditPageRef(_ editor: MarkdownEditorView, mode: String, oldName: String, field: String, fmKey: String?, value: String?, rowFile: String?)
 }
 
 /// 接收 WKWebView 的 JS 消息，转发到主线程闭包。
@@ -54,8 +46,6 @@ fileprivate final class EditorMessageHandler: NSObject, WKScriptMessageHandler {
 /// 默认 no-op：让 markdownEditorDidRequestEditProperties 在纪要页等不需要编辑属性的场景下不必实现
 extension MarkdownEditorViewDelegate {
     func markdownEditorDidRequestEditProperties(_ editor: MarkdownEditorView, markdown: String) {}
-    func markdownEditorDidRequestAddPageLink(_ editor: MarkdownEditorView, mode: String, name: String) {}
-    func markdownEditorDidRequestEditPageRef(_ editor: MarkdownEditorView, mode: String, oldName: String, field: String, fmKey: String?, value: String?, rowFile: String?) {}
 }
 
 final class MarkdownEditorView: NSView, WKNavigationDelegate {
@@ -186,30 +176,6 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
         webView.evaluateJavaScript("MMEditor.setAutoLinkNames(\(js))")
     }
 
-    /// v2.2.67：推送「引用此页面的页面」明细（含类型 + 关键属性）给 JS，
-    /// 供当前页正文末尾渲染可点击回跳的反链嵌入表格。适用于所有类型（不再局限于 Company）。
-    func setPageReferences(_ refs: [[String: Any]]) {
-        guard Self.engine == "tiptap" else { return }
-        let json = (try? JSONSerialization.data(withJSONObject: refs)) ?? Data("[]".utf8)
-        let js = String(data: json, encoding: .utf8) ?? "[]"
-        webView.evaluateJavaScript("MMEditor.setPageReferences(\(js))")
-    }
-
-    /// v2.2.68：推送「本页引用的页面」明细（出链，含类型 + 关键属性）给 JS，
-    /// 供当前页正文末尾「双链关系」表格的出链区渲染。适用于所有类型。
-    func setPageReferencesOut(_ refs: [[String: Any]]) {
-        guard Self.engine == "tiptap" else { return }
-        let json = (try? JSONSerialization.data(withJSONObject: refs)) ?? Data("[]".utf8)
-        let js = String(data: json, encoding: .utf8) ?? "[]"
-        webView.evaluateJavaScript("MMEditor.setPageReferencesOut(\(js))")
-    }
-
-    /// v2.2.68：在当前编辑器正文末尾插入一条 [[Page]] 双链（用于「本页引用的页面」添加，目标页不存在则新建）。
-    func appendWikiLink(_ name: String) {
-        guard Self.engine == "tiptap", !name.isEmpty else { return }
-        let js = "MMEditor.appendWikiLink(\(jsString(name)))"
-        webView.evaluateJavaScript(js)
-    }
 
     /// 跳转到 Wiki 页内某标题锚点（Obsidian 式 [[Page#Heading]]）；无匹配标题时静默忽略。
     func scrollToAnchor(_ anchor: String) {
@@ -218,13 +184,6 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
         webView.evaluateJavaScript(js)
     }
 
-    /// v2.2.69：把编辑器 DOM 里指向 oldName 的双链改写为 newName（出链改名即时刷新视图，随后保存落盘）。
-    /// 写回当前页的保存走既有 `requestSave()`（line 168），其经模板全局 shim `requestSave()` → `MMEditor.requestSave()` 落盘。
-    func replaceWikiLink(_ oldName: String, _ newName: String) {
-        guard Self.engine == "tiptap" else { return }
-        let js = "MMEditor.replaceWikiLink(\(jsString(oldName)), \(jsString(newName)))"
-        webView.evaluateJavaScript(js)
-    }
 
     // MARK: - WKNavigationDelegate
 
@@ -246,21 +205,6 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
         case "save":
             if let md = message["markdown"] as? String {
                 delegate?.markdownEditorDidRequestSave(self, markdown: md)
-            }
-        case "addPageLink":
-            // v2.2.68：表格内「添加双链」输入框回车 → 宿主建链（目标不存在则自动新建 WiKi 页）
-            if let mode = message["mode"] as? String, let name = message["name"] as? String {
-                delegate?.markdownEditorDidRequestAddPageLink(self, mode: mode, name: name)
-            }
-        case "editPageRef":
-            // v2.2.69：可编辑双链表格单元格改动 → 宿主写回 .md
-            if let mode = message["mode"] as? String,
-               let oldName = message["oldName"] as? String,
-               let field = message["field"] as? String {
-                let fmKey = message["fmKey"] as? String
-                let value = message["value"] as? String
-                let rowFile = message["rowFile"] as? String
-                delegate?.markdownEditorDidRequestEditPageRef(self, mode: mode, oldName: oldName, field: field, fmKey: fmKey, value: value, rowFile: rowFile)
             }
         case "wikilink":
             if let name = message["name"] as? String {
@@ -285,84 +229,11 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
                     self.webView.evaluateJavaScript("MMEditor.showPreview(\(jsName), \(jsMd))")
                 }
             }
-        case "getCustomTypes":
-            // 宿主下发自定义类型列表，填充编辑器类型下拉（延后到主线程，规避 WKWebView 死锁）
-            DispatchQueue.main.async { [weak self] in
-                let list = WikiPropertySheet.loadCustomTypes()
-                let arrLit: String = (try? JSONSerialization.data(withJSONObject: list)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
-                self?.webView.evaluateJavaScript("MMEditor.setCustomTypes(\(arrLit))")
-            }
-        case "addCustomType":
-            // 优先「内联直接新增」：entry.js 类型新增输入框回车 / 失焦时带 name 过来
-            if let name = message["name"] as? String, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                DispatchQueue.main.async { [weak self] in
-                    self?.addCustomTypeInline(trimmed)
-                }
-            } else {
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                let alert = NSAlert()
-                alert.messageText = "新增自定义类型"
-                alert.informativeText = "输入类型名称（将共享到所有 WiKi 页的类型下拉）："
-                alert.addButton(withTitle: "添加")
-                alert.addButton(withTitle: "取消")
-                let tf = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
-                tf.placeholderString = "如：客户 / 供应商 / 竞品"
-                tf.bezelStyle = .roundedBezel
-                alert.accessoryView = tf
-                if alert.runModal() == .alertFirstButtonReturn {
-                    let name = tf.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !name.isEmpty else { return }
-                    let illegal = CharacterSet(charactersIn: "():#\"'[]{}|,>%@!&*?/\\=+\n")
-                    if name.rangeOfCharacter(from: illegal) != nil {
-                        let a = NSAlert()
-                        a.messageText = "类型名称含非法字符"
-                        a.informativeText = "请勿使用括号、冒号、井号、引号、斜杠等特殊符号，以免破坏 WiKi 文件。"
-                        a.addButton(withTitle: "知道了")
-                        if let win = self.webView.window { a.beginSheetModal(for: win) { _ in } }
-                        return
-                    }
-                    var list = WikiPropertySheet.loadCustomTypes()
-                    if (WikiPropertySheet.allTypes + list).contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) {
-                        // 已存在：直接刷新并选中，不重复添加
-                    } else {
-                        list.append(name)
-                        WikiPropertySheet.saveCustomTypes(list)
-                    }
-                    let arrLit: String = (try? JSONSerialization.data(withJSONObject: list)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
-                    let js = "MMEditor.setCustomTypes(\(arrLit), \(self.jsString(name)))"
-                    self.webView.evaluateJavaScript(js)
-                }
-            }
-            }
         default:
             break
         }
     }
 
-    // 内联直接新增自定义类型：校验 → 去重 → 持久化 → 刷新下拉并选中
-    private func addCustomTypeInline(_ name: String) {
-        let illegal = CharacterSet(charactersIn: "():#\"'[]{}|,>%@!&*?/\\=+\n")
-        guard name.rangeOfCharacter(from: illegal) == nil else {
-            let a = NSAlert()
-            a.messageText = "类型名称含非法字符"
-            a.informativeText = "请勿使用括号、冒号、井号、引号、斜杠等特殊符号，以免破坏 WiKi 文件。"
-            a.addButton(withTitle: "知道了")
-            if let win = webView.window { a.beginSheetModal(for: win) { _ in } }
-            return
-        }
-        var list = WikiPropertySheet.loadCustomTypes()
-        if (WikiPropertySheet.allTypes + list).contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) {
-            // 已存在：直接刷新并选中，不重复添加
-        } else {
-            list.append(name)
-            WikiPropertySheet.saveCustomTypes(list)
-        }
-        let arrLit: String = (try? JSONSerialization.data(withJSONObject: list)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
-        let js = "MMEditor.setCustomTypes(\(arrLit), \(jsString(name)))"
-        webView.evaluateJavaScript(js)
-    }
 
     /// 当前编辑引擎：默认 TipTap（真·WYSIWYG）。
     /// 可在终端用 `defaults write com.weilu.meetingminutes editorEngine vditor` 回退到 Vditor。
@@ -1084,9 +955,7 @@ fileprivate enum TipTapEditorHTML {
     </style>
     </head>
     <body>
-    <details id="fmBanner" class="fm-banner" open><summary>笔记属性</summary><div id="fmBody"></div></details>
     <div id="editor"></div>
-    <div id="fmPageRefsContainer"></div>
     <script src="%TIPTAP_BASE%/tiptap.bundle.js"></script>
     <script>
       function mmIsDark(){ return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches; }
