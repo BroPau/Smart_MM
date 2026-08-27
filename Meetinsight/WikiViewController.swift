@@ -295,7 +295,7 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
     /// - silent=false：显示 busy、完成后选中首页、处理 pendingOpenWikiName（等同原 loadPages）。
     /// - reselectFile（v2.2.60）：非静默时若给出文件名，完成后改选中该文件对应页（用于编辑改名后
     ///   跟随到新页），而非默认回首页；命中不到再退回首页。
-    private func refreshPagesFromPipeline(silent: Bool, reselectFile: String? = nil) {
+    private func refreshPagesFromPipeline(silent: Bool, reselectFile: String? = nil, completion: (() -> Void)? = nil) {
         if !silent {
             setBusy(true, status: "读取页面列表…")
         }
@@ -367,36 +367,8 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
                     self.resolveOrPromptWikiPage(pending, anchor: anchor)
                 }
             }
+            completion?()
         }
-    }
-
-    // MARK: - 反向链接（incoming）计算
-
-    /// 计算「引用了当前页」的所有页面（incoming backlinks）：
-    /// 扫描其他 Wiki 页（含首页）正文 + frontmatter 里的 [[当前页名]] / [[当前页别名]]
-    /// （大小写不敏感，支持 [[Name|alias]]），返回这些页面的显示名，供 banner「反向链接」自动展示。
-    private func computeIncomingBacklinks(for current: WikiPage) -> [String] {
-        let targets = Set(([current.name] + current.aliases).map { $0.lowercased() })
-        guard !targets.isEmpty else { return [] }
-        let regex = try? NSRegularExpression(pattern: #"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]"#, options: [])
-        var found: [String] = []
-        for page in pages where page.file != current.file {
-            let url = page.isHome ? homeFile : wikiPagesDir.appendingPathComponent(page.file)
-            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
-            let range = NSRange(text.startIndex..., in: text)
-            var hit = false
-            regex?.enumerateMatches(in: text, options: [], range: range) { match, _, _ in
-                guard let match, let r = Range(match.range(at: 1), in: text) else { return }
-                let target = String(text[r]).trimmingCharacters(in: .whitespaces).lowercased()
-                if targets.contains(target) { hit = true }
-            }
-            // v2.2.65：过滤空名 + 去重，杜绝「空链接」噪声。
-            if hit {
-                let n = page.name.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !n.isEmpty && !found.contains(n) { found.append(n) }
-            }
-        }
-        return found
     }
 
     // MARK: - 引用此页面的页面明细（用于嵌入表格）
@@ -428,6 +400,45 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
             let fm = parseFrontmatterScalar(text)
             let t = (fm["type"] ?? "").lowercased()
             let wanted = WikiViewController.referenceWantedKeys(for: t)
+            for w in wanted {
+                if let v = fm[w], !v.isEmpty {
+                    fields.append(["label": backlinkFieldLabel(w), "value": v])
+                }
+            }
+            var dict: [String: Any] = ["name": p.name, "type": p.type]
+            if !fields.isEmpty { dict["fields"] = fields }
+            out.append(dict)
+        }
+        return out
+    }
+
+    /// v2.2.68：扫描「当前页正文里 [[链接]] 到的页面」（outgoing 出链），返回其「名称 + 类型 + 关键属性」明细，
+    /// 供当前页正文末尾「双链关系」表格的出链区渲染。适用于所有类型。
+    private func referencesFromThis(for page: WikiPage) -> [[String: Any]] {
+        let url = page.isHome ? homeFile : wikiPagesDir.appendingPathComponent(page.file)
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        let regex = try? NSRegularExpression(pattern: #"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]"#, options: [])
+        var rawTargets: [String] = []
+        let range = NSRange(text.startIndex..., in: text)
+        regex?.enumerateMatches(in: text, options: [], range: range) { match, _, _ in
+            guard let match, let r = Range(match.range(at: 1), in: text) else { return }
+            let t = String(text[r]).trimmingCharacters(in: .whitespaces)
+            if !t.isEmpty { rawTargets.append(t) }
+        }
+        var out: [[String: Any]] = []
+        var seen = Set<String>()
+        for raw in rawTargets {
+            guard let (_, p) = resolveWikiPage(in: pages, rawName: raw) else { continue }
+            let key = p.name.lowercased()
+            if seen.contains(key) { continue }
+            seen.insert(key)
+            // 读目标页 frontmatter，取关键属性（与入链同款展示逻辑）
+            let tUrl = p.isHome ? homeFile : wikiPagesDir.appendingPathComponent(p.file)
+            guard let tText = try? String(contentsOf: tUrl, encoding: .utf8) else { continue }
+            let fm = parseFrontmatterScalar(tText)
+            let t = (fm["type"] ?? p.type).lowercased()
+            let wanted = WikiViewController.referenceWantedKeys(for: t)
+            var fields: [[String: String]] = []
             for w in wanted {
                 if let v = fm[w], !v.isEmpty {
                     fields.append(["label": backlinkFieldLabel(w), "value": v])
@@ -525,10 +536,13 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
                 presentBaseDirAccessReset(message: "无法读取文件：\(homeFile.path)")
             }
         editor.setWikiPages(pages.flatMap { [$0.name] + $0.aliases })
-        // 推送 incoming 反向链接（被哪些页 [[引用]]），供 banner「反向链接」自动展示
-        editor.setBacklinks(computeIncomingBacklinks(for: page))
-        // v2.2.67：下发引用此页面的页面明细（所有类型），渲染正文末尾嵌入表格
-        editor.setPageReferences(referencesToThis(for: page))
+        // v2.2.68：下发「本页引用的页面」（出链）+「引用本页的页面」（入链）明细，渲染正文末尾双向双链表格
+        let outgoing = referencesFromThis(for: page)
+        let incoming = referencesToThis(for: page)
+        currentOutgoing = outgoing
+        currentIncoming = incoming
+        editor.setPageReferencesOut(outgoing)
+        editor.setPageReferences(incoming)
         return
         }
         // 普通页面：显示编辑器
@@ -545,10 +559,13 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         }
         // 把现有页面名（含别名）推给编辑器，供双链自动完成 + 缺失页判定。
         editor.setWikiPages(pages.flatMap { [$0.name] + $0.aliases })
-        // 推送 incoming 反向链接（被哪些页 [[引用]]），供 banner「反向链接」自动展示
-        editor.setBacklinks(computeIncomingBacklinks(for: page))
-        // v2.2.67：下发引用此页面的页面明细（所有类型），渲染正文末尾嵌入表格
-        editor.setPageReferences(referencesToThis(for: page))
+        // v2.2.68：下发「本页引用的页面」（出链）+「引用本页的页面」（入链）明细，渲染正文末尾双向双链表格
+        let outgoing = referencesFromThis(for: page)
+        let incoming = referencesToThis(for: page)
+        currentOutgoing = outgoing
+        currentIncoming = incoming
+        editor.setPageReferencesOut(outgoing)
+        editor.setPageReferences(incoming)
     }
 
     // MARK: - 搜索
@@ -642,6 +659,10 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
 
     private var pendingSavePage: WikiPage?
 
+    // v2.2.68：缓存当前页的「出链 / 入链」明细，供表格「添加双链」时就地刷新（无需整页重载）
+    private var currentOutgoing: [[String: Any]] = []
+    private var currentIncoming: [[String: Any]] = []
+
     private func submitPageCommand(arguments: [String]) {
         setBusy(true, status: "写入中…")
         PipelineRunner.shared.run(script: nil, arguments: arguments) { _ in }
@@ -654,6 +675,67 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
             if let reason = reason { self.showAlert("WiKi 页操作失败：\(reason)") }
             self.loadPages()
         }
+    }
+
+    // MARK: - v2.2.68：双链表格「添加双链」辅助
+
+    /// 按名称解析既有页；不存在则按名称推断类型并新建一个最小 WiKi 页（仅 frontmatter，正文为空），
+    /// 完成后回调返回该页。新建走与「新建 WiKi 页」对话框相同的 --add-wiki-page 契约。
+    private func resolveOrCreatePage(named raw: String, completion: @escaping (WikiPage?) -> Void) {
+        let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let (_, p) = resolveWikiPage(in: pages, rawName: name) {
+            completion(p)
+            return
+        }
+        let type = Self.inferType(for: name)
+        let spec = WikiPageSpec(
+            name: name, type: type, aliases: [], tags: ["wiki", type],
+            updated: "", backlinks: [],
+            chineseName: "", company: "", jobTitle: "", role: "",
+            companyType: "", industry: "", companyIntro: "",
+            brand: "", model: "", category: "", functionDesc: "", status: "", replacement: ""
+        )
+        createWikiPage(spec) { page in
+            completion(page)
+        }
+    }
+
+    /// 调 pipeline --add-wiki-page 新建页面；成功后静默刷新页面列表并回调（回调内可立即拿到新页）。
+    private func createWikiPage(_ spec: WikiPageSpec, completion: @escaping (WikiPage?) -> Void) {
+        setBusy(true, status: "新建页面中…")
+        PipelineRunner.shared.run(script: nil, arguments: ["--add-wiki-page", jsonString(spec.asDictForPython())]) { _ in }
+        completion: { [weak self] result in
+            guard let self else { return }
+            let reason = Self.pipelineErrorReason(result.stdout) ?? result.error?.localizedDescription
+            self.setBusy(false, status: reason == nil ? "已新建" : "新建失败")
+            if let reason = reason {
+                self.showAlert("新建 WiKi 页失败：\(reason)")
+                completion(nil)
+                return
+            }
+            self.refreshPagesFromPipeline(silent: true) {
+                completion(resolveWikiPage(in: self.pages, rawName: spec.name).map { $0.1 })
+            }
+        }
+    }
+
+    /// 在目标页正文末尾追加一行 [[linkName]] 双链（直接写文件，目标页当前未打开，安全）。
+    /// 仅追加正文，不动 frontmatter，因此不影响脱敏词典同步；链接会即时计入「引用本页」扫描。
+    private func appendLinkToPageBody(_ file: String, linkName: String, isHome: Bool) {
+        let url = isHome ? homeFile : wikiPagesDir.appendingPathComponent(file)
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return }
+        let appended = text + "\n\n[[" + linkName + "]]\n"
+        try? appended.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// 按页面名粗推断类型（新建双链目标页时用）。命中公司/芯片特征词 → 对应类型，否则默认 Topic。
+    private static func inferType(for name: String) -> String {
+        let n = name.lowercased()
+        let companyHits = ["公司", "科技", "股份", "集团", "有限", "inc", "corp", "corporation", "ltd", "llc", "co."]
+        let chipHits = ["芯片", "型号", "处理器", "soc", "chip", "mcu", "cpu", "gpu"]
+        if companyHits.contains(where: { n.contains($0) }) { return "Company" }
+        if chipHits.contains(where: { n.contains($0) }) { return "Chip" }
+        return "Topic"
     }
 
     // MARK: - 工具（setBusy 已移至下方，统一管理删除按钮等所有按钮的启用状态）
@@ -1022,6 +1104,53 @@ extension WikiViewController: MarkdownEditorViewDelegate, SaveablePage {
 
     func markdownEditorDidClickWikilink(_ editor: MarkdownEditorView, name: String, anchor: String?) {
         resolveOrPromptWikiPage(name, anchor: anchor)
+    }
+
+    /// v2.2.68：用户在正文末尾「双链关系」表格输入页面名并回车 → 建立双链。
+    /// - mode "out"：在当前页正文末尾插入 [[name]]（目标页不存在则先自动新建），即「本页引用该页」。
+    /// - mode "in"：在目标页正文追加 [[当前页]]（目标页不存在则先自动新建），即「该页引用本页」。
+    /// 两种模式都就地刷新对应表格区（内存更新），无需整页重载，避免丢失编辑器中的未保存改动。
+    func markdownEditorDidRequestAddPageLink(_ editor: MarkdownEditorView, mode: String, name: String) {
+        let target = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty else { return }
+        guard let current = selectedPage else { return }
+        resolveOrCreatePage(named: target) { [weak self] page in
+            guard let self, let page = page else { return }
+            if mode == "in" {
+                // 目标页正文追加 [[当前页]]，使其成为「引用本页的页面」
+                self.appendLinkToPageBody(page.file, linkName: current.name, isHome: page.isHome)
+                // 立即刷入链表（内存）
+                var inc = self.currentIncoming
+                if !inc.contains(where: { ($0["name"] as? String)?.lowercased() == page.name.lowercased() }) {
+                    var fields: [[String: String]] = []
+                    if let tText = try? String(contentsOf: page.isHome ? self.homeFile : self.wikiPagesDir.appendingPathComponent(page.file), encoding: .utf8) {
+                        let fm = self.parseFrontmatterScalar(tText)
+                        let t = (fm["type"] ?? page.type).lowercased()
+                        for w in WikiViewController.referenceWantedKeys(for: t) {
+                            if let v = fm[w], !v.isEmpty { fields.append(["label": self.backlinkFieldLabel(w), "value": v]) }
+                        }
+                    }
+                    var dict: [String: Any] = ["name": page.name, "type": page.type]
+                    if !fields.isEmpty { dict["fields"] = fields }
+                    inc.append(dict)
+                    self.currentIncoming = inc
+                    self.editor.setPageReferences(inc)
+                }
+            } else {
+                // out：在当前编辑器正文末尾插入 [[page.name]]（保活，不重载）
+                self.editor.appendWikiLink(page.name)
+                // 立即刷出链表（内存）
+                var out = self.currentOutgoing
+                if !out.contains(where: { ($0["name"] as? String)?.lowercased() == page.name.lowercased() }) {
+                    var dict: [String: Any] = ["name": page.name, "type": page.type]
+                    out.append(dict)
+                    self.currentOutgoing = out
+                    self.editor.setPageReferencesOut(out)
+                }
+            }
+            // 新建的页已入库：刷新页面名列表（双链自动补全 / 缺失页判定）
+            self.editor.setWikiPages(self.pages.flatMap { [$0.name] + $0.aliases })
+        }
     }
 
     /// 解析并跳转，未命中则礼貌提示新建（供纪要页路由与本页点击复用）。anchor 为 [[Page#Heading]] 的标题锚点。

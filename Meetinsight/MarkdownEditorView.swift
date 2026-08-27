@@ -29,6 +29,9 @@ protocol MarkdownEditorViewDelegate: AnyObject {
     /// 用户点击 banner 上的「✏️ 编辑属性」按钮，宿主应当弹出属性编辑面板并落盘新 frontmatter。
     /// （默认 no-op —— 仅 WikiViewController 关心；纪要页未实现。）
     func markdownEditorDidRequestEditProperties(_ editor: MarkdownEditorView, markdown: String)
+    /// v2.2.68：用户在正文末尾「双链关系」表格里输入页面名并回车，请求建立双链。
+    /// mode = "out" 表示「本页引用该页」，mode = "in" 表示「该页引用本页」；name 为页面名（不存在则自动新建 WiKi 页）。
+    func markdownEditorDidRequestAddPageLink(_ editor: MarkdownEditorView, mode: String, name: String)
 }
 
 /// 接收 WKWebView 的 JS 消息，转发到主线程闭包。
@@ -46,6 +49,7 @@ fileprivate final class EditorMessageHandler: NSObject, WKScriptMessageHandler {
 /// 默认 no-op：让 markdownEditorDidRequestEditProperties 在纪要页等不需要编辑属性的场景下不必实现
 extension MarkdownEditorViewDelegate {
     func markdownEditorDidRequestEditProperties(_ editor: MarkdownEditorView, markdown: String) {}
+    func markdownEditorDidRequestAddPageLink(_ editor: MarkdownEditorView, mode: String, name: String) {}
 }
 
 final class MarkdownEditorView: NSView, WKNavigationDelegate {
@@ -176,15 +180,6 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
         webView.evaluateJavaScript("MMEditor.setAutoLinkNames(\(js))")
     }
 
-    /// 推送「反向链接 / incoming」列表给 JS：即所有在正文里 [[引用了本页]] 的页面名（由宿主扫描得到）。
-    /// JS 侧会把它与本页 frontmatter 的手动 backlinks 字段合并去重展示，并支持手动追加。
-    func setBacklinks(_ names: [String]) {
-        guard Self.engine == "tiptap" else { return }
-        let json = (try? JSONSerialization.data(withJSONObject: names)) ?? Data("[]".utf8)
-        let js = String(data: json, encoding: .utf8) ?? "[]"
-        webView.evaluateJavaScript("MMEditor.setBacklinks(\(js))")
-    }
-
     /// v2.2.67：推送「引用此页面的页面」明细（含类型 + 关键属性）给 JS，
     /// 供当前页正文末尾渲染可点击回跳的反链嵌入表格。适用于所有类型（不再局限于 Company）。
     func setPageReferences(_ refs: [[String: Any]]) {
@@ -192,6 +187,22 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
         let json = (try? JSONSerialization.data(withJSONObject: refs)) ?? Data("[]".utf8)
         let js = String(data: json, encoding: .utf8) ?? "[]"
         webView.evaluateJavaScript("MMEditor.setPageReferences(\(js))")
+    }
+
+    /// v2.2.68：推送「本页引用的页面」明细（出链，含类型 + 关键属性）给 JS，
+    /// 供当前页正文末尾「双链关系」表格的出链区渲染。适用于所有类型。
+    func setPageReferencesOut(_ refs: [[String: Any]]) {
+        guard Self.engine == "tiptap" else { return }
+        let json = (try? JSONSerialization.data(withJSONObject: refs)) ?? Data("[]".utf8)
+        let js = String(data: json, encoding: .utf8) ?? "[]"
+        webView.evaluateJavaScript("MMEditor.setPageReferencesOut(\(js))")
+    }
+
+    /// v2.2.68：在当前编辑器正文末尾插入一条 [[Page]] 双链（用于「本页引用的页面」添加，目标页不存在则新建）。
+    func appendWikiLink(_ name: String) {
+        guard Self.engine == "tiptap", !name.isEmpty else { return }
+        let js = "MMEditor.appendWikiLink(\(jsString(name)))"
+        webView.evaluateJavaScript(js)
     }
 
     /// 跳转到 Wiki 页内某标题锚点（Obsidian 式 [[Page#Heading]]）；无匹配标题时静默忽略。
@@ -221,6 +232,11 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
         case "save":
             if let md = message["markdown"] as? String {
                 delegate?.markdownEditorDidRequestSave(self, markdown: md)
+            }
+        case "addPageLink":
+            // v2.2.68：表格内「添加双链」输入框回车 → 宿主建链（目标不存在则自动新建 WiKi 页）
+            if let mode = message["mode"] as? String, let name = message["name"] as? String {
+                delegate?.markdownEditorDidRequestAddPageLink(self, mode: mode, name: name)
             }
         case "wikilink":
             if let name = message["name"] as? String {
@@ -402,8 +418,8 @@ fileprivate enum EditorHTML {
       .fm-table td { color: #1c1c1e; word-break: break-word; }
       /* Vditor 容器：Obsidian 风格留白 */
       #editor { max-width: 860px; margin: 0 auto; }
-      /* v2.2.67：引用此页面的页面表格容器（运行时装饰，不进 .md；默认隐藏，有内容时由 JS 显示在正文末尾） */
-      #fmCompanyRefsContainer { max-width: 860px; margin: 16px auto 0; display: none; }
+      /* v2.2.68：双链关系表格容器（运行时装饰，不进 .md；默认隐藏，有内容时由 JS 显示在正文末尾） */
+      #fmPageRefsContainer { max-width: 860px; margin: 16px auto 0; display: none; }
       .vditor { border: none !important; box-shadow: none !important; background: transparent !important; }
       .vditor-toolbar { background: #fafafc !important; border-bottom: 1px solid #e8e8ee !important; padding: 4px 6px !important; }
       .vditor-toolbar--pin { background: #fafafc !important; }
@@ -440,7 +456,7 @@ fileprivate enum EditorHTML {
     <body>
     <details id="fmBanner" class="fm-banner" open><summary>笔记属性</summary><div id="fmBody"></div></details>
     <div id="editor"></div>
-    <div id="fmCompanyRefsContainer"></div>
+    <div id="fmPageRefsContainer"></div>
     <script src="%VDITOR_CDN%/dist/index.min.js"></script>
     <script>
     var VDITOR_CDN = "%VDITOR_CDN%";
@@ -832,8 +848,16 @@ fileprivate enum TipTapEditorHTML {
         color: #1c1c1e; resize: vertical; line-height: 1.6; margin-top: 4px;
       }
       .fm-bl-edit:focus { outline: none; border-color: #2f6fdb; box-shadow: 0 0 0 2px rgba(47,111,219,0.12); }
-      /* v2.2.67：引用此页面的页面表格容器（位于正文末尾，运行时装饰不进 .md） */
-      #fmCompanyRefsContainer { max-width: 860px; margin: 16px auto 0; display: none; }
+      /* v2.2.68：双链关系表格容器（位于正文末尾，运行时装饰不进 .md） */
+      #fmPageRefsContainer { max-width: 860px; margin: 16px auto 0; display: none; }
+      /* v2.2.68：双链关系表格内「添加双链」输入行 */
+      .fm-ref-add { margin-top: 8px; }
+      .fm-ref-add-input {
+        width: 100%; box-sizing: border-box; font-family: inherit; font-size: 13px;
+        padding: 6px 8px; border: 1px solid #e2e3e8; border-radius: 6px; background: #fff; color: #1c1c1e;
+      }
+      .fm-ref-add-input:focus { outline: none; border-color: #2f6fdb; box-shadow: 0 0 0 2px rgba(47,111,219,0.12); }
+      .fm-ref-empty { color: #9a9aa2; font-style: italic; }
       /* 所有「添加」输入行与第 2 列（值列）对齐，与上方其余输入框保持一致宽度 */
       .fm-add-row { grid-column: 2; margin-top: 6px; }
       .fm-add-prop {
@@ -1006,7 +1030,7 @@ fileprivate enum TipTapEditorHTML {
     <body>
     <details id="fmBanner" class="fm-banner" open><summary>笔记属性</summary><div id="fmBody"></div></details>
     <div id="editor"></div>
-    <div id="fmCompanyRefsContainer"></div>
+    <div id="fmPageRefsContainer"></div>
     <script src="%TIPTAP_BASE%/tiptap.bundle.js"></script>
     <script>
       function mmIsDark(){ return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches; }

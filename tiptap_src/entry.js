@@ -120,10 +120,10 @@ const FM_ORDER = [
   '中文名', 'company', 'title', '职能范围',
   '公司类型', '所属行业', '公司简介',
   '品牌', '具体型号', '类别', '功能简述', '状态', '替代料',
-  'tags', 'updated', 'backlinks'
+  'tags', 'updated'
 ]
-// 内部标记键，不展示（如 MOC 首页的 wiki_首页 标志）
-const FM_SKIP = { wiki_首页: 1 }
+// 内部标记键，不展示（如 MOC 首页的 wiki_首页 标志；backlinks 反向链接已移出 banner，改由正文末尾「双链关系」表格呈现）
+const FM_SKIP = { wiki_首页: 1, backlinks: 1 }
 // 英文键 → 中文标签（统一界面语言，避免中英混合）。中文键原样透传。
 const FM_LABEL_CN = {
   type: '类型',
@@ -132,15 +132,13 @@ const FM_LABEL_CN = {
   title: '职位',
   aliases: '别名',
   tags: '标签',
-  updated: '更新时间',
-  backlinks: '反向链接'
+  updated: '更新时间'
 }
 function fmLabel(k) { return FM_LABEL_CN[k] || k }
 
 // 字段类型推断（决定渲染控件与图标）。page 有什么字段就显示什么字段，不猜测、不丢弃。
 function fmFieldType(key, value) {
   if (key === 'type') return 'select'
-  if (key === 'backlinks') return 'readonly'
   if (key === 'aliases' || key === 'tags') return 'list'
   const kl = String(key).toLowerCase()
   if (kl === 'updated' || kl === 'created' || kl === 'date' || kl.endsWith('_date')) return 'date'
@@ -153,7 +151,6 @@ function fmFieldIcon(type, key) {
   if (type === 'list') return '↗'                       // 别名（列表）
   if (type === 'date') return '📅'                      // 日期
   if (type === 'select') return '≡'                     // 类型
-  if (type === 'readonly') return '🔗'                  // 反向链接
   return '≡'                                             // 文本 / 长文本
 }
 
@@ -201,63 +198,7 @@ function renderWikiText(s) {
       anchorAttr + '>' + escapeHtml(alias || page) + '</a>'
   })
 }
-// 反向链接 → 可点击双向链接。
-// 兼容输入：[[Page]] / [[Page|alias]] / [[Page#anchor]] / [[Page|alias#anchor]] / 纯文本「Page」/ 纯文本「Page#anchor」；
-// 无内容返回 ''。
-function renderBacklinks(bl) {
-  if (!bl) return ''
-  let items = Array.isArray(bl) ? bl.slice() : String(bl).split(/[,，、]/)
-  items = items.map(s => String(s).trim()).filter(Boolean)
-  if (!items.length) return ''
-  return items.map(s => {
-    let page = '', alias = '', anchor = ''
-    // 1) 优先匹配 [[...]] 包装
-    const m = s.match(/^\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]$/)
-    if (m) {
-      const target = (m[1] || '').trim()
-      alias = (m[2] || '').trim()
-      const h = target.indexOf('#')
-      if (h >= 0) {
-        page = target.slice(0, h).trim()
-        anchor = target.slice(h + 1).trim()
-      } else {
-        page = target
-      }
-    } else {
-      // 2) 兼容纯文本（无 [[]] 包装），仍支持 #anchor
-      const h = s.indexOf('#')
-      if (h >= 0) {
-        page = s.slice(0, h).trim()
-        anchor = s.slice(h + 1).trim()
-      } else {
-        page = s
-      }
-    }
-    if (!page) return escapeHtml(s)
-    const anchorAttr = anchor ? ' data-anchor="' + escapeAttr(anchor) + '"' : ''
-    return '<a class="wikilink" data-wikilink data-page="' + escapeAttr(page) + '"' +
-      (alias ? ' data-alias="' + escapeAttr(alias) + '"' : '') +
-      anchorAttr + '>' + escapeHtml(alias || page) + '</a>'
-  }).join(' ')
-}
-// 合并「宿主下发的 incoming 反向链接（被哪些页引用）」与页面 frontmatter 里的手动 backlinks 字段，去重保序
-// （incoming 来自其他页正文 [[本页]] 扫描；manual 来自本页 backlinks 字段，手动维护。两者均为可点击双链。）
-function backlinksMerged(manualField) {
-  const incoming = Array.isArray(window.__backlinks) ? window.__backlinks.slice() : []
-  const manual = fmListItems(manualField)
-  const seen = new Set()
-  const out = []
-  // 手动优先（用户显式关联），incoming 其次（自动发现）
-  for (const s of manual.concat(incoming)) {
-    const key = String(s).trim().toLowerCase()
-    if (!key || seen.has(key)) continue
-    seen.add(key)
-    out.push(String(s).trim())
-  }
-  return out
-}
-
-// 只读 banner（Obsidian 风格）：遍历 page 实际键全部显示；列表→chip、日期→日历、backlinks→只读
+// 只读 banner（Obsidian 风格）：遍历 page 实际键全部显示；列表→chip、日期→日历
 function renderFrontmatterBanner(fm) {
   if (!fm || Object.keys(fm).length === 0) return ''
   const rows = []
@@ -271,10 +212,6 @@ function renderFrontmatterBanner(fm) {
       if (!items.length) return
       const chips = '<span class="fm-chips readonly">' + items.map(it => '<span class="fm-chip">' + escapeHtml(it) + '</span>').join('') + '</span>'
       rows.push(fmRowHtml(icon, label, chips))
-    } else if (t === 'readonly') {
-      const blHtml = renderBacklinks(backlinksMerged(fm[k]))
-      if (!blHtml) return
-      rows.push(fmRowHtml(icon, label, '<div class="fm-readonly">' + blHtml + '</div>'))
     } else if (t === 'date') {
       const dv = (fm[k] || '').toString().trim()
       if (!dv) return
@@ -1098,9 +1035,9 @@ function wireEditorDom() {
       }
     })
   }
-  // v2.2.67：正文末尾反链表格容器内的双链（含表内页面名链接）同样委托点击/悬停跳转，
+  // v2.2.68：正文末尾「双链关系」表格容器内的双链（含表内页面名链接）同样委托点击/悬停跳转，
   // 使表格中的 [[页面]] 链接与正文、banner 一致，可互相跳转。
-  const refsContainer = document.getElementById('fmCompanyRefsContainer')
+  const refsContainer = document.getElementById('fmPageRefsContainer')
   if (refsContainer) {
     refsContainer.addEventListener('mouseover', e => {
       const el = e.target.closest && e.target.closest('a.wikilink')
@@ -1120,6 +1057,19 @@ function wireEditorDom() {
           window.webkit.messageHandlers.editorBridge.postMessage({ type: 'wikilink', name: name, anchor: anchor })
         }
       }
+    })
+    // v2.2.68：表格内「添加双链」输入框回车 → 通知宿主建链（目标页不存在则自动新建 WiKi 页）
+    refsContainer.addEventListener('keydown', e => {
+      if (e.key !== 'Enter') return
+      const inp = e.target.closest && e.target.closest('input.fm-ref-add-input')
+      if (!inp) return
+      e.preventDefault()
+      const mode = inp.getAttribute('data-add-link') || 'out'
+      const name = (inp.value || '').trim()
+      if (name && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.editorBridge) {
+        window.webkit.messageHandlers.editorBridge.postMessage({ type: 'addPageLink', mode: mode, name: name })
+      }
+      inp.value = ''
     })
   }
 }
@@ -1143,8 +1093,8 @@ window.MMEditor = {
     pendingFrontmatter = sp.fmRaw
     currentFM = sp.fmRaw ? fmNormalize(parseFrontmatter(sp.fmRaw.split('\n').slice(1, -1))) : {}
     currentEditable = editable !== false
-    // 每次加载新页重置「incoming 反向链接」（由宿主 selectPage 重新下发），避免跨页残留
-    window.__backlinks = []
+    // 每次加载新页重置「出链 / 入链」明细（由宿主 selectPage 重新下发），避免跨页残留
+    window.__pageRefsOut = []
     // v2.2.67：引用此页面的页面明细同样随页面重置（setPageReferences 再下发）
     window.__pageRefs = []
     // 顶部属性 banner：属性表单**始终内联可编辑**（与正文同处一个编辑器窗口），
@@ -1205,16 +1155,31 @@ window.MMEditor = {
     window.__wikiPages = Array.isArray(arr) ? arr : []
     if (editor) editor.view.dispatch(editor.state.tr.setMeta(missingKey, { recompute: true }))
   },
-  // 宿主下发的 incoming 反向链接（其他页面正文里 [[本页]] 的扫描结果）；下发后重渲染 banner 以合并展示
-  setBacklinks(arr) {
-    window.__backlinks = Array.isArray(arr) ? arr : []
+  // v2.2.68：宿主下发的「本页引用的页面」明细（出链：当前页正文 [[链接]] 到的页面，含名称 + 类型 + 关键属性）；
+  // 适用于所有类型，下发后重渲染 banner 并注入正文末尾的双链关系表格（出链区）。
+  setPageReferencesOut(arr) {
+    window.__pageRefsOut = Array.isArray(arr) ? arr : []
     renderBanner()
   },
-  // v2.2.67：宿主下发的「引用此页面的页面」明细（名称 + 类型 + 关键属性）；
-  // 适用于所有类型，下发后重渲染 banner 并注入正文末尾的反链表格。
+  // v2.2.67：宿主下发的「引用此页面的页面」明细（入链：其他页正文 [[本页]] 的扫描结果，含名称 + 类型 + 关键属性）；
+  // 适用于所有类型，下发后重渲染 banner 并注入正文末尾的双链关系表格（入链区）。
   setPageReferences(arr) {
     window.__pageRefs = Array.isArray(arr) ? arr : []
     renderBanner()
+  },
+  // v2.2.68：在当前编辑器正文末尾插入一条 [[Page]] 双链并触发保存（用于「本页引用的页面」添加）。
+  // 直接写入编辑器 DOM（不重载），保留用户光标与未保存改动；保存后落盘，下次 selectPage 会据此重算入链。
+  appendWikiLink(name) {
+    if (!editor) return
+    const target = (name || '').trim()
+    if (!target) return
+    const txt = '[[' + target + ']]'
+    try {
+      editor.chain().focus('end').insertContent(txt).run()
+    } catch (e) {
+      // 容错：insertContent 失败时不阻塞，交由用户手动补链
+    }
+    if (window.MMEditor && window.MMEditor.requestSave) window.MMEditor.requestSave()
   },
   // 推送「自动双链」目标名（仅 Wiki 页名），加载纪要时把裸词包裹成 [[名称]]
   setAutoLinkNames(arr) {
@@ -1273,16 +1238,16 @@ function renderBanner() {
     const html = renderFrontmatterBanner(currentFM)
     if (html) { body.innerHTML = html } else { det.style.display = 'none'; body.innerHTML = '' }
   }
-  // v2.2.67：当前页「引用此页面的页面」表格注入正文末尾的独立容器 #fmCompanyRefsContainer（运行时装饰，不进 .md）
+  // v2.2.68：当前页「双链关系」表格注入正文末尾的独立容器 #fmPageRefsContainer（运行时装饰，不进 .md）
   renderPageRefsIntoContainer()
 }
 
-// v2.2.67：渲染「引用此页面的页面」嵌入表格（所有类型）。
+// v2.2.68：渲染「双链关系」嵌入表格（双向分区，所有类型）。
+// 两区：① 本页引用的页面（出链 __pageRefsOut）② 引用本页的页面（入链 __pageRefs）。
 // 每行：页面名（可点击双链回跳）→ 类型 → 关键属性（人员含职位/电话/邮箱等，值内 [[Page]] 亦链接化）。
-function renderPageRefsSection() {
-  const refs = window.__pageRefs || []
-  if (!refs.length) return ''
-  const rows = refs.map(r => {
+// 每区底部提供「添加双链」输入框，回车即建立链接（目标页不存在则自动新建 WiKi 页）。
+function renderPageRefsTable(title, refs, mode) {
+  const rows = (refs || []).map(r => {
     const name = String(r.name || '').trim()
     if (!name) return ''
     const type = String(r.type || '').trim()
@@ -1300,17 +1265,26 @@ function renderPageRefsSection() {
       fieldsCell +
       '</tr>'
   }).filter(Boolean).join('')
-  if (!rows) return ''
+  const bodyRows = rows || '<tr><td colspan="3" class="fm-ref-empty">（暂无，可在下方添加）</td></tr>'
   return '<div class="fm-company-refs">' +
-    '<div class="fm-ref-title">🔗 引用此页面的页面</div>' +
+    '<div class="fm-ref-title">' + title + '</div>' +
     '<table class="fm-ref-table"><thead><tr><th>页面</th><th>类型</th><th>关键属性</th></tr></thead>' +
-    '<tbody>' + rows + '</tbody></table></div>'
+    '<tbody>' + bodyRows + '</tbody></table>' +
+    '<div class="fm-ref-add">' +
+    '<input type="text" class="fm-ref-add-input" data-add-link="' + escapeAttr(mode) + '" placeholder="＋ 添加双链：输入页面名，回车即建立链接（不存在则自动新建）">' +
+    '</div></div>'
 }
 
-// v2.2.66：把公司「引用此公司的页面」表注入 banner 与正文间的独立容器（运行时装饰，不进 .md）。
-// 容器节点由 MarkdownEditorView 模板在 #fmBanner 与 #editor 之间提供；无容器（如 vditor 回退）则静默跳过。
+function renderPageRefsSection() {
+  const out = renderPageRefsTable('↗ 本页引用的页面', window.__pageRefsOut || [], 'out')
+  const inc = renderPageRefsTable('🔗 引用本页的页面', window.__pageRefs || [], 'in')
+  return out + inc
+}
+
+// v2.2.68：把「双链关系」表注入正文末尾的独立容器（运行时装饰，不进 .md）。
+// 容器节点由 MarkdownEditorView 模板在 #editor 之后提供；无容器（如 vditor 回退）则静默跳过。
 function renderPageRefsIntoContainer() {
-  const el = document.getElementById('fmCompanyRefsContainer')
+  const el = document.getElementById('fmPageRefsContainer')
   if (!el) return
   const sec = renderPageRefsSection()
   el.innerHTML = sec || ''
@@ -1548,22 +1522,6 @@ function renderBannerEditForm(fm) {
     } else if (t === 'date') {
       const dv = (fm[k] || '').toString().trim()
       valHtml = '<input type="date" data-fm="' + escapeAttr(k) + '" data-kind="scalar" value="' + escapeAttr(dv) + '" class="fm-date">'
-    } else if (t === 'readonly') {
-      // 反向链接分两部分（v2.2.66 改为可编辑）：
-      // 1) 自动发现（incoming，来自其他页面正文的 [[本页]] 扫描）—— 只读、可点击回跳
-      // 2) 手动维护（currentFM['backlinks'] 字段）—— 可直接编辑的 textarea，一行一条 [[Page]]
-      const incoming = Array.isArray(window.__backlinks) ? window.__backlinks.filter(Boolean) : []
-      let inner = '<div class="fm-bl-sub"><span class="fm-bl-tag">自动发现</span>'
-      inner += incoming.length ? renderBacklinks(incoming) : '<span class="fm-empty">（暂无其他页面引用）</span>'
-      inner += '</div>'
-      const manual = fmListItems(fm[k])
-      const taRows = Math.max(2, Math.min(12, manual.length + 1))
-      inner += '<div class="fm-bl-sub"><span class="fm-bl-tag">手动维护</span>' +
-        '<textarea data-fm="' + escapeAttr(k) + '" data-kind="list" class="fm-bl-edit" rows="' + taRows + '" placeholder="一行一条，支持 [[页面]] / [[页面|别名]] / [[页面#章节]]">' +
-        escapeHtml(manual.join('\n')) + '</textarea></div>'
-      valHtml = '<div class="fm-backlinks-edit">' + inner + '</div>'
-      html += fmRowHtml(icon, label, valHtml)
-      return
     } else if (t === 'longtext') {
       // 长文本与其他属性同列对齐（不再跨整行顶格），编辑框宽度/高度与下方其余输入框一致
       valHtml = '<textarea data-fm="' + escapeAttr(k) + '" data-kind="scalar" class="fm-textarea" placeholder="（空）" rows="3">' + escapeHtml(fm[k] == null ? '' : String(fm[k])) + '</textarea>'
