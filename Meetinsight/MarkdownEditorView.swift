@@ -32,6 +32,11 @@ protocol MarkdownEditorViewDelegate: AnyObject {
     /// v2.2.68：用户在正文末尾「双链关系」表格里输入页面名并回车，请求建立双链。
     /// mode = "out" 表示「本页引用该页」，mode = "in" 表示「该页引用本页」；name 为页面名（不存在则自动新建 WiKi 页）。
     func markdownEditorDidRequestAddPageLink(_ editor: MarkdownEditorView, mode: String, name: String)
+    /// v2.2.69：用户在正文末尾「双链关系」可编辑表格里改动单元格，请求写回 .md。
+    /// - field: "name"(改 [[链接]] 文本) / "type"(改类型) / "attr"(改预定义属性) / "customval"(改自定义属性值) / "customadd"(新增自定义属性) / "customdel"(删除自定义属性)
+    /// - fmKey: 属性对应的真实 frontmatter 键（attr/custom* 时有效）
+    /// - rowFile: 该行对应 wiki 页的文件名（类型/属性/自定义属性写回目标；name 出链时忽略，写当前页）
+    func markdownEditorDidRequestEditPageRef(_ editor: MarkdownEditorView, mode: String, oldName: String, field: String, fmKey: String?, value: String?, rowFile: String?)
 }
 
 /// 接收 WKWebView 的 JS 消息，转发到主线程闭包。
@@ -50,6 +55,7 @@ fileprivate final class EditorMessageHandler: NSObject, WKScriptMessageHandler {
 extension MarkdownEditorViewDelegate {
     func markdownEditorDidRequestEditProperties(_ editor: MarkdownEditorView, markdown: String) {}
     func markdownEditorDidRequestAddPageLink(_ editor: MarkdownEditorView, mode: String, name: String) {}
+    func markdownEditorDidRequestEditPageRef(_ editor: MarkdownEditorView, mode: String, oldName: String, field: String, fmKey: String?, value: String?, rowFile: String?) {}
 }
 
 final class MarkdownEditorView: NSView, WKNavigationDelegate {
@@ -212,6 +218,14 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
         webView.evaluateJavaScript(js)
     }
 
+    /// v2.2.69：把编辑器 DOM 里指向 oldName 的双链改写为 newName（出链改名即时刷新视图，随后保存落盘）。
+    /// 写回当前页的保存走既有 `requestSave()`（line 168），其经模板全局 shim `requestSave()` → `MMEditor.requestSave()` 落盘。
+    func replaceWikiLink(_ oldName: String, _ newName: String) {
+        guard Self.engine == "tiptap" else { return }
+        let js = "MMEditor.replaceWikiLink(\(jsString(oldName)), \(jsString(newName)))"
+        webView.evaluateJavaScript(js)
+    }
+
     // MARK: - WKNavigationDelegate
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -237,6 +251,16 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
             // v2.2.68：表格内「添加双链」输入框回车 → 宿主建链（目标不存在则自动新建 WiKi 页）
             if let mode = message["mode"] as? String, let name = message["name"] as? String {
                 delegate?.markdownEditorDidRequestAddPageLink(self, mode: mode, name: name)
+            }
+        case "editPageRef":
+            // v2.2.69：可编辑双链表格单元格改动 → 宿主写回 .md
+            if let mode = message["mode"] as? String,
+               let oldName = message["oldName"] as? String,
+               let field = message["field"] as? String {
+                let fmKey = message["fmKey"] as? String
+                let value = message["value"] as? String
+                let rowFile = message["rowFile"] as? String
+                delegate?.markdownEditorDidRequestEditPageRef(self, mode: mode, oldName: oldName, field: field, fmKey: fmKey, value: value, rowFile: rowFile)
             }
         case "wikilink":
             if let name = message["name"] as? String {
@@ -858,6 +882,22 @@ fileprivate enum TipTapEditorHTML {
       }
       .fm-ref-add-input:focus { outline: none; border-color: #2f6fdb; box-shadow: 0 0 0 2px rgba(47,111,219,0.12); }
       .fm-ref-empty { color: #9a9aa2; font-style: italic; }
+      /* v2.2.69：双链关系可编辑表格 */
+      .fm-ref-subtable { margin-bottom: 10px; }
+      .fm-ref-subtitle { font-size: 11px; color: #9a9aa2; margin: 6px 0 2px; font-weight: 600; }
+      .fm-ref-input { width: 100%; box-sizing: border-box; font-family: inherit; font-size: 12px; padding: 3px 6px; border: 1px solid #e2e3e8; border-radius: 5px; background: #fff; color: #1c1c1e; }
+      .fm-ref-input:focus { outline: none; border-color: #2f6fdb; box-shadow: 0 0 0 2px rgba(47,111,219,0.12); }
+      .fm-ref-name .fm-ref-input { font-weight: 600; }
+      .fm-ref-custom { margin-top: 4px; padding-top: 4px; border-top: 1px dotted #e2e3e8; }
+      .fm-ref-custom-title { font-size: 11px; color: #9a9aa2; margin-bottom: 2px; }
+      .fm-ref-custom-row { display: flex; align-items: center; gap: 4px; margin: 2px 0; }
+      .fm-ref-ckey-label { color: #6b6b73; min-width: 64px; }
+      .fm-ref-cval { flex: 1; }
+      .fm-ref-cdel { border: 1px solid #e2c0bd; background: #fff; color: #c0392b; border-radius: 5px; cursor: pointer; padding: 2px 8px; font-size: 12px; }
+      .fm-ref-cdel:hover { background: #fdecea; }
+      .fm-ref-cadd { margin-top: 4px; padding: 2px 8px; font-size: 12px; font-family: inherit; background: transparent; color: #2f6fdb; border: none; border-radius: 6px; cursor: pointer; text-align: left; }
+      .fm-ref-cadd:hover { background: rgba(47,111,219,0.08); }
+      .fm-ref-empty-block { color: #9a9aa2; font-style: italic; font-size: 12px; }
       /* 所有「添加」输入行与第 2 列（值列）对齐，与上方其余输入框保持一致宽度 */
       .fm-add-row { grid-column: 2; margin-top: 6px; }
       .fm-add-prop {
@@ -1001,6 +1041,22 @@ fileprivate enum TipTapEditorHTML {
       .fm-ref-type { color: #b8b8c0; white-space: nowrap; }
       .fm-ref-fields { color: #ebebf0; }
       .fm-ref-fields .fm-ref-label { color: #b8b8c0; margin-right: 2px; }
+      /* v2.2.69：双链关系可编辑表格（深色） */
+      .fm-ref-subtable { margin-bottom: 10px; }
+      .fm-ref-subtitle { font-size: 11px; color: #7a7a82; margin: 6px 0 2px; font-weight: 600; }
+      .fm-ref-input { width: 100%; box-sizing: border-box; font-family: inherit; font-size: 12px; padding: 3px 6px; border: 1px solid #3a3a3e; border-radius: 5px; background: #1e1e22; color: #ebebf0; }
+      .fm-ref-input:focus { outline: none; border-color: #74b1ff; box-shadow: 0 0 0 2px rgba(116,177,255,0.14); }
+      .fm-ref-name .fm-ref-input { font-weight: 600; }
+      .fm-ref-custom { margin-top: 4px; padding-top: 4px; border-top: 1px dotted #3a3a3e; }
+      .fm-ref-custom-title { font-size: 11px; color: #7a7a82; margin-bottom: 2px; }
+      .fm-ref-custom-row { display: flex; align-items: center; gap: 4px; margin: 2px 0; }
+      .fm-ref-ckey-label { color: #b8b8c0; min-width: 64px; }
+      .fm-ref-cval { flex: 1; }
+      .fm-ref-cdel { border: 1px solid #5e3a38; background: #1e1e22; color: #ff7a7a; border-radius: 5px; cursor: pointer; padding: 2px 8px; font-size: 12px; }
+      .fm-ref-cdel:hover { background: #3a2626; }
+      .fm-ref-cadd { margin-top: 4px; padding: 2px 8px; font-size: 12px; font-family: inherit; background: transparent; color: #74b1ff; border: none; border-radius: 6px; cursor: pointer; text-align: left; }
+      .fm-ref-cadd:hover { background: rgba(116,177,255,0.08); }
+      .fm-ref-empty-block { color: #7a7a82; font-style: italic; font-size: 12px; }
       /* v2.2.65：反向链接可编辑（深色） */
       .fm-backlink-group { margin: 2px 0; }
       .fm-backlink-grp-label { color: #7a7a82; margin-right: 4px; }

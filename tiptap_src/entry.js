@@ -1072,6 +1072,63 @@ function wireEditorDom() {
       inp.value = ''
     })
   }
+  // v2.2.69：可编辑单元格改动 → 上报宿主写回 .md（页面名改写 [[链接]]；类型/属性/自定义属性写 frontmatter）
+  refsContainer.addEventListener('change', e => {
+    const el = e.target.closest && e.target.closest('.fm-ref-input')
+    if (!el) return
+    const field = el.getAttribute('data-field')
+    if (!field) return
+    const mode = el.getAttribute('data-mode') || ''
+    const oldName = el.getAttribute('data-oldname') || ''
+    const rowFile = el.getAttribute('data-rowfile') || ''
+    const fmKey = el.getAttribute('data-fm') || ''
+    const value = (el.value || '').trim()
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.editorBridge) {
+      window.webkit.messageHandlers.editorBridge.postMessage({ type: 'editPageRef', mode: mode, oldName: oldName, field: field, fmKey: fmKey, value: value, rowFile: rowFile })
+    }
+  })
+  // 自定义属性：＋ 添加（内联插入 键=值 行），删除（×）
+  refsContainer.addEventListener('click', e => {
+    const addBtn = e.target.closest && e.target.closest('.fm-ref-cadd')
+    if (addBtn) {
+      const mode = addBtn.getAttribute('data-mode') || ''
+      const oldName = addBtn.getAttribute('data-oldname') || ''
+      const rowFile = addBtn.getAttribute('data-rowfile') || ''
+      const wrap = addBtn.closest('.fm-ref-custom')
+      if (wrap && !wrap.querySelector('.fm-ref-cnew')) {
+        const row = document.createElement('div')
+        row.className = 'fm-ref-custom-row fm-ref-cnew'
+        row.innerHTML = '<input type="text" class="fm-ref-input fm-ref-cnewkey" placeholder="属性名">' +
+          '<input type="text" class="fm-ref-input fm-ref-cnewval" placeholder="值">' +
+          '<button type="button" class="fm-ref-cok">添加</button>'
+        wrap.insertBefore(row, addBtn)
+        const ok = row.querySelector('.fm-ref-cok')
+        const commit = () => {
+          const nk = row.querySelector('.fm-ref-cnewkey').value.trim()
+          const nv = row.querySelector('.fm-ref-cnewval').value.trim()
+          if (!nk) { if (row.parentNode) row.parentNode.removeChild(row); return }
+          if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.editorBridge) {
+            window.webkit.messageHandlers.editorBridge.postMessage({ type: 'editPageRef', mode: mode, oldName: oldName, field: 'customadd', fmKey: nk, value: nv, rowFile: rowFile })
+          }
+          if (row.parentNode) row.parentNode.removeChild(row)
+        }
+        ok.addEventListener('click', commit)
+      }
+      return
+    }
+    const delBtn = e.target.closest && e.target.closest('.fm-ref-cdel')
+    if (delBtn) {
+      const mode = delBtn.getAttribute('data-mode') || ''
+      const oldName = delBtn.getAttribute('data-oldname') || ''
+      const rowFile = delBtn.getAttribute('data-rowfile') || ''
+      const fmKey = delBtn.getAttribute('data-fm') || ''
+      if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.editorBridge) {
+        window.webkit.messageHandlers.editorBridge.postMessage({ type: 'editPageRef', mode: mode, oldName: oldName, field: 'customdel', fmKey: fmKey, value: '', rowFile: rowFile })
+      }
+      const rowEl = delBtn.closest('.fm-ref-custom-row')
+      if (rowEl && rowEl.parentNode) rowEl.parentNode.removeChild(rowEl)
+    }
+  })
 }
 
 // ————————————————————————————————————————————————————————————————
@@ -1181,6 +1238,23 @@ window.MMEditor = {
     }
     if (window.MMEditor && window.MMEditor.requestSave) window.MMEditor.requestSave()
   },
+  // v2.2.69：把编辑器 DOM 里指向 oldName 的双链改写为 newName（同步 data-page 与文本），用于出链改名后即时刷新视图；
+  // turndown 规则确保随后保存时 [[newName]] 落盘还原。
+  replaceWikiLink(oldName, newName) {
+    if (!editor) return
+    const target = (newName || '').trim()
+    if (!target) return
+    const old = (oldName || '').trim()
+    if (!old) return
+    let sel
+    try { sel = CSS.escape(old) } catch (e) { sel = old.replace(/"/g, '\\"') }
+    const links = editor.view.dom.querySelectorAll('a.wikilink[data-page="' + sel + '"]')
+    links.forEach(a => {
+      a.setAttribute('data-page', target)
+      // 仅当显示文本恰好等于旧名（非别名）时才同步改名，避免误改别名展示
+      if (a.textContent.trim() === old) a.textContent = target
+    })
+  },
   // 推送「自动双链」目标名（仅 Wiki 页名），加载纪要时把裸词包裹成 [[名称]]
   setAutoLinkNames(arr) {
     window.__autoLinkNames = Array.isArray(arr) ? arr : []
@@ -1242,47 +1316,110 @@ function renderBanner() {
   renderPageRefsIntoContainer()
 }
 
-// v2.2.68：渲染「双链关系」嵌入表格（双向分区，所有类型）。
-// 两区：① 本页引用的页面（出链 __pageRefsOut）② 引用本页的页面（入链 __pageRefs）。
-// 每行：页面名（可点击双链回跳）→ 类型 → 关键属性（人员含职位/电话/邮箱等，值内 [[Page]] 亦链接化）。
-// 每区底部提供「添加双链」输入框，回车即建立链接（目标页不存在则自动新建 WiKi 页）。
-function renderPageRefsTable(title, refs, mode) {
-  const rows = (refs || []).map(r => {
-    const name = String(r.name || '').trim()
-    if (!name) return ''
-    const type = String(r.type || '').trim()
-    const fields = Array.isArray(r.fields) ? r.fields : []
-    const fieldCell = fields.map(f => {
-      const lbl = String(f.label || '')
-      const val = String(f.value || '')
-      return lbl + '：' + val
-    }).filter(Boolean).join('、')
-    const nameCell = '<a class="wikilink" data-wikilink data-page="' + escapeAttr(name) + '">' + escapeHtml(name) + '</a>'
-    const fieldsCell = fieldCell ? '<td class="fm-ref-fields">' + renderWikiText(fieldCell) + '</td>' : '<td class="fm-ref-fields fm-empty">—</td>'
-    return '<tr>' +
-      '<td class="fm-ref-name">' + nameCell + '</td>' +
-      '<td class="fm-ref-type">' + escapeHtml(type) + '</td>' +
-      fieldsCell +
-      '</tr>'
-  }).filter(Boolean).join('')
-  const bodyRows = rows || '<tr><td colspan="3" class="fm-ref-empty">（暂无，可在下方添加）</td></tr>'
+// v2.2.69：可编辑「双链关系」嵌入表格（双向分区，所有类型）。
+// 每个类型一张子表，列 = 页面 / 类型 / 该类型专属属性列（data-fm 映射真实 frontmatter 键）。
+// 单元格全部可编辑：页面名 → 改写 [[链接]] 文本；类型 / 属性 → 写回对应页 frontmatter（banner 数据驱动自动同步）；
+// 每页还可在「自定义属性」区编辑 / 新增 / 删除 frontmatter 键。所有编辑经 editorBridge 上报宿主落盘。
+const REF_ALL_TYPES = ['Person', 'Company', 'Chip', 'Project', 'Topic', 'Method']
+// 每类型专属属性列：key = 真实 frontmatter 键，label = 中文列名
+const REF_COLUMNS = {
+  person:  [{ key: '职位', label: '职位' }, { key: '电话', label: '电话' }, { key: '邮箱', label: '邮箱' }],
+  company: [{ key: '公司类型', label: '公司类型' }, { key: '所属行业', label: '所属行业' }],
+  chip:    [{ key: '品牌', label: '品牌' }, { key: '类别', label: '类别' }],
+  project: [{ key: '概要', label: '概要' }, { key: '状态', label: '状态' }, { key: '负责人', label: '负责人' }, { key: '时间', label: '时间' }],
+  topic:   [{ key: '分类', label: '分类' }, { key: '领域', label: '领域' }],
+  method:  [{ key: '类别', label: '类别' }, { key: '应用', label: '应用' }]
+}
+// 系统 / 预定义键，不计入「自定义属性」
+const REF_SYSTEM_KEYS = new Set([
+  'type', '类型', 'canonical_name', '规范名', 'name', 'file', 'fm',
+  'aliases', '别名', 'tags', '标签', 'updated', '更新时间', 'backlinks', '反向链接', 'wiki'
+])
+
+function renderPageRefsSection() {
+  const out = renderPageRefsBlock('↗ 本页引用的页面', window.__pageRefsOut || [], 'out')
+  const inc = renderPageRefsBlock('🔗 引用本页的页面', window.__pageRefs || [], 'in')
+  return out + inc
+}
+
+// 把一个 mode 下的 refs 按类型分组，每种类型渲染一张可编辑子表
+function renderPageRefsBlock(title, refs, mode) {
+  const groups = {}
+  ;(refs || []).forEach(r => {
+    const t = String(r.type || 'Topic').toLowerCase()
+    ;(groups[t] = groups[t] || []).push(r)
+  })
+  let body = ''
+  const types = Object.keys(groups)
+  if (types.length === 0) {
+    body = '<div class="fm-ref-empty-block">（暂无，可在下方输入页面名，回车即建立双链）</div>'
+  } else {
+    types.forEach(t => {
+      const cap = t.charAt(0).toUpperCase() + t.slice(1)
+      const label = REF_ALL_TYPES.includes(cap) ? cap : 'Topic'
+      body += renderPageRefsOneType(groups[t], mode, t, label)
+    })
+  }
   return '<div class="fm-company-refs">' +
     '<div class="fm-ref-title">' + title + '</div>' +
-    '<table class="fm-ref-table"><thead><tr><th>页面</th><th>类型</th><th>关键属性</th></tr></thead>' +
-    '<tbody>' + bodyRows + '</tbody></table>' +
+    body +
     '<div class="fm-ref-add">' +
     '<input type="text" class="fm-ref-add-input" data-add-link="' + escapeAttr(mode) + '" placeholder="＋ 添加双链：输入页面名，回车即建立链接（不存在则自动新建）">' +
     '</div></div>'
 }
 
-function renderPageRefsSection() {
-  const out = renderPageRefsTable('↗ 本页引用的页面', window.__pageRefsOut || [], 'out')
-  const inc = renderPageRefsTable('🔗 引用本页的页面', window.__pageRefs || [], 'in')
-  return out + inc
+// 单张可编辑子表：表头 页面 / 类型 / 该类型属性列；每行一页，单元格可编辑
+function renderPageRefsOneType(refs, mode, typeKey, typeLabel) {
+  const cols = REF_COLUMNS[typeKey] || []
+  const header = '<th>页面</th><th>类型</th>' + cols.map(c => '<th>' + escapeHtml(c.label) + '</th>').join('')
+  const rows = (refs || []).map(r => {
+    const file = String(r.file || '')
+    const name = String(r.name || '')
+    const t = String(r.type || typeLabel)
+    const fm = (r.fm && typeof r.fm === 'object') ? r.fm : {}
+    const nameCell = '<td class="fm-ref-name"><input type="text" class="fm-ref-input" data-field="name" data-mode="' + escapeAttr(mode) + '" data-oldname="' + escapeAttr(name) + '" data-rowfile="' + escapeAttr(file) + '" value="' + escapeAttr(name) + '"></td>'
+    const typeCell = '<td class="fm-ref-type"><select class="fm-ref-input" data-field="type" data-mode="' + escapeAttr(mode) + '" data-oldname="' + escapeAttr(name) + '" data-rowfile="' + escapeAttr(file) + '">' + REF_ALL_TYPES.map(tp => '<option value="' + escapeAttr(tp) + '"' + (tp === t ? ' selected' : '') + '>' + escapeHtml(tp) + '</option>').join('') + '</select></td>'
+    const attrCells = cols.map(c => {
+      const val = String(fm[c.key] != null ? fm[c.key] : '')
+      return '<td class="fm-ref-attr"><input type="text" class="fm-ref-input" data-field="attr" data-fm="' + escapeAttr(c.key) + '" data-mode="' + escapeAttr(mode) + '" data-oldname="' + escapeAttr(name) + '" data-rowfile="' + escapeAttr(file) + '" value="' + escapeAttr(val) + '"></td>'
+    }).join('')
+    return '<tr>' + nameCell + typeCell + attrCells + '</tr>'
+  }).join('') || '<tr><td colspan="' + (cols.length + 2) + '" class="fm-ref-empty">（暂无）</td></tr>'
+  const custom = renderCustomProps(refs, mode)
+  return '<div class="fm-ref-subtable">' +
+    (typeLabel !== 'Topic' ? '<div class="fm-ref-subtitle">' + escapeHtml(typeLabel) + '</div>' : '') +
+    '<table class="fm-ref-table"><thead><tr>' + header + '</tr></thead><tbody>' + rows + '</tbody></table>' +
+    custom +
+    '</div>'
 }
 
-// v2.2.68：把「双链关系」表注入正文末尾的独立容器（运行时装饰，不进 .md）。
-// 容器节点由 MarkdownEditorView 模板在 #editor 之后提供；无容器（如 vditor 回退）则静默跳过。
+// 每页的「自定义属性」编辑区：值可改、可删、可新增（frontmatter 中既非系统键、也非本类型预定义列的键）
+function renderCustomProps(refs, mode) {
+  let html = ''
+  ;(refs || []).forEach(r => {
+    const file = String(r.file || '')
+    const name = String(r.name || '')
+    const t = String(r.type || '').toLowerCase()
+    const fm = (r.fm && typeof r.fm === 'object') ? r.fm : {}
+    const predefined = new Set((REF_COLUMNS[t] || []).map(c => c.key))
+    const customKeys = Object.keys(fm).filter(k => !REF_SYSTEM_KEYS.has(k) && !predefined.has(k))
+    const rows = customKeys.map(k => {
+      const v = String(fm[k] != null ? fm[k] : '')
+      return '<div class="fm-ref-custom-row">' +
+        '<span class="fm-ref-ckey-label">' + escapeHtml(k) + '</span>' +
+        '<input type="text" class="fm-ref-input fm-ref-cval" data-field="customval" data-fm="' + escapeAttr(k) + '" data-mode="' + escapeAttr(mode) + '" data-oldname="' + escapeAttr(name) + '" data-rowfile="' + escapeAttr(file) + '" value="' + escapeAttr(v) + '">' +
+        '<button type="button" class="fm-ref-cdel" data-field="customdel" data-fm="' + escapeAttr(k) + '" data-mode="' + escapeAttr(mode) + '" data-oldname="' + escapeAttr(name) + '" data-rowfile="' + escapeAttr(file) + '">删除</button>' +
+        '</div>'
+    }).join('')
+    html += '<div class="fm-ref-custom" data-name="' + escapeAttr(name) + '">' +
+      (customKeys.length ? '<div class="fm-ref-custom-title">自定义属性</div>' + rows : '') +
+      '<button type="button" class="fm-ref-cadd" data-mode="' + escapeAttr(mode) + '" data-oldname="' + escapeAttr(name) + '" data-rowfile="' + escapeAttr(file) + '">＋ 添加自定义属性</button>' +
+      '</div>'
+  })
+  return html
+}
+
+// v2.2.69：把「双链关系」表注入正文末尾的独立容器（运行时装饰，不进 .md）。
 function renderPageRefsIntoContainer() {
   const el = document.getElementById('fmPageRefsContainer')
   if (!el) return

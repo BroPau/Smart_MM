@@ -405,7 +405,7 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
                     fields.append(["label": backlinkFieldLabel(w), "value": v])
                 }
             }
-            var dict: [String: Any] = ["name": p.name, "type": p.type]
+            var dict: [String: Any] = ["name": p.name, "type": p.type, "file": p.file, "fm": fm]
             if !fields.isEmpty { dict["fields"] = fields }
             out.append(dict)
         }
@@ -444,7 +444,7 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
                     fields.append(["label": backlinkFieldLabel(w), "value": v])
                 }
             }
-            var dict: [String: Any] = ["name": p.name, "type": p.type]
+            var dict: [String: Any] = ["name": p.name, "type": p.type, "file": p.file, "fm": fm]
             if !fields.isEmpty { dict["fields"] = fields }
             out.append(dict)
         }
@@ -455,10 +455,10 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
     /// 人员(Person) 重点展示职位/电话/电子邮箱等；其余类型由前端约定择优展示。
     private static func referenceWantedKeys(for type: String) -> [String] {
         switch type {
-        case "person":  return ["company", "title", "phone", "email", "department"]
-        case "company": return ["所属行业", "官网", "联系人"]
-        case "chip":    return ["品牌", "具体型号", "厂商", "工艺节点"]
-        case "project": return ["概要", "summary", "status", "负责人", "时间"]
+        case "person":  return ["职位", "电话", "邮箱"]
+        case "company": return ["公司类型", "所属行业"]
+        case "chip":    return ["品牌", "类别"]
+        case "project": return ["概要", "状态", "负责人", "时间"]
         case "topic":   return ["分类", "领域"]
         case "method":  return ["类别", "应用"]
         default:        return []
@@ -512,8 +512,142 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         case "类别": return "类别"
         case "应用": return "应用"
         case "职能范围": return "职能范围"
+        case "职位", "title": return "职位"
+        case "电话", "phone": return "电话"
+        case "邮箱", "email": return "邮箱"
+        case "公司类型", "companyType": return "公司类型"
         default: return key
         }
+    }
+
+    // MARK: - v2.2.69 双链可编辑表格写回
+
+    /// 完整解析 frontmatter 块（保留列表字段），返回有序键值对与正文。
+    private struct RefFMValue {
+        enum Kind { case scalar, list }
+        let kind: Kind
+        let scalar: String
+        let items: [String]
+    }
+
+    private func parseFrontmatterFull(_ text: String) -> (fm: [(String, RefFMValue)], body: String) {
+        let lines = text.components(separatedBy: "\n")
+        guard lines.first?.trimmingCharacters(in: .whitespaces) == "---" else {
+            return ([], text)
+        }
+        var fm: [(String, RefFMValue)] = []
+        var currentIndex: Int?
+        var i = 1
+        while i < lines.count {
+            let raw = lines[i]
+            let s = raw.trimmingCharacters(in: .whitespaces)
+            if s == "---" { i += 1; break }
+            if raw.hasPrefix("  - ") || raw.hasPrefix("\t- ") {
+                let item = String(raw.dropFirst(2).trimmingCharacters(in: .whitespaces))
+                if let idx = currentIndex {
+                    let v = fm[idx].1
+                    var items = v.items; items.append(item)
+                    fm[idx] = (fm[idx].0, RefFMValue(kind: .list, scalar: "", items: items))
+                }
+                i += 1; continue
+            }
+            if let colon = raw.range(of: ":") {
+                let k = String(raw[raw.startIndex..<colon.lowerBound]).trimmingCharacters(in: .whitespaces)
+                let v = String(raw[raw.index(after: colon.lowerBound)...]).trimmingCharacters(in: .whitespaces)
+                if k.isEmpty { i += 1; continue }
+                if v.isEmpty {
+                    fm.append((k, RefFMValue(kind: .list, scalar: "", items: [])))
+                } else {
+                    fm.append((k, RefFMValue(kind: .scalar, scalar: v, items: [])))
+                }
+                currentIndex = fm.count - 1
+            }
+            i += 1
+        }
+        let body = lines.suffix(from: i).joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return (fm, body)
+    }
+
+    private func serializeFrontmatterFull(_ fm: [(String, RefFMValue)]) -> String {
+        guard !fm.isEmpty else { return "" }
+        var out = ["---"]
+        for (k, val) in fm {
+            if val.kind == .list {
+                out.append("\(k):")
+                for it in val.items where !it.isEmpty {
+                    out.append("  - \(it)")
+                }
+            } else {
+                out.append("\(k): \(quoteFMValue(val.scalar))")
+            }
+        }
+        out.append("---")
+        return out.joined(separator: "\n")
+    }
+
+    private func quoteFMValue(_ v: String) -> String {
+        if v.contains(":") || v.contains("#") || v.hasPrefix(" ") || v.hasSuffix(" ") ||
+           v.hasPrefix("\"") || v.contains("\"") || v.contains("[") || v.contains("]") {
+            return "\"" + v.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+        }
+        return v
+    }
+
+    private func setFMValue(_ fm: inout [(String, RefFMValue)], key: String, scalar: String) {
+        if let idx = fm.firstIndex(where: { $0.0 == key }) {
+            fm[idx] = (key, RefFMValue(kind: .scalar, scalar: scalar, items: []))
+        } else {
+            fm.append((key, RefFMValue(kind: .scalar, scalar: scalar, items: [])))
+        }
+    }
+
+    private func removeFMValue(_ fm: inout [(String, RefFMValue)], key: String) {
+        fm.removeAll { $0.0 == key }
+    }
+
+    /// 改写某 wiki 页 frontmatter（保留列表字段），写回后触发 onDone。
+    /// 实体页统一走 pipeline --edit-wiki-page（与保存唯一写入口一致）；首页直写。
+    private func rewriteFrontmatter(of file: String, isHome: Bool, mutate: ([(String, RefFMValue)]) -> [(String, RefFMValue)], onDone: @escaping () -> Void) {
+        let url = isHome ? homeFile : wikiPagesDir.appendingPathComponent(file)
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { onDone(); return }
+        let (fm, body) = parseFrontmatterFull(text)
+        let newFm = mutate(fm)
+        let newText = serializeFrontmatterFull(newFm)
+        let full = (newFm.isEmpty ? "" : newText + "\n\n") + body
+        if isHome {
+            try? full.write(to: url, atomically: true, encoding: .utf8)
+            onDone()
+        } else {
+            guard let page = pages.first(where: { $0.file == file }) else { onDone(); return }
+            saveEntityPageViaPipeline(page: page, markdown: full) { onDone() }
+        }
+    }
+
+    /// 把某页正文里指向 oldLink 的 [[oldLink]] / [[oldLink|alias]] 改写为 [[newLink]]，保留别名。
+    private func relabelWikiLinkInFile(file: String, oldLink: String, newLink: String, isHome: Bool, onDone: @escaping () -> Void) {
+        let url = isHome ? homeFile : wikiPagesDir.appendingPathComponent(file)
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { onDone(); return }
+        let pattern = #"\[\["# + NSRegularExpression.escapedPattern(for: oldLink) + #"((?:\|[^\]]+)?)\]\]"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { onDone(); return }
+        let newText = regex.stringByReplacingMatches(in: text, options: [], range: NSRange(text.startIndex..., in: text), withTemplate: "[[\(newLink)$1]]")
+        if isHome {
+            try? newText.write(to: url, atomically: true, encoding: .utf8)
+            onDone()
+        } else {
+            guard let page = pages.first(where: { $0.file == file }) else { onDone(); return }
+            saveEntityPageViaPipeline(page: page, markdown: newText) { onDone() }
+        }
+    }
+
+    /// 重新计算当前页的出链 / 入链明细并下发表格（写回后刷新视图）
+    private func refreshCurrentRefs() {
+        guard let page = selectedPage else { return }
+        let outgoing = referencesFromThis(for: page)
+        let incoming = referencesToThis(for: page)
+        currentOutgoing = outgoing
+        currentIncoming = incoming
+        editor.setPageReferencesOut(outgoing)
+        editor.setPageReferences(incoming)
     }
 
     private func selectPage(_ page: WikiPage) {
@@ -1050,7 +1184,7 @@ extension WikiViewController: MarkdownEditorViewDelegate, SaveablePage {
     /// v2.2.60：实体 Wiki 页保存 —— 调 `--edit-wiki-page` 的 markdown 形态
     /// （payload = `{original_name, markdown}`，见 pipeline.py `_spec_from_markdown`）。
     /// 失败时【绝不】刷新列表或重载编辑器：用户正文原样留在编辑器里，修正后可再次保存。
-    private func saveEntityPageViaPipeline(page: WikiPage, markdown: String) {
+    private func saveEntityPageViaPipeline(page: WikiPage, markdown: String, onDone: (() -> Void)? = nil) {
         setBusy(true, status: "保存中…")
         let payload: [String: Any] = ["original_name": page.name, "markdown": markdown]
         PipelineRunner.shared.run(script: nil, arguments: ["--edit-wiki-page", jsonString(payload)]) { _ in }
@@ -1077,6 +1211,7 @@ extension WikiViewController: MarkdownEditorViewDelegate, SaveablePage {
             } else {
                 self.refreshPagesFromPipeline(silent: true)
             }
+            onDone?()
         }
     }
 
@@ -1150,6 +1285,67 @@ extension WikiViewController: MarkdownEditorViewDelegate, SaveablePage {
             }
             // 新建的页已入库：刷新页面名列表（双链自动补全 / 缺失页判定）
             self.editor.setWikiPages(self.pages.flatMap { [$0.name] + $0.aliases })
+        }
+    }
+
+    /// v2.2.69：双链可编辑表格单元格写回 .md。
+    /// - field "name"：out 改当前页正文 [[oldName]]→[[value]]（同步 DOM 后保存）；in 改对方页里指向当前页的 [[当前页]]→[[value]]。
+    /// - field "type"：写回 rowFile 的 type frontmatter。
+    /// - field "attr"/"customval"：写回 rowFile 的指定 frontmatter 键（空值删键）。
+    /// - field "customadd"：rowFile 新增自定义 frontmatter 键=value。
+    /// - field "customdel"：删除 rowFile 的指定 frontmatter 键。
+    /// rowFile 即表格该行对应 wiki 页文件名；name(out) 时忽略 rowFile，改写当前页。
+    func markdownEditorDidRequestEditPageRef(_ editor: MarkdownEditorView, mode: String, oldName: String, field: String, fmKey: String?, value: String?, rowFile: String?) {
+        let v = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        switch field {
+        case "name":
+            guard let current = selectedPage else { return }
+            if mode == "in" {
+                // 改写对方页（rowFile）里指向当前页的 [[当前页]] → [[新名]
+                guard let rf = rowFile, !rf.isEmpty else { return }
+                relabelWikiLinkInFile(file: rf, oldLink: current.name, newLink: v, isHome: false) { [weak self] in
+                    self?.refreshCurrentRefs()
+                }
+            } else {
+                // out：改写当前页正文里的 [[oldName]] → [[新名]]，同步编辑器 DOM 后保存（写当前页）
+                self.pendingSavePage = current
+                self.editor.replaceWikiLink(oldName, v)
+                self.editor.requestSave()
+                // 保存为异步，稍后刷新表格以反映新链接
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
+                    self?.refreshCurrentRefs()
+                }
+            }
+        case "type":
+            guard let rf = rowFile, !rf.isEmpty else { return }
+            rewriteFrontmatter(of: rf, isHome: false, mutate: { fm in
+                var fm = fm
+                if v.isEmpty { removeFMValue(&fm, key: "type") } else { setFMValue(&fm, key: "type", scalar: v) }
+                return fm
+            }) { [weak self] in self?.refreshCurrentRefs() }
+        case "attr", "customval":
+            guard let rf = rowFile, !rf.isEmpty, let k = fmKey, !k.isEmpty else { return }
+            rewriteFrontmatter(of: rf, isHome: false, mutate: { fm in
+                var fm = fm
+                if v.isEmpty { removeFMValue(&fm, key: k) } else { setFMValue(&fm, key: k, scalar: v) }
+                return fm
+            }) { [weak self] in self?.refreshCurrentRefs() }
+        case "customadd":
+            guard let rf = rowFile, !rf.isEmpty, let k = fmKey, !k.isEmpty else { return }
+            rewriteFrontmatter(of: rf, isHome: false, mutate: { fm in
+                var fm = fm
+                setFMValue(&fm, key: k, scalar: v)
+                return fm
+            }) { [weak self] in self?.refreshCurrentRefs() }
+        case "customdel":
+            guard let rf = rowFile, !rf.isEmpty, let k = fmKey, !k.isEmpty else { return }
+            rewriteFrontmatter(of: rf, isHome: false, mutate: { fm in
+                var fm = fm
+                removeFMValue(&fm, key: k)
+                return fm
+            }) { [weak self] in self?.refreshCurrentRefs() }
+        default:
+            break
         }
     }
 
