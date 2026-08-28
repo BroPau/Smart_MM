@@ -51,6 +51,7 @@ fileprivate final class WikiTextView: NSTextView {
         let point = self.convert(event.locationInWindow, from: nil)
         let idx = characterIndexForInsertion(at: point)
         if let link = owner?.wikilinkAt(idx) {
+            NSLog("[Meetinsight/wiki] wikilink click: name=%@ anchor=%@ at idx=%d", link.name, link.anchor ?? "<nil>", idx)
             owner?.delegate?.markdownEditorDidClickWikilink(owner!, name: link.name, anchor: link.anchor)
             return
         }
@@ -270,12 +271,13 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
     ///
     /// 顺序很重要：
     /// 1. reset → 全部回到 bodyFont + textColor
-    /// 2. 引用 / 列表 段落样式（不影响字体）
-    /// 3. 标题行字体（覆盖到整行）
-    /// 4. 围栏代码块（等宽 + 背景）
-    /// 5. 行内代码（等宽 + 背景）
-    /// 6. 粗体 / 斜体（在当前字体上叠加 trait，保留标题字号）
-    /// 7. [[双链]] 着色（最后，避免被覆盖）
+    /// 2. frontmatter 段：灰色背景 + 键名加粗 + 紫色（YAML 字段视觉提示）
+    /// 3. 段落级：引用 / 列表（frontmatter 段内 YAML 列表也合规缩进）
+    /// 4. 标题行字体（覆盖到整行）
+    /// 5. 围栏代码块（等宽 + 背景）
+    /// 6. 行内代码（等宽 + 背景）
+    /// 7. 粗体 / 斜体（在当前字体上叠加 trait，保留标题字号）
+    /// 8. [[双链]] 着色（最后，避免被覆盖）
     private func recomputeMarkdownStyles() {
         guard let storage = textView.textStorage else { return }
         let full = storage.string as NSString
@@ -288,28 +290,80 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         // 1. 重置为正文基础
         storage.setAttributes([.font: bodyFont, .foregroundColor: NSColor.textColor], range: fullRange)
 
-        // 2. 段落级：引用 / 列表
+        // 2. frontmatter 段灰色背景 + 键名加粗 + 紫色
+        applyFrontmatterStyles(in: storage, full: full)
+
+        // 3. 段落级
         applyBlockquoteStyles(in: storage, full: full)
         applyListStyles(in: storage, full: full)
 
-        // 3. 标题行
+        // 4. 标题行
         applyHeaderStyles(in: storage, full: full)
 
-        // 4. 围栏代码块
+        // 5. 围栏代码块
         applyCodeBlockStyles(in: storage, full: full)
 
-        // 5. 行内代码
+        // 6. 行内代码
         applyInlineCodeStyles(in: storage, full: full)
 
-        // 6. 粗体 / 斜体（在当前字体上叠加 trait，保留标题字号）
+        // 7. 粗体 / 斜体
         applyBoldStyles(in: storage, full: full)
         applyItalicStyles(in: storage, full: full)
 
-        // 7. [[双链]] 着色（最后）
+        // 8. [[双链]] 着色
         applyWikilinkColors(in: storage, full: full)
 
         storage.endEditing()
         suppressDirty = false
+    }
+
+    /// frontmatter 段（顶部 `--- ... ---`）：整段背景淡化 + 键名加粗 + 主题色。
+    /// 若文件无 frontmatter（开头不是 `---`），则不做任何修改。
+    private func applyFrontmatterStyles(in storage: NSTextStorage, full: NSString) {
+        let str = full as String
+        let lines = str.components(separatedBy: "\n")
+        guard lines.count >= 2, lines[0].trimmingCharacters(in: .whitespaces) == "---" else { return }
+        var secondDashLine = -1
+        for i in 1..<lines.count {
+            if lines[i].trimmingCharacters(in: .whitespaces) == "---" {
+                secondDashLine = i
+                break
+            }
+        }
+        guard secondDashLine > 0 else { return }
+        // 计算 frontmatter 段的 NSRange（包含末尾 `---` 与换行）
+        var loc = 0
+        for i in 0..<secondDashLine {
+            loc += (lines[i] as NSString).length + 1  // +1 for newline
+        }
+        let fmEndLoc = loc + (lines[secondDashLine] as NSString).length
+        let fmRange = NSRange(location: 0, length: fmEndLoc)
+
+        // 整段背景弱化（区分 frontmatter 块 vs 正文）
+        let fmBg = NSColor.controlBackgroundColor.withAlphaComponent(0.6)
+        storage.addAttribute(.backgroundColor, value: fmBg, range: fmRange)
+
+        // 键名加粗 + 主题色（Capture group 1 是键名）
+        guard let re = try? NSRegularExpression(pattern: #"^([A-Za-z_\u4e00-\u9fa5][A-Za-z0-9_\u4e00-\u9fa5]*)\s*:"#, options: .anchorsMatchLines) else { return }
+        let matches = re.matches(in: str, range: NSRange(location: 0, length: fmEndLoc))
+        let keyFont: NSFont
+        let boldDescriptor = bodyFont.fontDescriptor.withSymbolicTraits(.bold)
+        if let f = NSFont(descriptor: boldDescriptor, size: bodyFont.pointSize) {
+            keyFont = f
+        } else {
+            keyFont = bodyFont
+        }
+        let accent = NSColor.controlAccentColor
+        storage.beginEditing()
+        for m in matches {
+            // 跳过顶部的 `---` 行（len("---")=3，单行长度小于 key 长度，避免它被染）
+            if m.range.location < (lines[0] as NSString).length + 1 { continue }
+            // 跳过结尾的 `---` 行
+            if m.range.location >= loc { continue }
+            storage.addAttribute(.font, value: keyFont, range: m.range(at: 1))
+            storage.addAttribute(.foregroundColor, value: accent, range: m.range(at: 1))
+        }
+        storage.endEditing()
     }
 
     // MARK: - 样式辅助
@@ -336,14 +390,20 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
     }
 
     /// 粗体 `**text**`：在当前字体上叠加 bold trait（保留标题/正文字号）。
+    /// 用 `fontDescriptor.withSymbolicTraits(.bold)` 重建字体（对 systemFont 同样可靠——NSFontManager
+    /// 在系统字体上转换有时不变 trait，descriptor 重建显式合成新 font）。
     private func applyBoldStyles(in storage: NSTextStorage, full: NSString) {
         guard let re = try? NSRegularExpression(pattern: #"\*\*([^\*\n]+?)\*\*"#) else { return }
         let matches = re.matches(in: full as String, range: NSRange(location: 0, length: full.length))
         for m in matches {
             let r = m.range(at: 1)
             let current = (storage.attribute(.font, at: r.location, effectiveRange: nil) as? NSFont) ?? bodyFont
-            let bold = NSFontManager.shared.convert(current, toHaveTrait: .boldFontMask)
-            storage.addAttribute(.font, value: bold, range: r)
+            var merged: NSFontDescriptor.SymbolicTraits = .bold
+            if current.fontDescriptor.symbolicTraits.contains(.italic) { merged.insert(.italic) }
+            let descriptor = current.fontDescriptor.withSymbolicTraits(merged)
+            if let f = NSFont(descriptor: descriptor, size: current.pointSize) {
+                storage.addAttribute(.font, value: f, range: r)
+            }
         }
     }
 
@@ -354,8 +414,12 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         for m in matches {
             let r = m.range(at: 1)
             let current = (storage.attribute(.font, at: r.location, effectiveRange: nil) as? NSFont) ?? bodyFont
-            let italic = NSFontManager.shared.convert(current, toHaveTrait: .italicFontMask)
-            storage.addAttribute(.font, value: italic, range: r)
+            var merged: NSFontDescriptor.SymbolicTraits = .italic
+            if current.fontDescriptor.symbolicTraits.contains(.bold) { merged.insert(.bold) }
+            let descriptor = current.fontDescriptor.withSymbolicTraits(merged)
+            if let f = NSFont(descriptor: descriptor, size: current.pointSize) {
+                storage.addAttribute(.font, value: f, range: r)
+            }
         }
     }
 
