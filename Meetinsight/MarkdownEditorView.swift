@@ -45,18 +45,14 @@ extension MarkdownEditorViewDelegate {
 fileprivate final class WikiTextView: NSTextView {
     weak var owner: MarkdownEditorView?
 
-    /// 点击命中 [[双链]] 时跳转；编辑模式下需 ⌘/Ctrl+Click，纯预览（不可编辑）模式下普通点击即跳转。
+    /// 点击命中 [[双链]] 时跳转。**Typora 风格**：编辑模式下点双链也直接跳转（不要求 ⌘/Ctrl+Click），
+    /// 让双链视觉上可点击；想定位光标到双链文字旁边，点击双链前后位置即可。
     override func mouseDown(with event: NSEvent) {
         let point = self.convert(event.locationInWindow, from: nil)
         let idx = characterIndexForInsertion(at: point)
         if let link = owner?.wikilinkAt(idx) {
-            let wantsNav = !isEditable
-                || event.modifierFlags.contains(.command)
-                || event.modifierFlags.contains(.control)
-            if wantsNav {
-                owner?.delegate?.markdownEditorDidClickWikilink(owner!, name: link.name, anchor: link.anchor)
-                return
-            }
+            owner?.delegate?.markdownEditorDidClickWikilink(owner!, name: link.name, anchor: link.anchor)
+            return
         }
         super.mouseDown(with: event)
     }
@@ -92,6 +88,8 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
     private var wikiPageNames: Set<String> = []
     /// 自动双链目标名（仅 Wiki 页名），加载纪要时把裸词包裹为 [[名称]]。
     private var autoLinkNames: [String] = []
+    /// v2.2.71b+：markdown 样式重算的防抖定时器（textDidChange 后 300ms 内合并多次输入）。
+    private var styleDebounceTimer: Timer?
 
     // MARK: - 初始化
     override init(frame frameRect: NSRect) {
@@ -134,7 +132,8 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         tv.isEditable = false
         tv.isSelectable = true
         tv.allowsUndo = true
-        tv.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        // v2.2.71b+：正文用系统字体（更贴 Typora），代码/代码块仍用等宽字体（在 recomputeMarkdownStyles 里覆盖）。
+        tv.font = NSFont.systemFont(ofSize: 14)
         tv.textColor = .textColor
         tv.backgroundColor = .textBackgroundColor
         tv.drawsBackground = true
@@ -177,7 +176,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         suppressDirty = true
         textView.isEditable = editable
         textView.string = finalMd
-        recomputeWikiLinkHighlight()
+        recomputeMarkdownStyles()
         suppressDirty = false
         isDirty = false
     }
@@ -192,7 +191,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
     /// 推送现有页面名列表（含别名），供双链缺失页判定 + 自动双链。
     func setWikiPages(_ names: [String]) {
         wikiPageNames = Set(names.map { $0.lowercased() })
-        recomputeWikiLinkHighlight()
+        recomputeMarkdownStyles()
     }
 
     /// 推送「自动双链」目标名列表（仅 Wiki 页名）；加载纪要时把正文里出现的裸词包裹为 [[名称]]。
@@ -217,6 +216,16 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
     func textDidChange(_ notification: Notification) {
         guard !suppressDirty else { return }
         isDirty = true
+        // 防抖 300ms 后重算 markdown 样式（标题/粗体/斜体/代码/双链着色），
+        // 避免逐字符重算破坏 typingAttributes / 光标位置 / 输入流畅度。
+        scheduleStyleUpdate()
+    }
+
+    private func scheduleStyleUpdate() {
+        styleDebounceTimer?.invalidate()
+        styleDebounceTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
+            self?.recomputeMarkdownStyles()
+        }
     }
 
     // MARK: - 内部：双链命中检测
@@ -247,19 +256,164 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         return nil
     }
 
-    // MARK: - 内部：双链高亮（TextKit 2 属性）
+    // MARK: - 内部：Markdown 样式渲染（Typora 风格视觉样式）
 
-    /// 扫描正文所有 [[双链]]，按「是否存在」着色（存在=链接色，缺失=红色）。
-    /// 作用在底层 NSTextStorage（TextKit 2 下 NSTextView.textStorage 即 contentStorage 的 backing store）。
-    private func recomputeWikiLinkHighlight() {
+    /// 基础字体（正文 / 非代码）。代码 / 代码块用 monospacedSystemFont 覆盖。
+    private let bodyFont = NSFont.systemFont(ofSize: 14)
+    /// 代码字体（行内 `code` 与围栏代码块共用）。
+    private let codeFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+    /// 代码背景色（弱对比，沿用系统色，跟随深色模式）。
+    private let codeBg = NSColor.controlBackgroundColor
+
+    /// 全量重算 markdown 样式：先重置为正文基础属性，再依次叠加各 markdown 构造的样式，
+    /// 最后再叠 [[双链]] 着色（确保不被其他样式覆盖）。
+    ///
+    /// 顺序很重要：
+    /// 1. reset → 全部回到 bodyFont + textColor
+    /// 2. 引用 / 列表 段落样式（不影响字体）
+    /// 3. 标题行字体（覆盖到整行）
+    /// 4. 围栏代码块（等宽 + 背景）
+    /// 5. 行内代码（等宽 + 背景）
+    /// 6. 粗体 / 斜体（在当前字体上叠加 trait，保留标题字号）
+    /// 7. [[双链]] 着色（最后，避免被覆盖）
+    private func recomputeMarkdownStyles() {
         guard let storage = textView.textStorage else { return }
         let full = storage.string as NSString
-        let range = NSRange(location: 0, length: full.length)
-        guard let re = try? NSRegularExpression(pattern: #"\[\[([^\[\]\n]+?)(?:\|([^\[\]\n]+?))?\]\]"#) else { return }
+        let fullRange = NSRange(location: 0, length: full.length)
+        guard fullRange.length > 0 else { return }
+
         suppressDirty = true
         storage.beginEditing()
-        storage.removeAttribute(.foregroundColor, range: range)
-        let matches = re.matches(in: full as String, range: range)
+
+        // 1. 重置为正文基础
+        storage.setAttributes([.font: bodyFont, .foregroundColor: NSColor.textColor], range: fullRange)
+
+        // 2. 段落级：引用 / 列表
+        applyBlockquoteStyles(in: storage, full: full)
+        applyListStyles(in: storage, full: full)
+
+        // 3. 标题行
+        applyHeaderStyles(in: storage, full: full)
+
+        // 4. 围栏代码块
+        applyCodeBlockStyles(in: storage, full: full)
+
+        // 5. 行内代码
+        applyInlineCodeStyles(in: storage, full: full)
+
+        // 6. 粗体 / 斜体（在当前字体上叠加 trait，保留标题字号）
+        applyBoldStyles(in: storage, full: full)
+        applyItalicStyles(in: storage, full: full)
+
+        // 7. [[双链]] 着色（最后）
+        applyWikilinkColors(in: storage, full: full)
+
+        storage.endEditing()
+        suppressDirty = false
+    }
+
+    // MARK: - 样式辅助
+
+    /// 标题行：1~6 个 `#` + 空格开头，**整行**用对应字号 + bold。
+    private func applyHeaderStyles(in storage: NSTextStorage, full: NSString) {
+        guard let re = try? NSRegularExpression(pattern: #"^(#{1,6})\s+(.*)$"#, options: .anchorsMatchLines) else { return }
+        let matches = re.matches(in: full as String, range: NSRange(location: 0, length: full.length))
+        for m in matches {
+            let hashes = full.substring(with: m.range(at: 1))
+            let size: CGFloat
+            switch hashes.count {
+            case 1: size = 24
+            case 2: size = 20
+            case 3: size = 17
+            case 4: size = 15
+            case 5: size = 14
+            default: size = 13
+            }
+            let headerFont = NSFont.systemFont(ofSize: size, weight: .bold)
+            // 整行应用（保留 ## 符号可见，但与正文同字体大小，视觉上是「带 # 的标题」）
+            storage.addAttribute(.font, value: headerFont, range: m.range)
+        }
+    }
+
+    /// 粗体 `**text**`：在当前字体上叠加 bold trait（保留标题/正文字号）。
+    private func applyBoldStyles(in storage: NSTextStorage, full: NSString) {
+        guard let re = try? NSRegularExpression(pattern: #"\*\*([^\*\n]+?)\*\*"#) else { return }
+        let matches = re.matches(in: full as String, range: NSRange(location: 0, length: full.length))
+        for m in matches {
+            let r = m.range(at: 1)
+            let current = (storage.attribute(.font, at: r.location, effectiveRange: nil) as? NSFont) ?? bodyFont
+            let bold = NSFontManager.shared.convert(current, toHaveTrait: .boldFontMask)
+            storage.addAttribute(.font, value: bold, range: r)
+        }
+    }
+
+    /// 斜体 `*text*`：用 lookbehind/lookahead 避免误匹配 `**bold**` 里的 `*`。
+    private func applyItalicStyles(in storage: NSTextStorage, full: NSString) {
+        guard let re = try? NSRegularExpression(pattern: #"(?<!\*)\*([^\*\n]+?)\*(?!\*)"#) else { return }
+        let matches = re.matches(in: full as String, range: NSRange(location: 0, length: full.length))
+        for m in matches {
+            let r = m.range(at: 1)
+            let current = (storage.attribute(.font, at: r.location, effectiveRange: nil) as? NSFont) ?? bodyFont
+            let italic = NSFontManager.shared.convert(current, toHaveTrait: .italicFontMask)
+            storage.addAttribute(.font, value: italic, range: r)
+        }
+    }
+
+    /// 行内代码：`` `text` ``
+    private func applyInlineCodeStyles(in storage: NSTextStorage, full: NSString) {
+        guard let re = try? NSRegularExpression(pattern: #"`([^`\n]+?)`"#) else { return }
+        let matches = re.matches(in: full as String, range: NSRange(location: 0, length: full.length))
+        for m in matches {
+            let r = m.range(at: 1)
+            storage.addAttributes([.font: codeFont, .backgroundColor: codeBg], range: r)
+        }
+    }
+
+    /// 围栏代码块：```...```（多行）。
+    private func applyCodeBlockStyles(in storage: NSTextStorage, full: NSString) {
+        guard let re = try? NSRegularExpression(pattern: #"```[\s\S]*?```"#, options: []) else { return }
+        let matches = re.matches(in: full as String, range: NSRange(location: 0, length: full.length))
+        for m in matches {
+            storage.addAttributes([.font: codeFont, .backgroundColor: codeBg], range: m.range)
+        }
+    }
+
+    /// 列表：`- ` / `* ` / `+ ` / `1. ` 开头，整行段落加左侧缩进。
+    private func applyListStyles(in storage: NSTextStorage, full: NSString) {
+        guard let re = try? NSRegularExpression(pattern: #"^(\s*)([-*+]|\d+\.)\s+"#, options: .anchorsMatchLines) else { return }
+        let str = full as String
+        let matches = re.matches(in: str, range: NSRange(location: 0, length: full.length))
+        for m in matches {
+            guard let swiftRange = Range(m.range, in: str) else { continue }
+            let lineSwiftRange = str.lineRange(for: swiftRange)
+            let lineNSRange = NSRange(lineSwiftRange, in: str)
+            let p = NSMutableParagraphStyle()
+            p.headIndent = 20
+            p.firstLineHeadIndent = 0
+            storage.addAttribute(.paragraphStyle, value: p, range: lineNSRange)
+        }
+    }
+
+    /// 引用：`> ` 开头，整行段落加左侧缩进 + 斜体。
+    private func applyBlockquoteStyles(in storage: NSTextStorage, full: NSString) {
+        guard let re = try? NSRegularExpression(pattern: #"^>\s+"#, options: .anchorsMatchLines) else { return }
+        let str = full as String
+        let matches = re.matches(in: str, range: NSRange(location: 0, length: full.length))
+        for m in matches {
+            guard let swiftRange = Range(m.range, in: str) else { continue }
+            let lineSwiftRange = str.lineRange(for: swiftRange)
+            let lineNSRange = NSRange(lineSwiftRange, in: str)
+            let p = NSMutableParagraphStyle()
+            p.headIndent = 20
+            p.firstLineHeadIndent = 20
+            storage.addAttribute(.paragraphStyle, value: p, range: lineNSRange)
+        }
+    }
+
+    /// [[双链]] 着色：存在 = 链接蓝；缺失 = 系统红。**最后应用**，避免被其他样式覆盖。
+    private func applyWikilinkColors(in storage: NSTextStorage, full: NSString) {
+        guard let re = try? NSRegularExpression(pattern: #"\[\[([^\[\]\n]+?)(?:\|([^\[\]\n]+?))?\]\]"#) else { return }
+        let matches = re.matches(in: full as String, range: NSRange(location: 0, length: full.length))
         for m in matches {
             let inner = (full.substring(with: m.range(at: 1))).trimmingCharacters(in: .whitespaces)
             var page = inner
@@ -272,8 +426,6 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
             let color: NSColor = missing ? .systemRed : .linkColor
             storage.addAttribute(.foregroundColor, value: color, range: m.range)
         }
-        storage.endEditing()
-        suppressDirty = false
     }
 
     // MARK: - 内部：保存前剥离双链派生段
