@@ -37,7 +37,7 @@ import Cocoa
 
 // 构建版本标记（部署校验用：rsync 前断言产物二进制含此字符串，防止误取陈旧 DerivedData 副本）。
 // 用 NSLog 引用，确保该字面量被保留进二进制、不会被编译器优化掉。
-fileprivate let MM_EDITOR_BUILD = "2.2.71i"
+fileprivate let MM_EDITOR_BUILD = "2.2.71j"
 
 protocol MarkdownEditorViewDelegate: AnyObject {
     /// 用户点击「保存」后触发，回传当前编辑的 Markdown 源码（含 frontmatter，已剥离双链派生段）。
@@ -86,7 +86,7 @@ fileprivate final class WikiTextView: NSTextView {
     }
 }
 
-final class MarkdownEditorView: NSView, NSTextViewDelegate {
+final class MarkdownEditorView: NSView, NSTextViewDelegate, NSLayoutManagerDelegate {
 
     weak var delegate: MarkdownEditorViewDelegate?
 
@@ -108,6 +108,12 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
     private var autoLinkNames: [String] = []
     /// v2.2.71b+：markdown 样式重算的防抖定时器（textDidChange 后 300ms 内合并多次输入）。
     private var styleDebounceTimer: Timer?
+
+    // MARK: - Typora 式零符号渲染：要隐藏的 markdown 语法字符集合
+    /// v2.2.71j：通过 NSLayoutManagerDelegate 的 shouldGenerateGlyphs: 把集合中字符的
+    /// glyph 设为 .null（零宽不可见），但底层存储仍是原始 markdown（编辑/保存不变）。
+    /// 必须在 textView.string= / storage.endEditing() 之前设置，否则 glyph 已用空集合生成。
+    private var hiddenChars: IndexSet = IndexSet()
 
     // MARK: - 初始化
     override init(frame frameRect: NSRect) {
@@ -134,6 +140,8 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         // （v2.2.71h：不用 TextKit 2 的 NSTextContentStorage/NSTextLayoutManager，
         //  因其内部 NSConcreteTextStorage 与我们的 contentStorage 不同步，样式不渲染。）
         textStorage.addLayoutManager(layoutManager)
+        // v2.2.71j：Typora 零符号渲染——glyph 生成回调走 delegate，把语法符号隐藏。
+        layoutManager.delegate = self
         let textContainer = NSTextContainer(containerSize: CGSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
         textContainer.widthTracksTextView = true
         textContainer.heightTracksTextView = false
@@ -197,6 +205,9 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         let finalMd = autoLink ? applyAutoLink(to: markdown, names: autoLinkNames) : markdown
         suppressDirty = true
         textView.isEditable = editable
+        // v2.2.71j：先算 hiddenChars 再 setString——string 触发首次 glyph 生成，
+        // delegate 的 shouldGenerateGlyphs 读当前 hiddenChars 把语法符号 null 掉。
+        hiddenChars = indexSet(from: computeHiddenCharSet(finalMd))
         textView.string = finalMd
         recomputeMarkdownStyles()
         suppressDirty = false
@@ -248,6 +259,36 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         styleDebounceTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
             self?.recomputeMarkdownStyles()
         }
+    }
+
+    // MARK: - NSLayoutManagerDelegate（Typora 零符号渲染的关键钩子）
+
+    /// 把 hiddenChars 集合内的字符 glyph 设为 .null（零宽不可见），其余保持原属性。
+    /// 底层 textStorage 仍是原始 markdown，仅显示层隐藏语法符号。
+    func layoutManager(_ layoutManager: NSLayoutManager,
+                       shouldGenerateGlyphs glyphs: UnsafePointer<CGGlyph>,
+                       properties: UnsafePointer<NSLayoutManager.GlyphProperty>,
+                       characterIndexes: UnsafePointer<Int>,
+                       font: NSFont,
+                       forGlyphRange glyphRange: NSRange) -> Int {
+        var newProps = [NSLayoutManager.GlyphProperty](repeating: .null, count: glyphRange.length)
+        for i in 0..<glyphRange.length {
+            let charIndex = characterIndexes[i]
+            newProps[i] = hiddenChars.contains(charIndex) ? .null : properties[i]
+        }
+        layoutManager.setGlyphs(glyphs,
+                                properties: &newProps,
+                                characterIndexes: characterIndexes,
+                                font: font,
+                                forGlyphRange: glyphRange)
+        return glyphRange.length
+    }
+
+    /// Set<Int> → IndexSet 桥接（delegate 方法用 IndexSet 查询，O(1) 命中）。
+    private func indexSet(from set: Set<Int>) -> IndexSet {
+        var idx = IndexSet()
+        for v in set { idx.insert(v) }
+        return idx
     }
 
     // MARK: - 内部：双链命中检测
@@ -309,13 +350,21 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         guard let storage = textView.textStorage else { return }
         let raw = storage.string
         let rawLen = (raw as NSString).length
-        guard rawLen > 0 else { return }
+        guard rawLen > 0 else {
+            // 空文档：清空隐藏集合，避免残留上一份文档的符号隐藏规则。
+            hiddenChars = IndexSet()
+            return
+        }
 
         suppressDirty = true
         defer { suppressDirty = false }
 
         let full = raw as NSString
         let fullRange = NSRange(location: 0, length: full.length)
+
+        // v2.2.71j：关键顺序——先算 hiddenChars，再 beginEditing→样式→endEditing。
+        // endEditing 触发 glyph 重生成，delegate 的 shouldGenerateGlyphs 读当前 hiddenChars。
+        hiddenChars = indexSet(from: computeHiddenCharSet(raw as String))
 
         NSLog("[Meetinsight/md] recompute start, len=%d", full.length)
 
@@ -617,5 +666,104 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
             result += ns.substring(from: last)
         }
         return result
+    }
+
+    // MARK: - 内部：Typora 隐藏字符计算（v2.2.71j）
+
+    /// 计算整篇 markdown 中要隐藏的字符索引集合（markdown 语法符号）。
+    /// 注意：本实现对所有行统一隐藏语法符号（满足「完全没有 markdown 符号出现」），
+    /// 不在编辑态对光标所在行 reveal——reveal 逻辑如有需要后续再加。
+    private func computeHiddenCharSet(_ full: String) -> Set<Int> {
+        var hidden = Set<Int>()
+        let lines = full.components(separatedBy: "\n")
+        var lineStarts: [Int] = []
+        var offset = 0
+        for line in lines {
+            lineStarts.append(offset)
+            offset += (line as NSString).length + 1
+        }
+        var fmEnd = -1
+        if lines.count >= 2, lines[0].trimmingCharacters(in: .whitespaces) == "---" {
+            for i in 1..<lines.count {
+                if lines[i].trimmingCharacters(in: .whitespaces) == "---" { fmEnd = i; break }
+            }
+        }
+        var inFence = false
+        func hide(_ r: NSRange) { for i in r.location..<(r.location + r.length) { hidden.insert(i) } }
+
+        for li in 0..<lines.count {
+            let lineStart = lineStarts[li]
+            let lineStr = lines[li]
+            let lineLen = (lineStr as NSString).length
+            if (li == 0 || li == fmEnd), fmEnd >= 0 {
+                hide(NSRange(location: lineStart, length: lineLen))
+                continue
+            }
+            if li > 0, li < fmEnd, fmEnd >= 0 { continue }
+            if let _ = lineStr.range(of: #"^\s*(```|~~~)"#, options: .regularExpression) {
+                inFence.toggle()
+                hide(NSRange(location: lineStart, length: lineLen))
+                continue
+            }
+            if inFence { continue }
+            let ls = lineStr as NSString
+            if let m = try? NSRegularExpression(pattern: #"^(#{1,6})\s+"#, options: []).firstMatch(in: lineStr, range: NSRange(location: 0, length: lineLen)) {
+                let hr = m.range(at: 1)
+                var end = hr.location + hr.length
+                if end < lineLen, ls.character(at: end) == 32 { end += 1 }
+                hide(NSRange(location: lineStart + hr.location, length: end - hr.location))
+            } else if let m = try? NSRegularExpression(pattern: #"^>\s+"#, options: []).firstMatch(in: lineStr, range: NSRange(location: 0, length: lineLen)) {
+                hide(NSRange(location: lineStart + m.range.location, length: m.range.length))
+            } else if let m = try? NSRegularExpression(pattern: #"^([-*+])(\s+)"#, options: []).firstMatch(in: lineStr, range: NSRange(location: 0, length: lineLen)) {
+                hide(NSRange(location: lineStart + m.range(at: 1).location, length: m.range(at: 1).length + 1))
+            } else if let m = try? NSRegularExpression(pattern: #"^(\d+)(\.\s+)"#, options: []).firstMatch(in: lineStr, range: NSRange(location: 0, length: lineLen)) {
+                let dr = m.range(at: 2)
+                hide(NSRange(location: lineStart + dr.location, length: dr.length))
+            }
+            hideInline(in: full, lineNS: NSRange(location: lineStart, length: lineLen), hidden: &hidden)
+        }
+        return hidden
+    }
+
+    /// 行内语法符号隐藏：[[ ]] / ` ` / ** ** / * * 的定界符。
+    private func hideInline(in full: String, lineNS: NSRange, hidden: inout Set<Int>) {
+        let str = (full as NSString).substring(with: lineNS)
+        let lineStart = lineNS.location
+        let lineLen = str.count
+        func alreadyHidden(_ r: NSRange) -> Bool {
+            for i in r.location..<(r.location + r.length) { if hidden.contains(lineStart + i) { return true } }
+            return false
+        }
+        func hideRange(_ r: NSRange) { for i in r.location..<(r.location + r.length) { hidden.insert(lineStart + i) } }
+        func hideDelims(openLoc: Int, openLen: Int, closeLoc: Int, closeLen: Int) {
+            hideRange(NSRange(location: openLoc, length: openLen))
+            hideRange(NSRange(location: closeLoc, length: closeLen))
+        }
+        if let re = try? NSRegularExpression(pattern: #"\[\[([^\[\]\n]+?)(?:\|([^\[\]\n]+?))?\]\]"#) {
+            for m in re.matches(in: str, range: NSRange(location: 0, length: lineLen)) {
+                hideDelims(openLoc: m.range.location, openLen: 2,
+                           closeLoc: m.range.location + m.range.length - 2, closeLen: 2)
+            }
+        }
+        if let re = try? NSRegularExpression(pattern: #"`([^`\n]+?)`"#) {
+            for m in re.matches(in: str, range: NSRange(location: 0, length: lineLen)) {
+                hideDelims(openLoc: m.range.location, openLen: 1,
+                           closeLoc: m.range.location + m.range.length - 1, closeLen: 1)
+            }
+        }
+        if let re = try? NSRegularExpression(pattern: #"\*\*([^\*\n]+?)\*\*"#) {
+            for m in re.matches(in: str, range: NSRange(location: 0, length: lineLen)) {
+                if alreadyHidden(m.range) { continue }
+                hideDelims(openLoc: m.range.location, openLen: 2,
+                           closeLoc: m.range.location + m.range.length - 2, closeLen: 2)
+            }
+        }
+        if let re = try? NSRegularExpression(pattern: #"(?<!\*)\*([^\*\n]+?)\*(?!\*)"#) {
+            for m in re.matches(in: str, range: NSRange(location: 0, length: lineLen)) {
+                if alreadyHidden(m.range) { continue }
+                hideDelims(openLoc: m.range.location, openLen: 1,
+                           closeLoc: m.range.location + m.range.length - 1, closeLen: 1)
+            }
+        }
     }
 }

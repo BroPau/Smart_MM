@@ -55,8 +55,6 @@
 				72414F1B302F2BCB00C89E2C /* Sources */,
 				72414F1C302F2BCB00C89E2C /* Frameworks */,
 				72414F1D302F2BCB00C89E2C /* Resources */,
-				72414FA1302F2BCB00C89E2C /* ShellScript */,
-				72414FA2302F2BCB00C89E2C /* ShellScript */,
 				72414FA3302F2BCB00C89E2C /* ShellScript */,
 			);
 			buildRules = (
@@ -118,40 +116,6 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
-		72414FA1302F2BCB00C89E2C /* ShellScript */ = {
-			isa = PBXShellScriptBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputFileListPaths = (
-			);
-			inputPaths = (
-			);
-			outputFileListPaths = (
-			);
-			outputPaths = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "rm -rf \"${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/tiptap\"\n";
-		};
-		72414FA2302F2BCB00C89E2C /* ShellScript */ = {
-			isa = PBXShellScriptBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputFileListPaths = (
-			);
-			inputPaths = (
-			);
-			outputFileListPaths = (
-			);
-			outputPaths = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "rm -rf \"${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/vditor\"\n";
-		};
 		72414FA3302F2BCB00C89E2C /* ShellScript */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
