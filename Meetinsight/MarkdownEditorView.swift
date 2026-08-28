@@ -129,7 +129,10 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         //   - 没设 autoresizingMask → textView.frame 永远 .zero → documentView 零尺寸 → 整片空白
         // 标准模式：autoresizingMask = [.width]（宽度跟随 scrollView.contentSize，高度由 isVerticallyResizable + 内容决定）
         tv.autoresizingMask = [.width]
-        tv.isRichText = false
+        // 关键：必须 isRichText = true，NSTextView 才会渲染 textStorage 上的字符属性
+        // （字体/颜色/段落样式）。设 false 时视图进入「纯文本模式」，忽略所有 attribute，
+        // 导致 markdown 样式（标题/粗体/双链颜色）全部不上屏——这是前几轮「有显示但不渲染」的根因。
+        tv.isRichText = true
         tv.isEditable = false
         tv.isSelectable = true
         tv.allowsUndo = true
