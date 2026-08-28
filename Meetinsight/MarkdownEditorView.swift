@@ -269,60 +269,71 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
     /// 代码背景色（弱对比，沿用系统色，跟随深色模式）。
     private let codeBg = NSColor.controlBackgroundColor
 
-    /// 全量重算 markdown 样式：先重置为正文基础属性，再依次叠加各 markdown 构造的样式，
-    /// 最后再叠 [[双链]] 着色（确保不被其他样式覆盖）。
+    /// 全量重算 markdown 样式。
     ///
-    /// 顺序很重要：
-    /// 1. reset → 全部回到 bodyFont + textColor
-    /// 2. frontmatter 段：灰色背景 + 键名加粗 + 紫色（YAML 字段视觉提示）
-    /// 3. 段落级：引用 / 列表（frontmatter 段内 YAML 列表也合规缩进）
-    /// 4. 标题行字体（覆盖到整行）
-    /// 5. 围栏代码块（等宽 + 背景）
-    /// 6. 行内代码（等宽 + 背景）
-    /// 7. 粗体 / 斜体（在当前字体上叠加 trait，保留标题字号）
-    /// 8. [[双链]] 着色（最后，避免被覆盖）
+    /// v2.2.71e+：为了避免在 TextKit 2 backing store 上累积 begin/end editing + addAttribute 的
+    /// 潜在属性丢失 bug（`applyWikilinkColors` 染色 OK 但 `applyHeaderStyles` 的字体不被渲染），
+    /// **改为：构建本地 NSMutableAttributedString，全部样式助手在这个本地可变字符串上叠加，
+    /// 最后一次性 `storage.setAttributedString(...)` 写回**。
+    /// 这样 NSTextView 收到一次完整的富文本替换，所有属性会一次性上屏。
+    ///
+    /// 叠加顺序很重要（后面覆盖前面）：
+    /// 1. reset → 全部回到 bodyFont + textColor + 默认段落样式
+    /// 2. frontmatter 段（灰色背景 + 键名加粗 + 主题色）
+    /// 3. 段落级（blockquote / list）
+    /// 4. 标题行
+    /// 5. 围栏代码 / 行内代码
+    /// 6. 粗体 / 斜体
+    /// 7. [[双链]] 着色（最后）
     private func recomputeMarkdownStyles() {
         guard let storage = textView.textStorage else { return }
-        let full = storage.string as NSString
-        let fullRange = NSRange(location: 0, length: full.length)
-        guard fullRange.length > 0 else { return }
+        let raw = storage.string
+        let rawLen = (raw as NSString).length
+        guard rawLen > 0 else { return }
 
         suppressDirty = true
-        storage.beginEditing()
 
-        // 1. 重置为正文基础
-        storage.setAttributes([.font: bodyFont, .foregroundColor: NSColor.textColor], range: fullRange)
+        // 1. 在本地构建 NSMutableAttributedString，所有样式叠加在上面。
+        let defaultPara = NSMutableParagraphStyle()
+        let attr = NSMutableAttributedString(
+            string: raw,
+            attributes: [
+                .font: bodyFont,
+                .foregroundColor: NSColor.textColor,
+                .paragraphStyle: defaultPara
+            ]
+        )
+        let full = attr.string as NSString
+        let fullRange = NSRange(location: 0, length: full.length)
 
-        // 2. frontmatter 段灰色背景 + 键名加粗 + 紫色
-        applyFrontmatterStyles(in: storage, full: full)
+        NSLog("[Meetinsight/md] recompute start, len=%d", full.length)
 
-        // 3. 段落级
-        applyBlockquoteStyles(in: storage, full: full)
-        applyListStyles(in: storage, full: full)
+        // 2-7. 顺序叠加各 markdown 样式（直接在 attr 上 mutate，不走 storage.begin/end）
+        applyFrontmatterStyles(in: attr, full: full)
+        applyBlockquoteStyles(in: attr, full: full)
+        applyListStyles(in: attr, full: full)
+        applyHeaderStyles(in: attr, full: full)
+        applyCodeBlockStyles(in: attr, full: full)
+        applyInlineCodeStyles(in: attr, full: full)
+        applyBoldStyles(in: attr, full: full)
+        applyItalicStyles(in: attr, full: full)
+        applyWikilinkColors(in: attr, full: full)
 
-        // 4. 标题行
-        applyHeaderStyles(in: storage, full: full)
+        NSLog("[Meetinsight/md] recompute done, font present=%@ para present=%@",
+              (attr.attribute(.font, at: 0, effectiveRange: nil) != nil ? "yes" : "no"),
+              (attr.attribute(.paragraphStyle, at: 0, effectiveRange: nil) != nil ? "yes" : "no"))
 
-        // 5. 围栏代码块
-        applyCodeBlockStyles(in: storage, full: full)
+        // 一次性写回 —— 触发 NSTextView 完整 re-render，避免逐字段增量 mutate 与 backing store 不同步的问题。
+        storage.setAttributedString(attr)
 
-        // 6. 行内代码
-        applyInlineCodeStyles(in: storage, full: full)
-
-        // 7. 粗体 / 斜体
-        applyBoldStyles(in: storage, full: full)
-        applyItalicStyles(in: storage, full: full)
-
-        // 8. [[双链]] 着色
-        applyWikilinkColors(in: storage, full: full)
-
-        storage.endEditing()
         suppressDirty = false
+        let _ = fullRange  // 抑制未用 warning（保留为后续调试参考）
     }
 
     /// frontmatter 段（顶部 `--- ... ---`）：整段背景淡化 + 键名加粗 + 主题色。
     /// 若文件无 frontmatter（开头不是 `---`），则不做任何修改。
-    private func applyFrontmatterStyles(in storage: NSTextStorage, full: NSString) {
+    /// 接收 `NSMutableAttributedString` 而非 `NSTextStorage`，因为我们改为在本地可变字符串上叠加。
+    private func applyFrontmatterStyles(in attr: NSMutableAttributedString, full: NSString) {
         let str = full as String
         let lines = str.components(separatedBy: "\n")
         guard lines.count >= 2, lines[0].trimmingCharacters(in: .whitespaces) == "---" else { return }
@@ -344,37 +355,33 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
 
         // 整段背景弱化（区分 frontmatter 块 vs 正文）
         let fmBg = NSColor.controlBackgroundColor.withAlphaComponent(0.6)
-        storage.addAttribute(.backgroundColor, value: fmBg, range: fmRange)
+        attr.addAttribute(.backgroundColor, value: fmBg, range: fmRange)
 
         // 键名加粗 + 主题色（Capture group 1 是键名）
         guard let re = try? NSRegularExpression(pattern: #"^([A-Za-z_\u4e00-\u9fa5][A-Za-z0-9_\u4e00-\u9fa5]*)\s*:"#, options: .anchorsMatchLines) else { return }
         let matches = re.matches(in: str, range: NSRange(location: 0, length: fmEndLoc))
-        let keyFont: NSFont
+        // v2.2.71e+：NSFontDescriptor.withSymbolicTraits 在 macOS 12+ 返回 non-optional，
+        // 因此不再需要 if let，直接用 let。
         let boldDescriptor = bodyFont.fontDescriptor.withSymbolicTraits(.bold)
-        if let f = NSFont(descriptor: boldDescriptor, size: bodyFont.pointSize) {
-            keyFont = f
-        } else {
-            keyFont = bodyFont
-        }
+        let keyFont = NSFont(descriptor: boldDescriptor, size: bodyFont.pointSize) ?? bodyFont
         let accent = NSColor.controlAccentColor
-        storage.beginEditing()
         for m in matches {
-            // 跳过顶部的 `---` 行（len("---")=3，单行长度小于 key 长度，避免它被染）
+            // 跳过顶部的 `---` 行
             if m.range.location < (lines[0] as NSString).length + 1 { continue }
             // 跳过结尾的 `---` 行
             if m.range.location >= loc { continue }
-            storage.addAttribute(.font, value: keyFont, range: m.range(at: 1))
-            storage.addAttribute(.foregroundColor, value: accent, range: m.range(at: 1))
+            attr.addAttribute(.font, value: keyFont, range: m.range(at: 1))
+            attr.addAttribute(.foregroundColor, value: accent, range: m.range(at: 1))
         }
-        storage.endEditing()
     }
 
     // MARK: - 样式辅助
 
     /// 标题行：1~6 个 `#` + 空格开头，**整行**用对应字号 + bold。
-    private func applyHeaderStyles(in storage: NSTextStorage, full: NSString) {
+    private func applyHeaderStyles(in attr: NSMutableAttributedString, full: NSString) {
         guard let re = try? NSRegularExpression(pattern: #"^(#{1,6})\s+(.*)$"#, options: .anchorsMatchLines) else { return }
         let matches = re.matches(in: full as String, range: NSRange(location: 0, length: full.length))
+        NSLog("[Meetinsight/md] headers: %d match(es)", matches.count)
         for m in matches {
             let hashes = full.substring(with: m.range(at: 1))
             let size: CGFloat
@@ -388,68 +395,71 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
             }
             let headerFont = NSFont.systemFont(ofSize: size, weight: .bold)
             // 整行应用（保留 ## 符号可见，但与正文同字体大小，视觉上是「带 # 的标题」）
-            storage.addAttribute(.font, value: headerFont, range: m.range)
+            attr.addAttribute(.font, value: headerFont, range: m.range)
         }
     }
 
     /// 粗体 `**text**`：在当前字体上叠加 bold trait（保留标题/正文字号）。
-    /// 用 `fontDescriptor.withSymbolicTraits(.bold)` 重建字体（对 systemFont 同样可靠——NSFontManager
-    /// 在系统字体上转换有时不变 trait，descriptor 重建显式合成新 font）。
-    private func applyBoldStyles(in storage: NSTextStorage, full: NSString) {
+    /// 用 `fontDescriptor.withSymbolicTraits(.bold)` 重建字体（对 systemFont 同样可靠——
+    /// NSFontManager 在系统字体上转换有时不变 trait，descriptor 重建显式合成新 font）。
+    private func applyBoldStyles(in attr: NSMutableAttributedString, full: NSString) {
         guard let re = try? NSRegularExpression(pattern: #"\*\*([^\*\n]+?)\*\*"#) else { return }
         let matches = re.matches(in: full as String, range: NSRange(location: 0, length: full.length))
+        NSLog("[Meetinsight/md] bold: %d match(es)", matches.count)
         for m in matches {
             let r = m.range(at: 1)
-            let current = (storage.attribute(.font, at: r.location, effectiveRange: nil) as? NSFont) ?? bodyFont
+            let current = (attr.attribute(.font, at: r.location, effectiveRange: nil) as? NSFont) ?? bodyFont
             var merged: NSFontDescriptor.SymbolicTraits = .bold
             if current.fontDescriptor.symbolicTraits.contains(.italic) { merged.insert(.italic) }
+            // v2.2.71e+：withSymbolicTraits 返回 non-optional。
             let descriptor = current.fontDescriptor.withSymbolicTraits(merged)
             if let f = NSFont(descriptor: descriptor, size: current.pointSize) {
-                storage.addAttribute(.font, value: f, range: r)
+                attr.addAttribute(.font, value: f, range: r)
             }
         }
     }
 
     /// 斜体 `*text*`：用 lookbehind/lookahead 避免误匹配 `**bold**` 里的 `*`。
-    private func applyItalicStyles(in storage: NSTextStorage, full: NSString) {
+    private func applyItalicStyles(in attr: NSMutableAttributedString, full: NSString) {
         guard let re = try? NSRegularExpression(pattern: #"(?<!\*)\*([^\*\n]+?)\*(?!\*)"#) else { return }
         let matches = re.matches(in: full as String, range: NSRange(location: 0, length: full.length))
         for m in matches {
             let r = m.range(at: 1)
-            let current = (storage.attribute(.font, at: r.location, effectiveRange: nil) as? NSFont) ?? bodyFont
+            let current = (attr.attribute(.font, at: r.location, effectiveRange: nil) as? NSFont) ?? bodyFont
             var merged: NSFontDescriptor.SymbolicTraits = .italic
             if current.fontDescriptor.symbolicTraits.contains(.bold) { merged.insert(.bold) }
             let descriptor = current.fontDescriptor.withSymbolicTraits(merged)
             if let f = NSFont(descriptor: descriptor, size: current.pointSize) {
-                storage.addAttribute(.font, value: f, range: r)
+                attr.addAttribute(.font, value: f, range: r)
             }
         }
     }
 
     /// 行内代码：`` `text` ``
-    private func applyInlineCodeStyles(in storage: NSTextStorage, full: NSString) {
+    private func applyInlineCodeStyles(in attr: NSMutableAttributedString, full: NSString) {
         guard let re = try? NSRegularExpression(pattern: #"`([^`\n]+?)`"#) else { return }
         let matches = re.matches(in: full as String, range: NSRange(location: 0, length: full.length))
         for m in matches {
             let r = m.range(at: 1)
-            storage.addAttributes([.font: codeFont, .backgroundColor: codeBg], range: r)
+            attr.addAttributes([.font: codeFont, .backgroundColor: codeBg], range: r)
         }
     }
 
     /// 围栏代码块：```...```（多行）。
-    private func applyCodeBlockStyles(in storage: NSTextStorage, full: NSString) {
+    private func applyCodeBlockStyles(in attr: NSMutableAttributedString, full: NSString) {
         guard let re = try? NSRegularExpression(pattern: #"```[\s\S]*?```"#, options: []) else { return }
         let matches = re.matches(in: full as String, range: NSRange(location: 0, length: full.length))
         for m in matches {
-            storage.addAttributes([.font: codeFont, .backgroundColor: codeBg], range: m.range)
+            attr.addAttributes([.font: codeFont, .backgroundColor: codeBg], range: m.range)
         }
     }
 
     /// 列表：`- ` / `* ` / `+ ` / `1. ` 开头，整行段落加左侧缩进。
-    private func applyListStyles(in storage: NSTextStorage, full: NSString) {
+    private func applyListStyles(in attr: NSMutableAttributedString, full: NSString) {
         guard let re = try? NSRegularExpression(pattern: #"^(\s*)([-*+]|\d+\.)\s+"#, options: .anchorsMatchLines) else { return }
         let str = full as String
         let matches = re.matches(in: str, range: NSRange(location: 0, length: full.length))
+        NSLog("[Meetinsight/md] list: %d match(es)", matches.count)
         for m in matches {
             guard let swiftRange = Range(m.range, in: str) else { continue }
             let lineSwiftRange = str.lineRange(for: swiftRange)
@@ -457,12 +467,12 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
             let p = NSMutableParagraphStyle()
             p.headIndent = 20
             p.firstLineHeadIndent = 0
-            storage.addAttribute(.paragraphStyle, value: p, range: lineNSRange)
+            attr.addAttribute(.paragraphStyle, value: p, range: lineNSRange)
         }
     }
 
     /// 引用：`> ` 开头，整行段落加左侧缩进 + 斜体。
-    private func applyBlockquoteStyles(in storage: NSTextStorage, full: NSString) {
+    private func applyBlockquoteStyles(in attr: NSMutableAttributedString, full: NSString) {
         guard let re = try? NSRegularExpression(pattern: #"^>\s+"#, options: .anchorsMatchLines) else { return }
         let str = full as String
         let matches = re.matches(in: str, range: NSRange(location: 0, length: full.length))
@@ -473,12 +483,12 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
             let p = NSMutableParagraphStyle()
             p.headIndent = 20
             p.firstLineHeadIndent = 20
-            storage.addAttribute(.paragraphStyle, value: p, range: lineNSRange)
+            attr.addAttribute(.paragraphStyle, value: p, range: lineNSRange)
         }
     }
 
     /// [[双链]] 着色：存在 = 链接蓝；缺失 = 系统红。**最后应用**，避免被其他样式覆盖。
-    private func applyWikilinkColors(in storage: NSTextStorage, full: NSString) {
+    private func applyWikilinkColors(in attr: NSMutableAttributedString, full: NSString) {
         guard let re = try? NSRegularExpression(pattern: #"\[\[([^\[\]\n]+?)(?:\|([^\[\]\n]+?))?\]\]"#) else { return }
         let matches = re.matches(in: full as String, range: NSRange(location: 0, length: full.length))
         for m in matches {
@@ -491,7 +501,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
             }
             let missing = page.isEmpty ? false : !wikiPageNames.contains(page.lowercased())
             let color: NSColor = missing ? .systemRed : .linkColor
-            storage.addAttribute(.foregroundColor, value: color, range: m.range)
+            attr.addAttribute(.foregroundColor, value: color, range: m.range)
         }
     }
 
