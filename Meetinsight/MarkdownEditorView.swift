@@ -125,7 +125,11 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         let tv = WikiTextView(frame: .zero, textContainer: textContainer)
         tv.owner = self
         tv.delegate = self
-        tv.translatesAutoresizingMaskIntoConstraints = false
+        // NSTextView 作为 NSScrollView.documentView 必须走 autoresizingMask（不是 constraints）：
+        //   - translatesAutoresizingMaskIntoConstraints = false 会让 autoresizingMask 失效
+        //   - 没设 autoresizingMask → textView.frame 永远 .zero → documentView 零尺寸 → 整片空白
+        // 标准模式：autoresizingMask = [.width]（宽度跟随 scrollView.contentSize，高度由 isVerticallyResizable + 内容决定）
+        tv.autoresizingMask = [.width]
         tv.isRichText = false
         tv.isEditable = false
         tv.isSelectable = true
@@ -147,6 +151,10 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         self.textView = tv
 
         scrollView.documentView = tv
+        // 首次挂载时 scrollView 还未 layout，documentView.frame 仍是 .zero；显式给一个初始高度，
+        // 避免 load(markdown:) 后 textStorage 有内容但可视区是 0 高、看起来全空。后续 layout 会被
+        // autoresizingMask + isVerticallyResizable 接管，按内容自适应。
+        tv.frame = NSRect(x: 0, y: 0, width: max(scrollView.contentSize.width, 200), height: 200)
         addSubview(scrollView)
         NSLayoutConstraint.activate([
             scrollView.topAnchor.constraint(equalTo: topAnchor),
