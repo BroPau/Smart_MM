@@ -2,9 +2,25 @@
 //  MarkdownEditorView.swift
 //  Meetinsight
 //
-//  v2.2.71：编辑器底层重写为 **TextKit 2 原生文本**（NSTextView + NSTextContentStorage
-//  + NSTextLayoutManager + NSTextContainer），彻底移除 WKWebView / TipTap / Vditor，
-//  不再有任何 JS 引擎与离线 bundle。
+//  v2.2.71i：编辑器文本栈用 **TextKit 1 经典栈**（NSTextView + NSTextStorage +
+//  NSLayoutManager + NSTextContainer）。彻底移除 WKWebView / TipTap / Vditor。
+//
+//  ⚠️ 为什么不用 TextKit 2（NSTextContentStorage + NSTextLayoutManager）：
+//  v2.2.71e~g 反复实测，TextKit 2 下 `NSTextView.textStorage` 返回其内部
+//  `NSConcreteTextStorage`，与我们显式创建的 `NSTextContentStorage` **不是同一对象**，
+//  而 `NSTextLayoutManager` 实际从 `contentStorage` 读取内容渲染 → 写 `textStorage` 的
+//  `.font`/`.paragraphStyle` attribute 永远不同步到渲染层（proven：RENDER 层读不到 24pt bold）。
+//  TextKit 1 经典栈下 `tv.textStorage === 我们创建的 NSTextStorage`（proven: true），
+//  渲染源即我们写的 storage，addAttribute 直接生效。
+//
+//  ⚠️ v2.2.71i 新增的真实教训（PDF ground truth 验证）：
+//  - **bold/italic 不能用 `fontDescriptor.withSymbolicTraits + NSFont(descriptor:size:)`**
+//    在 systemFont 上不可靠（返回普通 weight）。bold 改用 `NSFont.boldSystemFont(ofSize:)`。
+//  - **italic 在中文上无法工作**：macOS SF Pro 没有中文 italic face，NSFontManager 对中文
+//    fallback 回 regular；`withSymbolicTraits(.italic)` AppKit 也不会为中文合成 oblique。
+//    这是 macOS 平台限制，不是代码 bug——西文 `*italic*` 能正常斜。
+//  - **list 的 firstLineHeadIndent 必须也是 20**（原 0 让每行 "- " 都贴 0 位置、headIndent 只
+//    影响 wrap 后的行，单行 list 完全看不见缩进）。
 //
 //  业务逻辑保持不变（与旧版公开契约完全一致）：
 //  - 单一真相源 = .md 文件：frontmatter 以原生 `--- ... ---` 文本呈现并可直接编辑，
@@ -21,7 +37,7 @@ import Cocoa
 
 // 构建版本标记（部署校验用：rsync 前断言产物二进制含此字符串，防止误取陈旧 DerivedData 副本）。
 // 用 NSLog 引用，确保该字面量被保留进二进制、不会被编译器优化掉。
-fileprivate let MM_EDITOR_BUILD = "2.2.71g"
+fileprivate let MM_EDITOR_BUILD = "2.2.71i"
 
 protocol MarkdownEditorViewDelegate: AnyObject {
     /// 用户点击「保存」后触发，回传当前编辑的 Markdown 源码（含 frontmatter，已剥离双链派生段）。
@@ -41,7 +57,7 @@ extension MarkdownEditorViewDelegate {
     func markdownEditorDidRequestEditProperties(_ editor: MarkdownEditorView, markdown: String) {}
 }
 
-/// TextKit 2 原生文本视图：负责 [[双链]] 命中检测与 ⌘S 拦截。
+/// TextKit 1 原生文本视图：负责 [[双链]] 命中检测与 ⌘S 拦截。
 fileprivate final class WikiTextView: NSTextView {
     weak var owner: MarkdownEditorView?
 
@@ -74,8 +90,9 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
 
     weak var delegate: MarkdownEditorViewDelegate?
 
-    // MARK: - TextKit 2 栈
-    private let contentStorage = NSTextContentStorage()
+    // MARK: - TextKit 1 栈（v2.2.71h：切回经典栈，规避 TextKit 2 的 textStorage/contentStorage 不同步坑）
+    private let textStorage = NSTextStorage()
+    private let layoutManager = NSLayoutManager()
     private var textView: WikiTextView!
 
     // MARK: - 状态
@@ -113,13 +130,14 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         scrollView.borderType = .noBorder
         scrollView.autoresizingMask = [.width, .height]
 
-        // —— TextKit 2：contentStorage → layoutManager → textContainer ——
-        let layoutManager = NSTextLayoutManager()
-        contentStorage.addTextLayoutManager(layoutManager)
+        // —— TextKit 1 经典栈：textStorage → layoutManager → textContainer ——
+        // （v2.2.71h：不用 TextKit 2 的 NSTextContentStorage/NSTextLayoutManager，
+        //  因其内部 NSConcreteTextStorage 与我们的 contentStorage 不同步，样式不渲染。）
+        textStorage.addLayoutManager(layoutManager)
         let textContainer = NSTextContainer(containerSize: CGSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
         textContainer.widthTracksTextView = true
         textContainer.heightTracksTextView = false
-        layoutManager.textContainer = textContainer
+        layoutManager.addTextContainer(textContainer)
 
         let tv = WikiTextView(frame: .zero, textContainer: textContainer)
         tv.owner = self
@@ -166,7 +184,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor)
         ])
 
-        NSLog("Meetinsight TextKit2 editor build %@", MM_EDITOR_BUILD)
+        NSLog("Meetinsight TextKit1 editor build %@", MM_EDITOR_BUILD)
     }
 
     // MARK: - 公开 API（契约与旧版一致）
@@ -271,14 +289,13 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
 
     /// 全量重算 markdown 样式。
     ///
-    /// v2.2.71g：放弃 v2.2.71f「本地 NSMutableAttributedString + setAttributedString 写回」——
-    /// 验证发现 setAttributedString 后 `NSTextContentStorage` 没把 attribute 透传到 `NSTextLayoutManager`，
-    /// 表现是 frontmatter 的 foregroundColor/键名 font 渲染 OK，但正文的 .font/.paragraphStyle 完全不显示。
-    /// 现改为最朴素的 v2.2.71c 路径：**直接对 `textStorage` 在 `beginEditing()`/`endEditing()` 之间调 addAttribute**。
-    /// 这次能 work 是因为两个前置条件都已 OK：
-    ///   1. `isRichText = true`（v2.2.71e 已设，纯文本模式会忽略全部 attribute）
-    ///   2. `applyHeaderStyles` 等用 `NSFont.systemFont(ofSize:weight:)`（v2.2.71e 改对，NSFontManager.convert
-    ///      在 systemFont 上不可靠）
+    /// v2.2.71h（真根因闭环）：v2.2.71e~g 一直不渲染，根因是 TextKit 2 栈下
+    /// `NSTextView.textStorage`(NSConcreteTextStorage) 与我们创建的 `NSTextContentStorage`
+    /// 不同步，`NSTextLayoutManager` 从 `contentStorage` 渲染却读不到属性（proven）。
+    /// v2.2.71h 切回 **TextKit 1 经典栈**（textStorage/layoutManager/textContainer 三者直接绑定），
+    /// 此时 `textView.textStorage === 我们创建的 NSTextStorage`（proven: true），
+    /// 渲染源即我们写的 storage，下面这套 begin/end + addAttribute 直接生效。
+    /// 前置条件：`isRichText = true`（v2.2.71e 已设）。
     ///
     /// 叠加顺序（后写覆盖先写）：
     /// 1. reset → 全部回到 bodyFont + textColor + 默认段落样式
@@ -302,8 +319,7 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
 
         NSLog("[Meetinsight/md] recompute start, len=%d", full.length)
 
-        // 直接对 storage 做 edit；begin/end 包裹确保 NSTextContentStorage 把
-        // attribute 透传给 NSTextLayoutManager → 实际渲染层。
+        // TextKit 1 栈：直接对 textStorage 做 edit，begin/end 包裹确保 layoutManager 同步重绘。
         storage.beginEditing()
 
         // 1. 重置：整段回到正文基础（font + foregroundColor + 段落样式）。
@@ -408,9 +424,9 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         }
     }
 
-    /// 粗体 `**text**`：在当前字体上叠加 bold trait（保留标题/正文字号）。
-    /// 用 `fontDescriptor.withSymbolicTraits(.bold)` 重建字体（对 systemFont 同样可靠——
-    /// NSFontManager 在系统字体上转换有时不变 trait，descriptor 重建显式合成新 font）。
+    /// 粗体 `**text**`：**v2.2.71i** 直接用 `NSFont.boldSystemFont(ofSize:)`，跟 H1 的成功做法同一路径。
+    /// 之前 v2.2.71d 用的 `fontDescriptor.withSymbolicTraits(.bold) + NSFont(descriptor:size:)` 在 systemFont
+    /// 上不可靠（返回普通 weight，PDF ground truth 验证不渲染粗体）；改用 system factory 后西文/中文都生效。
     private func applyBoldStyles(in storage: NSTextStorage, full: NSString) {
         guard let re = try? NSRegularExpression(pattern: #"\*\*([^\*\n]+?)\*\*"#) else { return }
         let matches = re.matches(in: full as String, range: NSRange(location: 0, length: full.length))
@@ -418,29 +434,25 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
         for m in matches {
             let r = m.range(at: 1)
             let current = (storage.attribute(.font, at: r.location, effectiveRange: nil) as? NSFont) ?? bodyFont
-            var merged: NSFontDescriptor.SymbolicTraits = .bold
-            if current.fontDescriptor.symbolicTraits.contains(.italic) { merged.insert(.italic) }
-            // v2.2.71e+：withSymbolicTraits 返回 non-optional。
-            let descriptor = current.fontDescriptor.withSymbolicTraits(merged)
-            if let f = NSFont(descriptor: descriptor, size: current.pointSize) {
-                storage.addAttribute(.font, value: f, range: r)
-            }
+            // 直接拿系统粗体 face（与 header `systemFont(ofSize:weight:.bold)` 等价，绕过不可靠的 fontDescriptor 合成）
+            let boldFont = NSFont.boldSystemFont(ofSize: current.pointSize)
+            storage.addAttribute(.font, value: boldFont, range: r)
         }
     }
 
-    /// 斜体 `*text*`：用 lookbehind/lookahead 避免误匹配 `**bold**` 里的 `*`。
+    /// 斜体 `*text*`：**v2.2.71i** 用 `NSFontManager.shared.convert(_:toHaveTrait:.italicFontMask)`。
+    /// —— 已知限制：macOS SF Pro 没有中文 italic face，NSFontManager 对中文 fallback 回 regular，
+    /// **中文 `*斜体*` 在屏幕上不会变斜**（这是 AppKit 平台限制，不是代码 bug——
+    /// v2.2.71d 试过 `withSymbolicTraits(.italic)` 强制合成 oblique，PDF ground truth 验证 AppKit
+    /// 不会为中文 glyph 应用矩阵变换）。对西文 `*italic*` 真斜 face 存在，能正常 work。
     private func applyItalicStyles(in storage: NSTextStorage, full: NSString) {
         guard let re = try? NSRegularExpression(pattern: #"(?<!\*)\*([^\*\n]+?)\*(?!\*)"#) else { return }
         let matches = re.matches(in: full as String, range: NSRange(location: 0, length: full.length))
         for m in matches {
             let r = m.range(at: 1)
             let current = (storage.attribute(.font, at: r.location, effectiveRange: nil) as? NSFont) ?? bodyFont
-            var merged: NSFontDescriptor.SymbolicTraits = .italic
-            if current.fontDescriptor.symbolicTraits.contains(.bold) { merged.insert(.bold) }
-            let descriptor = current.fontDescriptor.withSymbolicTraits(merged)
-            if let f = NSFont(descriptor: descriptor, size: current.pointSize) {
-                storage.addAttribute(.font, value: f, range: r)
-            }
+            let italicFont = NSFontManager.shared.convert(current, toHaveTrait: .italicFontMask)
+            storage.addAttribute(.font, value: italicFont, range: r)
         }
     }
 
@@ -473,9 +485,11 @@ final class MarkdownEditorView: NSView, NSTextViewDelegate {
             guard let swiftRange = Range(m.range, in: str) else { continue }
             let lineSwiftRange = str.lineRange(for: swiftRange)
             let lineNSRange = NSRange(lineSwiftRange, in: str)
+            // v2.2.71i：原代码 firstLineHeadIndent=0 → 每行 "- " 都在 0 位置看不出缩进（headIndent 只
+            // 影响 wrap 后的行）。改成 firstLineHeadIndent=20，让首行也右移 20，整段对齐成 Typora 风格。
             let p = NSMutableParagraphStyle()
             p.headIndent = 20
-            p.firstLineHeadIndent = 0
+            p.firstLineHeadIndent = 20
             storage.addAttribute(.paragraphStyle, value: p, range: lineNSRange)
         }
     }
