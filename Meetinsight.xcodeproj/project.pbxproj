@@ -133,7 +133,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "rm -rf \"${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/tiptap\"\ncp -R \"${PROJECT_DIR}/tiptap\" \"${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/tiptap\"\n";
+			shellScript = "rm -rf \"${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/tiptap\"\n";
 		};
 		72414FA2302F2BCB00C89E2C /* ShellScript */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -150,7 +150,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "rm -rf \"${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/vditor\"\ncp -R \"${PROJECT_DIR}/vditor\" \"${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/vditor\"\n";
+			shellScript = "rm -rf \"${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/vditor\"\n";
 		};
 		72414FA3302F2BCB00C89E2C /* ShellScript */ = {
 			isa = PBXShellScriptBuildPhase;

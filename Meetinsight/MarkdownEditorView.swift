@@ -2,45 +2,38 @@
 //  MarkdownEditorView.swift
 //  Meetinsight
 //
-//  Obsidian / Typora 式「所见即所得」Markdown 编辑器（纯本地、离线可用）：
-//  - 底层由离线内置的 Vditor 引擎驱动（Lute 渲染内核，位于 Resources/vditor）。
-//  - 默认模式 = IR（Instant Rendering，即 Obsidian 的「实时预览」：保留 Markdown 源码、
-//    语法符号淡显、标题/列表/代码块/引用/图片即时渲染）。
-//  - 工具栏「模式」按钮可在 IR(实时预览) / WYSIWYG(Typora 真·所见即所得) / SV(分屏) 间切换。
-//  - [[双链]] 渲染为可点击 pill，点击经 editorBridge 通知宿主跳转。
-//  - [[name|alias]] 解析为：跳转目标 = 左侧 name，显示文字 = 右侧 alias。
-//  - YAML frontmatter 在编辑器内以原生 ```yaml 代码块呈现（单一真相源 = .md，直接编辑代码块即编辑 frontmatter），
-//    保存时还原为 --- 分隔；双链关系（反向链接 / 出链）由宿主在打开时注入正文 ## 段、保存前剥离，不落盘。
-//  - 通过 WKWebView messageHandlers 与宿主双向通信；深色模式跟随系统外观。
+//  v2.2.71：编辑器底层重写为 **TextKit 2 原生文本**（NSTextView + NSTextContentStorage
+//  + NSTextLayoutManager + NSTextContainer），彻底移除 WKWebView / TipTap / Vditor，
+//  不再有任何 JS 引擎与离线 bundle。
+//
+//  业务逻辑保持不变（与旧版公开契约完全一致）：
+//  - 单一真相源 = .md 文件：frontmatter 以原生 `--- ... ---` 文本呈现并可直接编辑，
+//    保存时原样回传（不再做 ```yaml 代码块 ↔ --- 的互转）。
+//  - 双链关系（出链 / 入链）由宿主在打开时注入正文 `## 本页引用的页面` / `## 反向链接`
+//    段，保存前在 Swift 侧剥离（stripRefsSections），不落盘、不耦合 pipeline。
+//  - [[双链]] 在正文里以原生彩色文本高亮（存在的页 = 系统链接色；缺失页 = 红色），
+//    点击经 mouseDown hit-test 上报宿主跳转。
+//  - 自动双链（autoLink）：加载时把正文里出现的已知 Wiki 页名裸词包裹为 [[名称]]（Minutes 用）。
+//  - ⌘S / Ctrl+S 触发保存；深色模式跟随系统外观（用 .textColor / .textBackgroundColor）。
 //
 
 import Cocoa
-import WebKit
+
+// 构建版本标记（部署校验用：rsync 前断言产物二进制含此字符串，防止误取陈旧 DerivedData 副本）。
+// 用 NSLog 引用，确保该字面量被保留进二进制、不会被编译器优化掉。
+fileprivate let MM_EDITOR_BUILD = "2.2.71"
 
 protocol MarkdownEditorViewDelegate: AnyObject {
-    /// 用户点击「保存」后触发，回传当前编辑的 Markdown 源码（含 frontmatter）。
+    /// 用户点击「保存」后触发，回传当前编辑的 Markdown 源码（含 frontmatter，已剥离双链派生段）。
     func markdownEditorDidRequestSave(_ editor: MarkdownEditorView, markdown: String)
-    /// 用户点击预览中的 [[双链]] 时触发。anchor 为 Obsidian 式 [[Page#Heading]] 的标题锚点（可选）。
+    /// 用户点击正文的 [[双链]] 时触发。anchor 为 Obsidian 式 [[Page#Heading]] 的标题锚点（可选）。
     func markdownEditorDidClickWikilink(_ editor: MarkdownEditorView, name: String, anchor: String?)
-    /// 编辑器初始化时请求现有页面名列表（用于双链自动完成与缺失页判定）。
+    /// 编辑器初始化时请求现有页面名列表（用于双链缺失页判定）。
     func markdownEditorRequestsPageList(_ editor: MarkdownEditorView) -> [String]
     /// 悬浮预览双链时，返回目标页正文（Markdown，已剥离 frontmatter）；页面不存在返回 nil。
     func markdownEditorPreviewForWikilink(_ editor: MarkdownEditorView, name: String) -> String?
-    /// 用户点击 banner 上的「✏️ 编辑属性」按钮，宿主应当弹出属性编辑面板并落盘新 frontmatter。
-    /// （默认 no-op —— 仅 WikiViewController 关心；纪要页未实现。）
+    /// 用户点击属性编辑入口时触发（默认 no-op —— 仅 WikiViewController 关心；纪要页未实现）。
     func markdownEditorDidRequestEditProperties(_ editor: MarkdownEditorView, markdown: String)
-}
-
-/// 接收 WKWebView 的 JS 消息，转发到主线程闭包。
-fileprivate final class EditorMessageHandler: NSObject, WKScriptMessageHandler {
-    var onMessage: (([String: Any]) -> Void)?
-    func userContentController(_ userContentController: WKUserContentController,
-                               didReceive message: WKScriptMessage) {
-        guard let dict = message.body as? [String: Any] else { return }
-        DispatchQueue.main.async { [weak self] in
-            self?.onMessage?(dict)
-        }
-    }
 }
 
 /// 默认 no-op：让 markdownEditorDidRequestEditProperties 在纪要页等不需要编辑属性的场景下不必实现
@@ -48,929 +41,321 @@ extension MarkdownEditorViewDelegate {
     func markdownEditorDidRequestEditProperties(_ editor: MarkdownEditorView, markdown: String) {}
 }
 
-final class MarkdownEditorView: NSView, WKNavigationDelegate {
+/// TextKit 2 原生文本视图：负责 [[双链]] 命中检测与 ⌘S 拦截。
+fileprivate final class WikiTextView: NSTextView {
+    weak var owner: MarkdownEditorView?
+
+    /// 点击命中 [[双链]] 时跳转；编辑模式下需 ⌘/Ctrl+Click，纯预览（不可编辑）模式下普通点击即跳转。
+    override func mouseDown(with event: NSEvent) {
+        let point = self.convert(event.locationInWindow, from: nil)
+        let idx = characterIndexForInsertion(at: point)
+        if let link = owner?.wikilinkAt(idx) {
+            let wantsNav = !isEditable
+                || event.modifierFlags.contains(.command)
+                || event.modifierFlags.contains(.control)
+            if wantsNav {
+                owner?.delegate?.markdownEditorDidClickWikilink(owner!, name: link.name, anchor: link.anchor)
+                return
+            }
+        }
+        super.mouseDown(with: event)
+    }
+
+    /// ⌘S / Ctrl+S 触发保存（旧 JS 版也是编辑器内部自己处理，菜单无 save 项）。
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if (event.modifierFlags.contains(.command) || event.modifierFlags.contains(.control)),
+           let chars = event.charactersIgnoringModifiers,
+           chars == "s" {
+            owner?.requestSave()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
+final class MarkdownEditorView: NSView, NSTextViewDelegate {
 
     weak var delegate: MarkdownEditorViewDelegate?
 
-    private let webView: WKWebView
-    private let handler = EditorMessageHandler()
+    // MARK: - TextKit 2 栈
+    private let contentStorage = NSTextContentStorage()
+    private var textView: WikiTextView!
 
-    private var didLoad = false
-    private var pendingMarkdown: String?
-    private var pendingEditable: Bool = true
-    private var pendingMode: String = "ir"
-    private var pendingAutoLink: Bool = false
-    private var pendingPageName: String = ""
-
+    // MARK: - 状态
     /// v2.2.65：当前页是否有未保存改动（切页自动保存用）。
-    /// JS 编辑触发 onUpdate → 经 editorBridge 推送 {type:'dirty'} 置 true；
-    /// 载入新页（load）/ 显式保存（requestSave）复位 false。
     var isDirty: Bool = false
+    /// 加载期间抑制 dirty 标记（避免把「载入新页 / 重算高亮」误判为用户编辑）。
+    private var suppressDirty: Bool = false
+    /// 当前页名（供 [[#Heading]] 同页锚点兜底）。
+    private var currentPageName: String = ""
+    /// 已知 Wiki 页名（小写集合），用于缺失页判定与自动双链。
+    private var wikiPageNames: Set<String> = []
+    /// 自动双链目标名（仅 Wiki 页名），加载纪要时把裸词包裹为 [[名称]]。
+    private var autoLinkNames: [String] = []
 
+    // MARK: - 初始化
     override init(frame frameRect: NSRect) {
-        let cfg = WKWebViewConfiguration()
-        let uc = WKUserContentController()
-        uc.add(handler, name: "editorBridge")
-        cfg.userContentController = uc
-        cfg.defaultWebpagePreferences.allowsContentJavaScript = true
-        cfg.preferences.javaScriptCanOpenWindowsAutomatically = false
-        webView = WKWebView(frame: .zero, configuration: cfg)
         super.init(frame: frameRect)
         setup()
     }
 
     required init?(coder: NSCoder) {
-        let cfg = WKWebViewConfiguration()
-        let uc = WKUserContentController()
-        uc.add(handler, name: "editorBridge")
-        cfg.userContentController = uc
-        cfg.defaultWebpagePreferences.allowsContentJavaScript = true
-        // 关键：禁用所有缓存。理由：用户重启 app 仍可能看到旧 banner 英文 label，
-        // 是因为 WKWebView 默认会缓存 loadHTMLString 的 HTML 模板与 %TIPTAP_BASE% 子资源。
-        // 关掉后每次 setup 都从磁盘读最新模板 + 最新 tiptap.bundle.js，
-        // 确保 bundle 替换立即生效（v2.2.30 部署铁律）。
-        cfg.websiteDataStore = WKWebsiteDataStore.nonPersistent()
-        webView = WKWebView(frame: .zero, configuration: cfg)
         super.init(coder: coder)
         setup()
     }
 
-    deinit {
-        webView.configuration.userContentController.removeScriptMessageHandler(forName: "editorBridge")
-    }
-
     private func setup() {
         wantsLayer = true
-        webView.translatesAutoresizingMaskIntoConstraints = false
-        webView.navigationDelegate = self
-        webView.setValue(false, forKey: "drawsBackground") // 透明背景，跟随系统外观
-        addSubview(webView)
+
+        let scrollView = NSScrollView()
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.borderType = .noBorder
+        scrollView.autoresizingMask = [.width, .height]
+
+        // —— TextKit 2：contentStorage → layoutManager → textContainer ——
+        let layoutManager = NSTextLayoutManager()
+        contentStorage.addTextLayoutManager(layoutManager)
+        let textContainer = NSTextContainer(containerSize: CGSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
+        textContainer.widthTracksTextView = true
+        textContainer.heightTracksTextView = false
+        layoutManager.textContainer = textContainer
+
+        let tv = WikiTextView(frame: .zero, textContainer: textContainer)
+        tv.owner = self
+        tv.delegate = self
+        tv.translatesAutoresizingMaskIntoConstraints = false
+        tv.isRichText = false
+        tv.isEditable = false
+        tv.isSelectable = true
+        tv.allowsUndo = true
+        tv.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.textColor = .textColor
+        tv.backgroundColor = .textBackgroundColor
+        tv.drawsBackground = true
+        tv.isVerticallyResizable = true
+        tv.isHorizontallyResizable = false
+        tv.minSize = CGSize(width: 0, height: 0)
+        tv.maxSize = CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        tv.textContainerInset = NSSize(width: 24, height: 18)
+        tv.isAutomaticSpellingCorrectionEnabled = false
+        tv.isAutomaticQuoteSubstitutionEnabled = false
+        tv.isAutomaticDashSubstitutionEnabled = false
+        tv.isGrammarCheckingEnabled = false
+        tv.smartInsertDeleteEnabled = false
+        self.textView = tv
+
+        scrollView.documentView = tv
+        addSubview(scrollView)
         NSLayoutConstraint.activate([
-            webView.topAnchor.constraint(equalTo: topAnchor),
-            webView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            webView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            webView.bottomAnchor.constraint(equalTo: bottomAnchor)
+            scrollView.topAnchor.constraint(equalTo: topAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor)
         ])
-        handler.onMessage = { [weak self] msg in
-            self?.handle(message: msg)
-        }
-        let engine = Self.engine
-        if engine == "tiptap", let base = Self.tiptapBaseURL() {
-            var html = TipTapEditorHTML.template
-            html = html.replacingOccurrences(of: "%TIPTAP_BASE%",
-                                            with: base.absoluteString)
-            webView.loadHTMLString(html, baseURL: base)
-        } else if let base = Self.vditorBaseURL() {
-            var html = EditorHTML.template
-            html = html.replacingOccurrences(of: "%VDITOR_CDN%",
-                                            with: base.absoluteString)
-            webView.loadHTMLString(html, baseURL: base)
-        } else {
-            // 兜底：编辑引擎资源缺失时给出可读报错，避免白屏无提示
-            webView.loadHTMLString("<html><body style='font-family:sans-serif;padding:24px;color:#b00'>编辑器资源缺失：Resources/tiptap 或 Resources/vditor 未打包进 App。</body></html>", baseURL: nil)
-        }
+
+        NSLog("Meetinsight TextKit2 editor build %@", MM_EDITOR_BUILD)
     }
 
-    // MARK: - 公开 API
+    // MARK: - 公开 API（契约与旧版一致）
 
-    /// 载入并渲染 Markdown。editable=false 时预览区不可编辑（如搜索结果）。
-    /// mode 可选：'ir'(实时预览,默认) / 'wysiwyg'(真·所见即所得) / 'sv'(分屏)。
+    /// 载入并渲染 Markdown（原生文本，含 --- frontmatter 与 ## 双链派生段）。
+    /// editable=false 时预览区不可编辑（如搜索结果 / 错误提示）。
     /// autoLink=true 时（仅纪要页单人纪要用），加载时会把正文里出现的已知 Wiki 页名裸词自动包裹为 [[名称]]。
-    func load(markdown: String, editable: Bool = true, mode: String = "ir", autoLink: Bool = false, pageName: String = "") {
+    func load(markdown: String, editable: Bool = true, autoLink: Bool = false, pageName: String = "") {
+        currentPageName = pageName
+        let finalMd = autoLink ? applyAutoLink(to: markdown, names: autoLinkNames) : markdown
+        suppressDirty = true
+        textView.isEditable = editable
+        textView.string = finalMd
+        recomputeWikiLinkHighlight()
+        suppressDirty = false
         isDirty = false
-        pendingMarkdown = markdown
-        pendingEditable = editable
-        pendingMode = mode
-        pendingAutoLink = autoLink
-        pendingPageName = pageName
-        if didLoad {
-            webView.evaluateJavaScript("loadMarkdown(\(jsString(markdown)), \(jsBool(editable)), \(jsString(mode)), \(jsBool(autoLink)), \(jsString(pageName)))")
-        }
     }
 
-    /// 切换编辑模式（ir / wysiwyg / sv）。
-    func setMode(_ mode: String) {
-        pendingMode = mode
-        webView.evaluateJavaScript("setMode(\(jsString(mode)))")
-    }
-
-    /// 触发保存：读取当前编辑内容（含 frontmatter）并回传宿主。
+    /// 触发保存：读取当前编辑内容（含 frontmatter）并回传宿主，保存前在 Swift 侧剥离双链派生段。
     func requestSave() {
         isDirty = false
-        webView.evaluateJavaScript("requestSave()")
+        let md = stripRefsSections(textView.string)
+        delegate?.markdownEditorDidRequestSave(self, markdown: md)
     }
 
-    /// 推送现有页面名列表给 JS（双链自动完成 + 缺失页判定）。
+    /// 推送现有页面名列表（含别名），供双链缺失页判定 + 自动双链。
     func setWikiPages(_ names: [String]) {
-        guard Self.engine == "tiptap" else { return }
-        let json = (try? JSONSerialization.data(withJSONObject: names)) ?? Data("[]".utf8)
-        let js = String(data: json, encoding: .utf8) ?? "[]"
-        webView.evaluateJavaScript("MMEditor.setWikiPages(\(js))")
+        wikiPageNames = Set(names.map { $0.lowercased() })
+        recomputeWikiLinkHighlight()
     }
 
-    /// 推送「自动双链」目标名列表（仅 Wiki 页名）给 JS；加载纪要时把正文里出现的裸词包裹为 [[名称]]。
+    /// 推送「自动双链」目标名列表（仅 Wiki 页名）；加载纪要时把正文里出现的裸词包裹为 [[名称]]。
     func setAutoLinkNames(_ names: [String]) {
-        guard Self.engine == "tiptap" else { return }
-        let json = (try? JSONSerialization.data(withJSONObject: names)) ?? Data("[]".utf8)
-        let js = String(data: json, encoding: .utf8) ?? "[]"
-        webView.evaluateJavaScript("MMEditor.setAutoLinkNames(\(js))")
+        autoLinkNames = names
     }
-
 
     /// 跳转到 Wiki 页内某标题锚点（Obsidian 式 [[Page#Heading]]）；无匹配标题时静默忽略。
     func scrollToAnchor(_ anchor: String) {
-        guard Self.engine == "tiptap", !anchor.isEmpty else { return }
-        let js = "MMEditor.scrollToAnchor(\(jsString(anchor)))"
-        webView.evaluateJavaScript(js)
+        let a = anchor.trimmingCharacters(in: .whitespaces)
+        guard !a.isEmpty else { return }
+        let full = textView.string as NSString
+        let pattern = "^(#{1,6})\\s+" + NSRegularExpression.escapedPattern(for: a) + "$"
+        guard let re = try? NSRegularExpression(pattern: pattern, options: .anchorsMatchLines),
+              let m = re.firstMatch(in: full as String, range: NSRange(location: 0, length: full.length)) else { return }
+        textView.scrollRangeToVisible(m.range)
+        textView.setSelectedRange(m.range)
     }
 
+    // MARK: - NSTextViewDelegate
 
-    // MARK: - WKNavigationDelegate
-
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        didLoad = true
-        if let pending = pendingMarkdown {
-            pendingMarkdown = nil
-            let pname = pendingPageName
-            pendingPageName = ""
-            webView.evaluateJavaScript("loadMarkdown(\(jsString(pending)), \(jsBool(pendingEditable)), \(jsString(pendingMode)), \(jsBool(pendingAutoLink)), \(jsString(pname)))")
-        }
+    func textDidChange(_ notification: Notification) {
+        guard !suppressDirty else { return }
+        isDirty = true
     }
 
-    // MARK: - 内部
+    // MARK: - 内部：双链命中检测
 
-    private func handle(message: [String: Any]) {
-        guard let type = message["type"] as? String else { return }
-        switch type {
-        case "save":
-            if let md = message["markdown"] as? String {
-                delegate?.markdownEditorDidRequestSave(self, markdown: md)
-            }
-        case "wikilink":
-            if let name = message["name"] as? String {
-                let anchor = message["anchor"] as? String
-                delegate?.markdownEditorDidClickWikilink(self, name: name, anchor: anchor)
-            }
-        case "dirty":
-            // v2.2.65：编辑器正文被用户编辑（onUpdate）→ 标记脏，供切页自动保存判定。
-            isDirty = true
-        case "getPages":
-            let pages = delegate?.markdownEditorRequestsPageList(self) ?? []
-            setWikiPages(pages)
-        case "wikilinkPreview":
-            // 注意：绝不能在当前 WKScriptMessageHandler 回调里同步调用 evaluateJavaScript，
-            // 否则会与 WebKit 的消息通道死锁（曾表现为点「编辑属性」后 App 卡死）。
-            // 必须延后到下一个 runloop 再执行。
-            if let name = message["name"] as? String {
-                let md = delegate?.markdownEditorPreviewForWikilink(self, name: name)
-                let jsName = jsString(name)
-                let jsMd = jsString(md ?? "")
-                DispatchQueue.main.async {
-                    self.webView.evaluateJavaScript("MMEditor.showPreview(\(jsName), \(jsMd))")
+    /// 给定字符索引，判断其是否落在某个 [[双链]] 范围内，返回 (page, anchor)。
+    fileprivate func wikilinkAt(_ idx: Int) -> (name: String, anchor: String?)? {
+        let full = textView.string as NSString
+        guard idx >= 0, idx <= full.length else { return nil }
+        let range = NSRange(location: 0, length: full.length)
+        guard let re = try? NSRegularExpression(pattern: #"\[\[([^\[\]\n]+?)(?:\|([^\[\]\n]+?))?\]\]"#) else { return nil }
+        for m in re.matches(in: full as String, range: range) {
+            // 点击点（idx 或 idx-1）落在链接范围内即视为命中
+            if NSLocationInRange(idx, m.range) || NSLocationInRange(max(0, idx - 1), m.range) {
+                let inner = (full.substring(with: m.range(at: 1))).trimmingCharacters(in: .whitespaces)
+                var page = inner
+                var anchor: String? = nil
+                if page.hasPrefix("#") {
+                    // 同页锚点 [[#Heading]]：page 用当前页名兜底，anchor = 标题
+                    anchor = String(page.dropFirst()).trimmingCharacters(in: .whitespaces)
+                    page = currentPageName
+                } else if let h = page.firstIndex(of: "#") {
+                    anchor = String(page[page.index(after: h)...]).trimmingCharacters(in: .whitespaces)
+                    page = String(page[..<h])
                 }
+                return (name: page, anchor: anchor)
             }
-        default:
-            break
         }
+        return nil
     }
 
+    // MARK: - 内部：双链高亮（TextKit 2 属性）
 
-    /// 当前编辑引擎：默认 TipTap（真·WYSIWYG）。
-    /// 可在终端用 `defaults write com.weilu.meetingminutes editorEngine vditor` 回退到 Vditor。
-    static var engine: String {
-        let v = UserDefaults.standard.string(forKey: "editorEngine")
-        return (v == "vditor") ? "vditor" : "tiptap"
-    }
-
-    /// 定位打包进 App 的 TipTap 目录（Resources/tiptap，内含 tiptap.bundle.js）。
-    /// Xcode 项目的「Copy TipTap」Run Script Build Phase 会在每次构建时自动
-    /// 从 ${PROJECT_DIR}/tiptap 拷过去。
-    static func tiptapBaseURL() -> URL? {
-        let fm = FileManager.default
-        let candidates: [URL?] = [
-            Bundle.main.resourceURL?.appendingPathComponent("tiptap"),
-            Bundle.main.resourceURL?.appendingPathComponent("Resources/tiptap"),
-            Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/tiptap"),
-        ]
-        return candidates.compactMap { $0 }.first {
-            fm.fileExists(atPath: $0.appendingPathComponent("tiptap.bundle.js").path)
+    /// 扫描正文所有 [[双链]]，按「是否存在」着色（存在=链接色，缺失=红色）。
+    /// 作用在底层 NSTextStorage（TextKit 2 下 NSTextView.textStorage 即 contentStorage 的 backing store）。
+    private func recomputeWikiLinkHighlight() {
+        guard let storage = textView.textStorage else { return }
+        let full = storage.string as NSString
+        let range = NSRange(location: 0, length: full.length)
+        guard let re = try? NSRegularExpression(pattern: #"\[\[([^\[\]\n]+?)(?:\|([^\[\]\n]+?))?\]\]"#) else { return }
+        suppressDirty = true
+        storage.beginEditing()
+        storage.removeAttribute(.foregroundColor, range: range)
+        let matches = re.matches(in: full as String, range: range)
+        for m in matches {
+            let inner = (full.substring(with: m.range(at: 1))).trimmingCharacters(in: .whitespaces)
+            var page = inner
+            if page.hasPrefix("#") {
+                page = currentPageName
+            } else if let h = page.firstIndex(of: "#") {
+                page = String(page[..<h])
+            }
+            let missing = page.isEmpty ? false : !wikiPageNames.contains(page.lowercased())
+            let color: NSColor = missing ? .systemRed : .linkColor
+            storage.addAttribute(.foregroundColor, value: color, range: m.range)
         }
+        storage.endEditing()
+        suppressDirty = false
     }
 
-    /// 定位打包进 App 的 Vditor 目录（Resources/vditor，内含 dist/）。
-    /// 注意：vditor 整包必须放进 .app/Contents/Resources/vditor 才能被加载。
-    /// Xcode 项目的「Copy Vditor」Run Script Build Phase 会在每次构建时自动
-    /// 从 ${PROJECT_DIR}/vditor 拷过去；如手动 xcodebuild 缺脚本，须自己 cp。
-    static func vditorBaseURL() -> URL? {
-        let fm = FileManager.default
-        let candidates: [URL?] = [
-            Bundle.main.resourceURL?.appendingPathComponent("vditor"),
-            Bundle.main.resourceURL?.appendingPathComponent("Resources/vditor"),
-            Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/vditor"),
-        ]
-        return candidates.compactMap { $0 }.first {
-            fm.fileExists(atPath: $0.appendingPathComponent("dist/index.min.js").path)
+    // MARK: - 内部：保存前剥离双链派生段
+
+    /// 剥离由宿主注入的派生段：## 反向链接 / ## 本页引用的页面（命中即跳到下一个标题或文末）。
+    private func stripRefsSections(_ md: String) -> String {
+        let lines = md.components(separatedBy: "\n")
+        var out: [String] = []
+        var skipping = false
+        let headingRe = try? NSRegularExpression(pattern: #"^(#{1,6})\s+(.*)$"#)
+        for line in lines {
+            let ns = line as NSString
+            if let re = headingRe,
+               let m = re.firstMatch(in: line, range: NSRange(location: 0, length: ns.length)) {
+                let title = ns.substring(with: m.range(at: 2)).trimmingCharacters(in: .whitespaces)
+                if title == "反向链接" || title == "本页引用的页面" {
+                    skipping = true
+                    continue
+                }
+                skipping = false
+            }
+            if !skipping { out.append(line) }
         }
+        return out.joined(separator: "\n")
     }
 
-    /// Swift String → 合法 JS 字符串字面量（用 JSON 序列化保证转义正确）。
-    private func jsString(_ s: String) -> String {
-        let encoded = (try? JSONEncoder().encode(s)) ?? Data("\"\"".utf8)
-        return String(data: encoded, encoding: .utf8) ?? "\"\""
-    }
+    // MARK: - 内部：自动双链（移植自旧 JS 的 autoLinkWiki）
 
-    private func jsBool(_ b: Bool) -> String { b ? "true" : "false" }
-}
-
-// MARK: - HTML / JS 模板（离线渲染，Vditor 由本地 dist 加载，无外部网络依赖）
-
-fileprivate enum EditorHTML {
-    static let template: String = """
-    <!DOCTYPE html>
-    <html lang="zh-CN">
-    <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="stylesheet" href="%VDITOR_CDN%/dist/index.css">
-    <style>
-      :root { color-scheme: light dark; }
-      html, body { margin: 0; padding: 0; height: 100%; }
-      body {
-        font-family: -apple-system, "PingFang SC", "Helvetica Neue", Arial, "Apple Color Emoji", "Apple Symbols", sans-serif;
-        background: #ffffff;
-      }
-      /* —— 浅色 ———————————————————————————————————— */
-      #fmBanner {
-        max-width: 860px; margin: 14px auto 0; padding: 8px 14px;
-        border: 1px solid #d8d8e0; border-radius: 8px; background: #f6f7fb;
-        font-size: 12.5px; color: #555;
-      }
-      #fmBanner > summary { cursor: pointer; font-weight: 600; color: #2f6fdb; outline: none; user-select: none; }
-      #fmBanner[open] > summary { margin-bottom: 6px; }
-      .fm-table { border-collapse: collapse; width: 100%; margin-top: 4px; font-size: 13px; }
-      .fm-table th, .fm-table td { padding: 5px 10px; vertical-align: top; text-align: left; border-bottom: 1px dashed #e2e3e8; }
-      .fm-table th { color: #6b6b75; font-weight: 500; width: 96px; white-space: nowrap; }
-      .fm-table td { color: #1c1c1e; word-break: break-word; }
-      /* Vditor 容器：Obsidian 风格留白 */
-      #editor { max-width: 860px; margin: 0 auto; }
-      /* v2.2.68：双链关系表格容器（运行时装饰，不进 .md；默认隐藏，有内容时由 JS 显示在正文末尾） */
-      #fmPageRefsContainer { max-width: 860px; margin: 16px auto 0; display: none; }
-      .vditor { border: none !important; box-shadow: none !important; background: transparent !important; }
-      .vditor-toolbar { background: #fafafc !important; border-bottom: 1px solid #e8e8ee !important; padding: 4px 6px !important; }
-      .vditor-toolbar--pin { background: #fafafc !important; }
-      .vditor-reset { font-size: 15px; line-height: 1.65; padding: 16px 22px 60px !important; }
-      .vditor-ir pre.vditor-reset, .vditor-wysiwyg pre.vditor-reset { background: transparent !important; }
-      /* [[双链]] pill */
-      .wikilink {
-        color: #c6783b; font-weight: 550; border-bottom: 1px dashed #c6783b;
-        cursor: pointer; border-radius: 3px; padding: 0 2px;
-      }
-      .wikilink:hover { background: rgba(198,120,59,0.12); }
-
-      /* —— 深色（系统外观，跟随 prefers-color-scheme） —————————— */
-      @media (prefers-color-scheme: dark) {
-        body { background: #1c1c1e; }
-        /* 让 vditor 容器在 dark 下吃深色背景，文字保持高对比 */
-        .vditor { background: #1c1c1e !important; }
-        .vditor-toolbar, .vditor-toolbar--pin { background: #2a2a2e !important; border-bottom-color: #3a3a3e !important; }
-        .vditor-reset, .vditor-ir pre.vditor-reset, .vditor-wysiwyg pre.vditor-reset { background: transparent !important; color: #ebebf0 !important; }
-        /* 弹窗/下拉在 dark 下：vditor 自带弹窗仍可能用白底，统一改深 */
-        .vditor-hint, .vditor-panel, .vditor-dropdown-content { background: #2a2a2e !important; color: #ebebf0 !important; border-color: #3a3a3e !important; }
-        /* frontmatter banner：底色更深、字色更亮、对比度提高 */
-        #fmBanner { background: #24242a; border-color: #3a3a40; color: #d8d8de; }
-        #fmBanner > summary { color: #74b1ff; }
-        #fmBanner[open] > summary { color: #9cc8ff; }
-        .fm-table th { color: #b8b8c0; }
-        .fm-table td { color: #ebebf0; }
-        .fm-table th, .fm-table td { border-bottom-color: #3a3a40; }
-        .wikilink { color: #e0a06a; border-bottom-color: #e0a06a; }
-        .wikilink:hover { background: rgba(224,160,106,0.18); }
-      }
-    </style>
-    </head>
-    <body>
-    <details id="fmBanner" class="fm-banner" open><summary>笔记属性</summary><div id="fmBody"></div></details>
-    <div id="editor"></div>
-    <div id="fmPageRefsContainer"></div>
-    <script src="%VDITOR_CDN%/dist/index.min.js"></script>
-    <script>
-    var VDITOR_CDN = "%VDITOR_CDN%";
-    var vd = null;
-    var ready = false;
-    var isEditable = true;
-    var pendingFrontmatter = '';   // 顶部 frontmatter 原文（保存时回贴）
-    var savedMode = 'ir';
-
-    function isDark() {
-      return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-    }
-    function themeName() { return isDark() ? 'dark' : 'classic'; }
-
-    // ---- frontmatter 解析（轻量，不依赖 yaml 库） ----
-    function parseFrontmatter(lines){
-      var fm = {}; var i = 0;
-      while (i < lines.length) {
-        var s = lines[i];
-        var m = s.match(/^([A-Za-z0-9_\\-\\.]+):\\s*(.*)$/);
-        if (!m) { i++; continue; }
-        var key = m[1], val = m[2].trim();
-        if (val === '') {
-          var items = []; var j = i + 1;
-          while (j < lines.length) {
-            var ls = lines[j];
-            var st = ls.match(/^\\s+-\\s+(.*)$/);
-            if (st) { items.push(st[1].trim()); j++; continue; }
-            break;
-          }
-          if (items.length) fm[key] = items;
-          i = j;
-        } else { fm[key] = val; i++; }
-      }
-      return fm;
-    }
-    function renderFrontmatterBanner(fm){
-      if (!fm || Object.keys(fm).length === 0) return '';
-      var SKIP = {'Backlinks':1, '反向链接':1, 'SuspectedAliasOf':1, 'suspected_alias_of':1};
-      var rows = [];
-      function addRow(label, value){
-        if (value === undefined || value === null) return;
-        var v = Array.isArray(value) ? value.join('、') : String(value);
-        v = v.replace(/^[\\[\\(](.*)[\\]\\)]$/, '$1').replace(/^[\"“”']|[\"“”']$/g, '');
-        if (!v || v === '(空)') return;
-        rows.push('<tr><th>'+esc(label)+'</th><td>'+esc(v)+'</td></tr>');
-      }
-      // 双兼容 picker：依次尝试多个 key（中文 → PascalCase → 小写），返回第一个非空值。
-      // 兼容用户后续单独改 frontmatter key 走中文（v2.2.32 路径），不再受历史 PascalCase 文件影响。
-      function pick(){
-        for (var i=1; i<arguments.length; i++){
-          var k = arguments[i]; var v = arguments[0][k];
-          if (v !== undefined && v !== null && String(v).trim() !== '') return v;
+    private func applyAutoLink(to md: String, names: [String]) -> String {
+        guard !names.isEmpty else { return md }
+        let sorted = names.filter { !$0.isEmpty }.sorted { $0.count > $1.count }
+        let lines = md.components(separatedBy: "\n")
+        var inFence = false
+        var out: [String] = []
+        for line in lines {
+            if line.range(of: #"^\s*(```|~~~)"#, options: .regularExpression) != nil {
+                inFence.toggle()
+                out.append(line)
+                continue
+            }
+            if inFence { out.append(line); continue }
+            out.append(autoLinkLine(line, names: sorted))
         }
-        return undefined;
-      }
-      function pickStr(){ var v=pick.apply(null,arguments); return v===undefined?'':String(v).trim(); }
-      function pickArr(){ var v=pick.apply(null,arguments); if (v===undefined) return undefined; if (Array.isArray(v)) return v; var s=String(v).trim().replace(/^[\\[\\(](.*)[\\]\\)]$/,'$1'); return s?s.split(/[,，、]/).map(function(x){return x.trim();}).filter(Boolean):[]; }
-      var TYPE_LABEL = {'Person':'👤 人名','Company':'🏢 公司','Chip':'🔌 芯片','Project':'📦 项目','Topic':'📚 主题','Method':'🛠 方法'};
-      var tRaw = pickStr(fm, '类型', 'Type', 'type');
-      var tLabel = TYPE_LABEL[tRaw] || tRaw || '—';
-      addRow('类型', tLabel);
-      var cn = pickStr(fm, '规范名', 'CanonicalName', 'canonical_name', 'canonicalname');
-      if (cn) addRow('规范名', cn);
-      var aliasesVal = pickArr(fm, '别名', 'Aliases', 'aliases');
-      if (aliasesVal && aliasesVal.length) addRow('别名', aliasesVal);
-      // 按类型自适应展示专属字段（仿 Obsidian 属性面板：person / company / chip 各自一套）
-      if (tRaw === 'Person') {
-        addRow('中文名', pick(fm, '中文名'));
-        addRow('公司',   pick(fm, '公司', 'Company', 'company'));
-        addRow('职位',   pick(fm, '职位', 'Title', 'title'));
-        addRow('职能范围', pick(fm, '职能范围'));
-      } else if (tRaw === 'Company') {
-        addRow('公司类型', pick(fm, '公司类型'));
-        addRow('所属行业', pick(fm, '所属行业'));
-        addRow('公司简介', pick(fm, '公司简介'));
-      } else if (tRaw === 'Chip') {
-        addRow('品牌',     pick(fm, '品牌'));
-        addRow('具体型号', pick(fm, '具体型号'));
-        addRow('类别',     pick(fm, '类别'));
-        addRow('功能简述', pick(fm, '功能简述'));
-        addRow('状态',     pick(fm, '状态'));
-        addRow('替代料',   pick(fm, '替代料'));
-      }
-      var tagsRaw = pick(fm, '标签', 'Tags', 'tags');
-      var tags = tagsRaw;
-      if (Array.isArray(tags)) tags = tags.filter(function(x){ return x && x!=='wiki' && x.toLowerCase()!==tRaw.toLowerCase(); });
-      if (tags !== undefined && (Array.isArray(tags) ? tags.length : String(tags).trim() !== '')) addRow('标签', tags);
-      var upd = pick(fm, '更新时间', 'Updated', 'updated');
-      if (upd !== undefined) addRow('更新时间', upd);
-      // 兜底：未在上方显式列出的其它字段（含自定义类型字段）也不遗漏
-      var KNOWN = ['类型','Type','type','规范名','CanonicalName','canonical_name','canonicalname','别名','Aliases','aliases','中文名','公司','Company','company','职位','Title','title','职能范围','公司类型','所属行业','公司简介','品牌','具体型号','类别','功能简述','状态','替代料','标签','Tags','tags','更新时间','Updated','updated','反向链接','Backlinks','backlinks','SuspectedAliasOf','suspected_alias_of'];
-      Object.keys(fm).forEach(function(k){
-        if (SKIP[k]) return;
-        if (KNOWN.indexOf(k) >= 0) return;
-        addRow(k, fm[k]);
-      });
-      if (rows.length === 0) return '';
-      return '<table class="fm-table">' + rows.join('') + '</table>';
+        return out.joined(separator: "\n")
     }
-    function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
-    // 拆分 frontmatter / 正文
-    function splitFrontmatter(md){
-      var L = (md||'').replace(/\\r\\n/g,'\\n').split('\\n');
-      if (L.length && L[0].trim() === '---') {
-        var j = 1; while (j < L.length && L[j].trim() !== '---') j++;
-        if (j < L.length) {
-          var fmRaw = L.slice(0, j+1).join('\\n');
-          var body = L.slice(j+1).join('\\n');
-          return { fmRaw: fmRaw, body: body };
+    private func autoLinkLine(_ line: String, names: [String]) -> String {
+        var protected: [String] = []
+        var s = line
+        func protect(_ m: String) -> String {
+            protected.append(m)
+            return "\u{0}\(protected.count - 1)\u{0}"
         }
-      }
-      return { fmRaw: '', body: md || '' };
-    }
-    function showBanner(md){
-      var sp = splitFrontmatter(md);
-      var html = '';
-      if (sp.fmRaw) {
-        var fm = parseFrontmatter(sp.fmRaw.split('\\n').slice(1, -1));
-        html = renderFrontmatterBanner(fm);
-      }
-      var det = document.getElementById('fmBanner');
-      if (html) { det.style.display=''; document.getElementById('fmBody').innerHTML = html; }
-      else { det.style.display='none'; }
-      return sp.body;
-    }
-
-    // ---- [[双链]] 装饰：把 IR/WYSIWYG 渲染后正文里的 [[x]] / [[x|alias]] 包裹成可点击 pill ----
-    function getEditEl(){
-      if (!vd) return null;
-      if (vd.vditor && vd.vditor.ir && vd.vditor.ir.element) return vd.vditor.ir.element;
-      if (vd.vditor && vd.vditor.wysiwyg && vd.vditor.wysiwyg.element) return vd.vditor.wysiwyg.element;
-      if (vd.vditor && vd.vditor.sv && vd.vditor.sv.element) return vd.vditor.sv.element;
-      return document.querySelector('.vditor-reset');
-    }
-    function decorateWikilinks(){
-      try {
-        var root = getEditEl(); if (!root) return;
-        var re = /\\[\\[([^\\]]+?)\\]\\]/g;
-        var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
-        var nodes = []; var n;
-        while ((n = walker.nextNode())) {
-          if (n.parentNode && n.parentNode.closest && n.parentNode.closest('.wikilink')) continue;
-          if (re.test(n.nodeValue)) nodes.push(n);
+        // 保护：行内代码、标准链接、已有双链，避免重复包裹
+        s = replaceMatches(pattern: #"`[^`]*`"#, in: s) { protect($0) }
+        s = replaceMatches(pattern: #"\[[^\]]*\]\([^)]*\)"#, in: s) { protect($0) }
+        s = replaceMatches(pattern: #"\[\[[^\]]*\]\]"#, in: s) { protect($0) }
+        // 包裹已知名称（长名优先）；每轮重新保护生成的 [[名称]]，避免更短名称二次包裹
+        for name in names {
+            let esc = NSRegularExpression.escapedPattern(for: name)
+            s = replaceMatches(pattern: esc, in: s) { _ in "[[\(name)]]" }
+            s = replaceMatches(pattern: #"\[\[[^\]]*\]\]"#, in: s) { protect($0) }
         }
-        nodes.forEach(function(textNode){
-          var frag = document.createDocumentFragment();
-          var last = 0; var m; re.lastIndex = 0; var str = textNode.nodeValue;
-          while ((m = re.exec(str))) {
-            if (m.index > last) frag.appendChild(document.createTextNode(str.slice(last, m.index)));
-            var seg = m[1].split('|');
-            var target = seg[0].trim();
-            var label = (seg[1] != null ? seg[1].trim() : target);
-            var span = document.createElement('span');
-            span.className = 'wikilink'; span.setAttribute('data-name', target);
-            span.setAttribute('contenteditable', 'false');
-            span.textContent = label;
-            frag.appendChild(span);
-            last = re.lastIndex;
-          }
-          if (last < str.length) frag.appendChild(document.createTextNode(str.slice(last)));
-          if (frag.childNodes.length) textNode.parentNode.replaceChild(frag, textNode);
-        });
-      } catch(e) {}
-    }
-    var decoTimer = null;
-    function scheduleDecorate(){
-      if (decoTimer) clearTimeout(decoTimer);
-      decoTimer = setTimeout(decorateWikilinks, 200);
-    }
-
-    // ---- 初始化 / 重建 Vditor ----
-    function buildVditor(mode, value){
-      savedMode = mode;
-      var container = document.getElementById('editor');
-      container.innerHTML = '';
-      vd = new Vditor('editor', {
-        cdn: VDITOR_CDN,
-        mode: mode,
-        lang: 'zh_CN',
-        theme: themeName(),
-        icon: 'material',
-        cache: { enable: false },
-        value: value,
-        toolbarConfig: { hide: false, pin: true },
-        toolbar: [
-          'headings', 'bold', 'italic', 'strike', '|',
-          'list', 'ordered-list', 'check', 'outdent', 'indent', '|',
-          'quote', 'line', 'code', 'inline-code', '|',
-          'link', 'table', '|',
-          { name: 'save', tip: '保存 (⌘S)', icon: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>', click: function(){ requestSave(); } },
-          'outline', '|', 'edit-mode', 'both', 'preview'
-        ],
-        outline: { enable: false, position: 'left' },
-        counter: { enable: false, type: 'text' },
-        preview: { theme: themeName(), actions: [], markdown: function(md){ return md; } },
-        upload: false,
-        fullscreen: { index: 1000 },
-        after: function(){
-          ready = true;
-          decorateWikilinks();
-        },
-        input: function(){ scheduleDecorate(); },
-        focus: function(){ scheduleDecorate(); },
-        select: function(){ scheduleDecorate(); }
-      });
-    }
-    function cycleMode(){
-      var order = ['ir','wysiwyg','sv'];
-      var cur = savedMode || 'ir';
-      var next = order[(order.indexOf(cur)+1) % order.length];
-      var val = vd ? vd.getValue() : '';
-      buildVditor(next, val);
-    }
-    function setMode(mode){
-      if (!vd) { savedMode = mode; return; }
-      var val = vd.getValue();
-      buildVditor(mode, val);
-    }
-
-    function loadMarkdown(md, editable, mode){
-      isEditable = editable;
-      var body = showBanner(md);
-      pendingFrontmatter = splitFrontmatter(md).fmRaw;
-      buildVditor(mode || 'ir', body);
-    }
-    function requestSave(){
-      var body = vd ? vd.getValue() : '';
-      var out = (pendingFrontmatter ? pendingFrontmatter + '\\n' : '') + body;
-      window.webkit.messageHandlers.editorBridge.postMessage({ type: 'save', markdown: out.trimEnd() });
-    }
-    function setEditable(b){ isEditable = b; }
-
-    // 点击 [[双链]] → 宿主跳转
-    document.addEventListener('click', function(e){
-      var link = (e.target && e.target.closest) ? e.target.closest('.wikilink') : null;
-      if (link) {
-        e.preventDefault();
-        window.webkit.messageHandlers.editorBridge.postMessage({ type: 'wikilink', name: link.getAttribute('data-name') });
-      }
-    });
-    // ⌘S 保存
-    document.addEventListener('keydown', function(e){
-      if ((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'S')) { e.preventDefault(); requestSave(); }
-    });
-    // 跟随系统深色模式
-    if (window.matchMedia) {
-      window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function(){
-        if (vd) setMode(savedMode || 'ir');
-      });
-    }
-    </script>
-    </body>
-    </html>
-    """
-}
-
-// MARK: - TipTap 模板（真·WYSIWYG，Typora 风格；离线打包 tiptap.bundle.js）
-fileprivate enum TipTapEditorHTML {
-    static let template: String = """
-    <!DOCTYPE html>
-    <html lang="zh-CN">
-    <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-      :root { color-scheme: light dark; }
-      html, body { margin: 0; padding: 0; }
-      body {
-        font-family: -apple-system, "PingFang SC", "Helvetica Neue", Arial, "Apple Color Emoji", "Apple Symbols", sans-serif;
-        background: #ffffff; color: #1c1c1e;
-      }
-      /* —— 顶部页面属性 banner（与 Vditor 版一致） —————————————————— */
-      #fmBanner {
-        max-width: 860px; margin: 14px auto 0; padding: 8px 14px;
-        border: 1px solid #d8d8e0; border-radius: 8px; background: #f6f7fb;
-        font-size: 12.5px; color: #555;
-      }
-      #fmBanner > summary { cursor: pointer; font-weight: 600; color: #2f6fdb; outline: none; user-select: none; }
-      #fmBanner[open] > summary { margin-bottom: 6px; }
-      /* 顶部右侧"✏️ 编辑属性"按钮 —— 点击后通知宿主打开属性编辑面板 */
-      .fm-edit-btn {
-        margin-left: auto; padding: 2px 9px; font-size: 11px; font-family: inherit;
-        background: #ffffff; color: #2f6fdb; border: 1px solid #c8d6f5; border-radius: 5px;
-        cursor: pointer; line-height: 1.4;
-      }
-      .fm-edit-btn:hover { background: #eef3ff; }
-      .fm-edit-btn:active { background: #d8e3fb; }
-      .fm-table { border-collapse: collapse; width: 100%; margin-top: 4px; font-size: 13px; }
-      .fm-table th, .fm-table td { padding: 5px 10px; vertical-align: top; text-align: left; border-bottom: 1px dashed #e2e3e8; }
-      .fm-table th { color: #6b6b75; font-weight: 500; width: 96px; white-space: nowrap; }
-      .fm-table td { color: #1c1c1e; word-break: break-word; }
-      /* —— Obsidian 风格属性网格（只读 + 编辑通用） ——————————————
-         真正标签在左、值在右同行：grid 列第一列按最长 label 自适应，
-         第二列占剩余空间；长文本字段（公司简介 / 职能范围 / 功能简述等）
-         跨整列单独成行，不再被压缩到右侧窄列，编辑时立即可见内容。 */
-      .fm-grid { display: grid; grid-template-columns: minmax(80px, max-content) 1fr; row-gap: 2px; column-gap: 10px; margin-top: 2px; align-items: start; }
-      .fm-row { display: contents; }
-      .fm-row:hover { background: rgba(0,0,0,0.045); border-radius: 6px; }
-      .fm-row:hover > .fm-row-label, .fm-row:hover > .fm-row-value { background: rgba(0,0,0,0.045); }
-      .fm-row-label {
-        display: flex; align-items: center; gap: 6px;
-        color: #6b6b75; font-weight: 500; font-size: 13px; padding-top: 6px; text-align: left;
-        overflow: hidden; white-space: nowrap; min-height: 26px;
-      }
-      .fm-icon { font-size: 13px; width: 16px; text-align: center; opacity: 0.82; flex: 0 0 auto; }
-      .fm-key { overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
-      /* 值列默认块级：input 占满单元格，不再用 flex 嵌套，避免 width:100% 撑爆 */
-      .fm-row-value { min-width: 0; padding: 3px 0; }
-      .fm-row-value > input[type="text"], .fm-row-value > input[type="date"], .fm-row-value > select, .fm-row-value > textarea {
-        font-family: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid #e2e3e8;
-        border-radius: 6px; background: #fff; color: #1c1c1e; width: 100%; box-sizing: border-box;
-        display: block;
-      }
-      .fm-row-value input:focus, .fm-row-value select:focus, .fm-row-value textarea:focus {
-        outline: none; border-color: #2f6fdb; box-shadow: 0 0 0 2px rgba(47,111,219,0.12); background: #fff;
-      }
-      .fm-row-value textarea { resize: vertical; min-height: 56px; line-height: 1.55; }
-      .fm-select { appearance: none; -webkit-appearance: none; background: #fff; cursor: pointer; }
-      /* 类型行：下拉 + ＋ 按钮 */
-      .fm-type-row { display: flex; gap: 6px; align-items: center; width: 100%; }
-      .fm-type-row select { flex: 1 1 auto; }
-      .fm-addtype {
-        flex: 0 0 auto; width: 24px; height: 24px; padding: 0; font-size: 14px; line-height: 1;
-        background: #fff; color: #2f6fdb; border: 1px solid #c8d6f5; border-radius: 6px; cursor: pointer;
-      }
-      .fm-addtype:hover { background: #eef3ff; }
-      /* 列表字段 → chips（别名 / 标签）：位于一个普通块容器，input 占满 */
-      .fm-chips { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; border: 1px solid #e2e3e8; padding: 4px 6px; border-radius: 6px; background: #fff; min-height: 30px; }
-      .fm-chip {
-        display: inline-flex; align-items: center; gap: 3px; padding: 2px 6px; max-width: 100%;
-        background: #eef3ff; color: #2f6fdb; border: 1px solid #c8d6f5; border-radius: 5px;
-        font-size: 12px; font-family: inherit;
-      }
-      .fm-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .fm-chip-x { border: none; background: transparent; color: inherit; cursor: pointer; font-size: 13px; line-height: 1; padding: 0 2px; opacity: 0.65; }
-      .fm-chip-x:hover { opacity: 1; }
-      .fm-chip-add { flex: 1 1 60px; min-width: 60px; width: auto !important; border: 1px dashed #c8d6f5 !important; background: transparent !important; color: #6b6b75 !important; font-size: 12px; padding: 2px 4px !important; border-radius: 4px !important; }
-      /* 统一「添加」输入框风格：类型新增 / 别名 / 标签新增 均使用 .fm-add-input，另起一行、全宽、虚线边框 */
-      .fm-add-input {
-        font-family: inherit; font-size: 13px; padding: 4px 8px; border: 1px dashed #c8d6f5;
-        border-radius: 6px; background: transparent; color: #6b6b75; width: 100%; box-sizing: border-box; display: block;
-      }
-      .fm-add-input:focus { outline: none; border-color: #2f6fdb; background: #fff; color: #1c1c1e; }
-      /* banner 内双链（反向链接 / 标量 / 长文本值）：蓝色可点击，与 banner 主色调一致 */
-      #fmBanner .wikilink { color: #2f6fdb; border-bottom: 1px solid rgba(47,111,219,0.5); text-decoration: none; }
-      #fmBanner .wikilink:hover { background: rgba(47,111,219,0.10); }
-      /* 长文本字段：跨整列单独成行；标签独占一行、值独占一行（标签上方对齐 textarea 顶部） */
-      .fm-row-long > .fm-row-label { padding-top: 4px; align-self: start; }
-      .fm-row-long > .fm-row-value { grid-column: 1 / -1; padding-top: 0; padding-bottom: 4px; }
-      /* 日期 / 标量 / 长文本只读 */
-      .fm-date { cursor: pointer; }
-      .fm-date-val, .fm-scalar-val, .fm-longtext-val { color: #1c1c1e; line-height: 1.6; }
-      .fm-longtext-val { white-space: pre-wrap; }
-      .fm-empty { color: #9a9aa2; }
-      /* 反向链接只读区：pill 形 chip 串展示，不允许手动编辑（防破坏自动维护的双链） */
-      .fm-readonly { font-size: 13px; color: #1c1c1e; line-height: 1.9; padding: 6px 0; }
-      .fm-backlink-pill {
-        display: inline-block; padding: 1px 8px; margin: 1px 4px 1px 0;
-        background: #eef3ff; color: #2f6fdb; border: 1px solid #c8d6f5; border-radius: 4px;
-        font-size: 12px; font-family: inherit;
-      }
-      /* v2.2.65：公司页反向引用嵌入表格 */
-      .fm-company-refs { margin-top: 8px; padding-top: 8px; border-top: 1px dashed #e2e3e8; }
-      .fm-ref-title { font-size: 12px; color: #6b6b73; margin-bottom: 4px; font-weight: 600; }
-      .fm-ref-table { border-collapse: collapse; width: 100%; font-size: 12px; }
-      .fm-ref-table th, .fm-ref-table td { border: 1px solid #e2e3e8; padding: 4px 8px; text-align: left; vertical-align: top; }
-      .fm-ref-table th { background: #f5f6f8; color: #3a3a40; font-weight: 600; }
-      .fm-ref-type { color: #6b6b73; white-space: nowrap; }
-      .fm-ref-fields { color: #1c1c1e; }
-      .fm-ref-fields .fm-ref-label { color: #6b6b73; margin-right: 2px; }
-      /* v2.2.65：反向链接改为可编辑（手动项可删除 ×；incoming 只读） */
-      .fm-backlink-group { margin: 2px 0; }
-      .fm-backlink-grp-label { color: #9a9aa2; margin-right: 4px; }
-      .fm-backlink-item { display: inline-flex; align-items: center; margin: 1px 4px 1px 0; background: #eef3ff; color: #2f6fdb; border: 1px solid #c8d6f5; border-radius: 4px; padding: 1px 2px 1px 8px; font-size: 12px; }
-      .fm-backlink-x { border: none; background: transparent; color: #c0392b; cursor: pointer; font-size: 13px; line-height: 1; padding: 0 4px; }
-      .fm-backlink-x:hover { color: #e74c3c; }
-      /* v2.2.66：反向链接编辑区（自动发现只读 + 手动可编辑 textarea） */
-      .fm-backlinks-edit { line-height: 1.5; }
-      .fm-bl-sub { margin: 4px 0; }
-      .fm-bl-tag {
-        display: inline-block; font-size: 11px; font-weight: 600; color: #6b6b75;
-        background: #eef0f4; border-radius: 4px; padding: 1px 7px; margin-right: 8px;
-      }
-      .fm-bl-edit {
-        width: 100%; box-sizing: border-box; font-family: inherit; font-size: 13px;
-        padding: 6px 8px; border: 1px solid #e2e3e8; border-radius: 6px; background: #fff;
-        color: #1c1c1e; resize: vertical; line-height: 1.6; margin-top: 4px;
-      }
-      .fm-bl-edit:focus { outline: none; border-color: #2f6fdb; box-shadow: 0 0 0 2px rgba(47,111,219,0.12); }
-      /* v2.2.68：双链关系表格容器（位于正文末尾，运行时装饰不进 .md） */
-      #fmPageRefsContainer { max-width: 860px; margin: 16px auto 0; display: none; }
-      /* v2.2.68：双链关系表格内「添加双链」输入行 */
-      .fm-ref-add { margin-top: 8px; }
-      .fm-ref-add-input {
-        width: 100%; box-sizing: border-box; font-family: inherit; font-size: 13px;
-        padding: 6px 8px; border: 1px solid #e2e3e8; border-radius: 6px; background: #fff; color: #1c1c1e;
-      }
-      .fm-ref-add-input:focus { outline: none; border-color: #2f6fdb; box-shadow: 0 0 0 2px rgba(47,111,219,0.12); }
-      .fm-ref-empty { color: #9a9aa2; font-style: italic; }
-      /* v2.2.69：双链关系可编辑表格 */
-      .fm-ref-subtable { margin-bottom: 10px; }
-      .fm-ref-subtitle { font-size: 11px; color: #9a9aa2; margin: 6px 0 2px; font-weight: 600; }
-      .fm-ref-input { width: 100%; box-sizing: border-box; font-family: inherit; font-size: 12px; padding: 3px 6px; border: 1px solid #e2e3e8; border-radius: 5px; background: #fff; color: #1c1c1e; }
-      .fm-ref-input:focus { outline: none; border-color: #2f6fdb; box-shadow: 0 0 0 2px rgba(47,111,219,0.12); }
-      .fm-ref-name .fm-ref-input { font-weight: 600; }
-      .fm-ref-custom { margin-top: 4px; padding-top: 4px; border-top: 1px dotted #e2e3e8; }
-      .fm-ref-custom-title { font-size: 11px; color: #9a9aa2; margin-bottom: 2px; }
-      .fm-ref-custom-row { display: flex; align-items: center; gap: 4px; margin: 2px 0; }
-      .fm-ref-ckey-label { color: #6b6b73; min-width: 64px; }
-      .fm-ref-cval { flex: 1; }
-      .fm-ref-cdel { border: 1px solid #e2c0bd; background: #fff; color: #c0392b; border-radius: 5px; cursor: pointer; padding: 2px 8px; font-size: 12px; }
-      .fm-ref-cdel:hover { background: #fdecea; }
-      .fm-ref-cadd { margin-top: 4px; padding: 2px 8px; font-size: 12px; font-family: inherit; background: transparent; color: #2f6fdb; border: none; border-radius: 6px; cursor: pointer; text-align: left; }
-      .fm-ref-cadd:hover { background: rgba(47,111,219,0.08); }
-      .fm-ref-empty-block { color: #9a9aa2; font-style: italic; font-size: 12px; }
-      /* 所有「添加」输入行与第 2 列（值列）对齐，与上方其余输入框保持一致宽度 */
-      .fm-add-row { grid-column: 2; margin-top: 6px; }
-      .fm-add-prop {
-        padding: 3px 8px; font-size: 12px; font-family: inherit;
-        background: transparent; color: #2f6fdb; border: none; border-radius: 6px; cursor: pointer; text-align: left;
-      }
-      .fm-add-prop:hover { background: rgba(47,111,219,0.08); }
-      /* 新属性输入行：键占第 1 列、值占第 2 列 */
-      .fm-row-new { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(80px, max-content) 1fr; gap: 10px; }
-      .fm-row-new .fm-newkey, .fm-row-new .fm-newval { border: 1px solid #e2e3e8 !important; background: #fff; font-size: 13px; padding: 4px 8px; border-radius: 6px; width: 100%; box-sizing: border-box; display: block; }
-
-      /* —— 编辑器容器 —————————————————————————————————————————— */
-      #editor { position: relative; max-width: 860px; margin: 0 auto; }
-      .ProseMirror {
-        outline: none; padding: 16px 22px 90px; font-size: 15px; line-height: 1.72;
-        min-height: 60vh;
-      }
-      .ProseMirror > * { margin: 0 0 0.7em; }
-      .ProseMirror h1 { font-size: 1.85em; font-weight: 700; margin: 0.4em 0 0.5em; line-height: 1.25; }
-      .ProseMirror h2 { font-size: 1.45em; font-weight: 700; margin: 0.4em 0 0.45em; }
-      .ProseMirror h3 { font-size: 1.18em; font-weight: 600; margin: 0.4em 0 0.4em; }
-      .ProseMirror h4 { font-size: 1.02em; font-weight: 600; }
-      .ProseMirror ul, .ProseMirror ol { padding-left: 1.5em; }
-      .ProseMirror li { margin: 0.15em 0; }
-      /* 任务列表（GFM - [ ] / - [x]）可勾选 checkbox */
-      .ProseMirror ul[data-type="taskList"] { list-style: none; padding-left: 0.4em; }
-      .ProseMirror ul[data-type="taskList"] li { display: flex; align-items: flex-start; }
-      .ProseMirror ul[data-type="taskList"] li > label {
-        margin-right: 0.5em; margin-top: 0.2em; flex: 0 0 auto; user-select: none;
-      }
-      .ProseMirror ul[data-type="taskList"] li > div { flex: 1 1 auto; min-width: 0; }
-      .ProseMirror ul[data-type="taskList"] input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; }
-      .ProseMirror blockquote {
-        border-left: 3px solid #cfcfd6; margin-left: 0; padding: 2px 0 2px 14px; color: #555;
-      }
-      .ProseMirror code {
-        background: #f0f0f4; border-radius: 4px; padding: 1px 5px; font-size: 0.9em;
-        font-family: "SF Mono", Menlo, Consolas, monospace;
-      }
-      .ProseMirror pre {
-        background: #f4f4f7; border-radius: 8px; padding: 12px 14px; overflow: auto;
-        font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 13px;
-      }
-      .ProseMirror pre code { background: none; padding: 0; }
-      .ProseMirror a:not(.wikilink) { color: #2f6fdb; }
-      .ProseMirror table { border-collapse: collapse; width: 100%; margin: 0.5em 0; }
-      .ProseMirror th, .ProseMirror td { border: 1px solid #d8d8e0; padding: 6px 10px; text-align: left; }
-      .ProseMirror th { background: #f4f5f9; font-weight: 600; }
-      .ProseMirror hr { border: none; border-top: 1px solid #e2e3e8; margin: 1em 0; }
-      .ProseMirror img { max-width: 100%; border-radius: 6px; }
-      .ProseMirror p.is-editor-empty:first-child::before {
-        content: attr(data-placeholder); color: #9a9aa2; float: left; height: 0; pointer-events: none;
-      }
-
-      /* —— [[双链]] —————————————————————————————————————————————— */
-      .wikilink {
-        color: #5b54d6; border-bottom: 1px solid rgba(91,84,214,0.55);
-        cursor: pointer; border-radius: 3px; padding: 0 2px; text-decoration: none;
-      }
-      .wikilink:hover { background: rgba(91,84,214,0.10); }
-      .wikilink-missing {
-        color: #d23b3b; border-bottom: 1px dashed #d23b3b;
-      }
-      .wikilink-missing:hover { background: rgba(210,59,59,0.10); }
-
-      /* —— [[ 自动完成候选 —————————————————————————————————————— */
-      .wiki-ac {
-        position: absolute; z-index: 9000; background: #ffffff; border: 1px solid #d8d8e0;
-        border-radius: 8px; box-shadow: 0 6px 22px rgba(0,0,0,0.14); padding: 4px;
-        font-size: 12.5px; min-width: 190px; max-height: 230px; overflow-y: auto;
-      }
-      .wiki-ac-item { padding: 4px 10px; border-radius: 5px; color: #1c1c1e; cursor: pointer; white-space: nowrap; }
-      .wiki-ac-item.active, .wiki-ac-item:hover { background: #eef0ff; }
-
-      /* —— 悬浮预览气泡 ———————————————————————————————————————— */
-      .wiki-preview {
-        position: fixed; z-index: 9500; width: 340px; max-height: 264px; overflow-y: auto;
-        background: #ffffff; border: 1px solid #d8d8e0; border-radius: 10px;
-        box-shadow: 0 8px 30px rgba(0,0,0,0.18); padding: 12px 14px; font-size: 13px; line-height: 1.6; color: #1c1c1e;
-      }
-      .wiki-preview-body h1 { font-size: 1.15em; margin: 0 0 0.4em; }
-      .wiki-preview-body h2 { font-size: 1.02em; margin: 0.6em 0 0.3em; }
-      .wiki-preview-body p { margin: 0 0 0.5em; }
-      .wiki-preview-body code { background: #f0f0f4; border-radius: 4px; padding: 1px 4px; font-size: 0.9em; }
-      .wiki-preview-loading { color: #9a9aa2; }
-      .wiki-preview-missing { color: #d23b3b; }
-      .wiki-preview-hint { color: #9a9aa2; font-size: 11.5px; }
-
-      /* —— 选中文字浮动工具条 —————————————————————————————————— */
-      #bubbleMenu {
-        display: flex; gap: 4px; background: #2a2a2e; border-radius: 8px; padding: 4px;
-        box-shadow: 0 6px 22px rgba(0,0,0,0.28);
-      }
-      #bubbleMenu button {
-        background: transparent; color: #f2f2f5; border: none; border-radius: 5px;
-        padding: 4px 9px; font-size: 12px; cursor: pointer; font-family: inherit;
-      }
-      #bubbleMenu button:hover { background: rgba(255,255,255,0.14); }
-
-      /* —— 深色模式 ———————————————————————————————————————————————— */
-      @media (prefers-color-scheme: dark) {
-        body { background: #1c1c1e; color: #ebebf0; }
-        #fmBanner { background: #24242a; border-color: #3a3a40; color: #d8d8de; }
-        #fmBanner > summary { color: #74b1ff; }
-        .fm-table th { color: #b8b8c0; }
-        .fm-table td { color: #ebebf0; }
-        .fm-table th, .fm-table td { border-bottom-color: #3a3a40; }
-        /* Obsidian 属性网格（深色） */
-        .fm-row:hover > .fm-row-label, .fm-row:hover > .fm-row-value { background: rgba(255,255,255,0.05); }
-        .fm-row-label { color: #b8b8c0; }
-        .fm-row-value > input[type="text"], .fm-row-value > input[type="date"], .fm-row-value > select, .fm-row-value > textarea {
-          font-family: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid #4a4a52;
-          border-radius: 6px; background: #2c2c32; color: #ebebf0; width: 100%; box-sizing: border-box; display: block;
+        // 还原被保护的片段
+        s = replaceMatches(pattern: #"\x00(\d+)\x00"#, in: s) { m in
+            let digits = m.replacingOccurrences(of: "\u{0}", with: "")
+            if let n = Int(digits), n < protected.count { return protected[n] }
+            return m
         }
-        .fm-row-value input:focus, .fm-row-value select:focus, .fm-row-value textarea:focus {
-          outline: none; border-color: #74b1ff; box-shadow: 0 0 0 2px rgba(116,177,255,0.18); background: #2c2c32;
+        return s
+    }
+
+    /// 通用正则替换（block 接收匹配原文，返回替换文本）。
+    private func replaceMatches(pattern: String, in string: String, using block: (String) -> String) -> String {
+        guard let re = try? NSRegularExpression(pattern: pattern) else { return string }
+        let ns = string as NSString
+        let matches = re.matches(in: string, range: NSRange(location: 0, length: ns.length))
+        var result = ""
+        var last = 0
+        for m in matches {
+            let r = m.range
+            if r.location > last {
+                result += ns.substring(with: NSRange(location: last, length: r.location - last))
+            }
+            result += block(ns.substring(with: r))
+            last = r.location + r.length
         }
-        .fm-select { background: #2c2c32; cursor: pointer; }
-        .fm-addtype { background: #2c2c32; color: #74b1ff; border: 1px solid #4a4a52; }
-        .fm-addtype:hover { background: #3a3a52; }
-        .fm-chip { background: rgba(116,177,255,0.15); color: #74b1ff; border: 1px solid #3a4a5e; }
-        .fm-chip-add { border: 1px dashed #3a4a5e !important; background: transparent !important; color: #b8b8c0 !important; }
-        .fm-add-input { border: 1px dashed #3a4a5e; background: transparent; color: #b8b8c0; width: 100%; box-sizing: border-box; display: block; padding: 4px 8px; font-family: inherit; font-size: 13px; border-radius: 6px; }
-        .fm-add-input:focus { outline: none; border-color: #74b1ff; background: #2c2c32; color: #ebebf0; }
-        #fmBanner .wikilink { color: #74b1ff; border-bottom-color: rgba(116,177,255,0.55); }
-        #fmBanner .wikilink:hover { background: rgba(116,177,255,0.14); }
-        .fm-chips { background: #2c2c32; border-color: #4a4a52; }
-        .fm-date-val, .fm-scalar-val, .fm-longtext-val { color: #ebebf0; }
-        .fm-readonly { font-size: 13px; color: #ebebf0; line-height: 1.9; padding: 6px 0; }
-        .fm-backlink-pill {
-          display: inline-block; padding: 1px 8px; margin: 1px 4px 1px 0;
-          background: rgba(116,177,255,0.15); color: #74b1ff; border: 1px solid #3a4a5e; border-radius: 4px;
-          font-size: 12px; font-family: inherit;
-      }
-      /* v2.2.65：公司页反向引用嵌入表格（深色） */
-      .fm-company-refs { margin-top: 8px; padding-top: 8px; border-top: 1px dashed #3a3a3e; }
-      .fm-ref-title { font-size: 12px; color: #b8b8c0; margin-bottom: 4px; font-weight: 600; }
-      .fm-ref-table { border-collapse: collapse; width: 100%; font-size: 12px; }
-      .fm-ref-table th, .fm-ref-table td { border: 1px solid #3a3a3e; padding: 4px 8px; text-align: left; vertical-align: top; }
-      .fm-ref-table th { background: #26262b; color: #ebebf0; font-weight: 600; }
-      .fm-ref-type { color: #b8b8c0; white-space: nowrap; }
-      .fm-ref-fields { color: #ebebf0; }
-      .fm-ref-fields .fm-ref-label { color: #b8b8c0; margin-right: 2px; }
-      /* v2.2.69：双链关系可编辑表格（深色） */
-      .fm-ref-subtable { margin-bottom: 10px; }
-      .fm-ref-subtitle { font-size: 11px; color: #7a7a82; margin: 6px 0 2px; font-weight: 600; }
-      .fm-ref-input { width: 100%; box-sizing: border-box; font-family: inherit; font-size: 12px; padding: 3px 6px; border: 1px solid #3a3a3e; border-radius: 5px; background: #1e1e22; color: #ebebf0; }
-      .fm-ref-input:focus { outline: none; border-color: #74b1ff; box-shadow: 0 0 0 2px rgba(116,177,255,0.14); }
-      .fm-ref-name .fm-ref-input { font-weight: 600; }
-      .fm-ref-custom { margin-top: 4px; padding-top: 4px; border-top: 1px dotted #3a3a3e; }
-      .fm-ref-custom-title { font-size: 11px; color: #7a7a82; margin-bottom: 2px; }
-      .fm-ref-custom-row { display: flex; align-items: center; gap: 4px; margin: 2px 0; }
-      .fm-ref-ckey-label { color: #b8b8c0; min-width: 64px; }
-      .fm-ref-cval { flex: 1; }
-      .fm-ref-cdel { border: 1px solid #5e3a38; background: #1e1e22; color: #ff7a7a; border-radius: 5px; cursor: pointer; padding: 2px 8px; font-size: 12px; }
-      .fm-ref-cdel:hover { background: #3a2626; }
-      .fm-ref-cadd { margin-top: 4px; padding: 2px 8px; font-size: 12px; font-family: inherit; background: transparent; color: #74b1ff; border: none; border-radius: 6px; cursor: pointer; text-align: left; }
-      .fm-ref-cadd:hover { background: rgba(116,177,255,0.08); }
-      .fm-ref-empty-block { color: #7a7a82; font-style: italic; font-size: 12px; }
-      /* v2.2.65：反向链接可编辑（深色） */
-      .fm-backlink-group { margin: 2px 0; }
-      .fm-backlink-grp-label { color: #7a7a82; margin-right: 4px; }
-      .fm-backlink-item { display: inline-flex; align-items: center; margin: 1px 4px 1px 0; background: rgba(116,177,255,0.15); color: #74b1ff; border: 1px solid #3a4a5e; border-radius: 4px; padding: 1px 2px 1px 8px; font-size: 12px; }
-      .fm-backlink-x { border: none; background: transparent; color: #ff7a7a; cursor: pointer; font-size: 13px; line-height: 1; padding: 0 4px; }
-      .fm-backlink-x:hover { color: #ff9a9a; }
-      /* v2.2.66：反向链接编辑区（深色） */
-      .fm-bl-tag { background: #2c2c32; color: #b8b8c0; }
-      .ProseMirror code { background: #2a2a2e; }
-        .ProseMirror pre { background: #26262b; }
-        .ProseMirror blockquote { border-left-color: #3a3a40; color: #b8b8c0; }
-        .ProseMirror th, .ProseMirror td { border-color: #3a3a3e; }
-        .ProseMirror th { background: #26262b; }
-        .ProseMirror hr { border-top-color: #3a3a3e; }
-        .ProseMirror p.is-editor-empty:first-child::before { color: #7a7a82; }
-        .wikilink { color: #b3a8ff; border-bottom-color: rgba(179,168,255,0.55); }
-        .wikilink:hover { background: rgba(179,168,255,0.14); }
-        .wikilink-missing { color: #ff7a7a; border-bottom-color: #ff7a7a; }
-        .wiki-ac { background: #2a2a2e; border-color: #3a3a3e; color: #ebebf0; }
-        .wiki-ac-item { color: #ebebf0; }
-        .wiki-ac-item.active, .wiki-ac-item:hover { background: #3a3a52; }
-        .wiki-preview { background: #2a2a2e; border-color: #3a3a3e; color: #ebebf0; }
-        .wiki-preview-body code { background: #26262b; }
-      }
-    </style>
-    </head>
-    <body>
-    <div id="editor"></div>
-    <script src="%TIPTAP_BASE%/tiptap.bundle.js"></script>
-    <script>
-      function mmIsDark(){ return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches; }
-      window.addEventListener('DOMContentLoaded', function(){
-        if (window.MMEditor) MMEditor.init();
-        // 暴露与 Vditor 模板同名的全局函数，复用 MarkdownEditorView 现有调用约定
-        window.loadMarkdown = function(md, editable, mode, autoLink, pageName){ return window.MMEditor.loadMarkdown(md, editable, mode, autoLink, pageName); };
-        window.requestSave = function(){ return window.MMEditor.requestSave(); };
-        window.setMode = function(m){ return window.MMEditor.setMode(m); };
-        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.editorBridge) {
-          window.webkit.messageHandlers.editorBridge.postMessage({ type: 'getPages' });
+        if last < ns.length {
+            result += ns.substring(from: last)
         }
-      });
-    </script>
-    </body>
-    </html>
-    """
+        return result
+    }
 }

@@ -779,6 +779,7 @@ function buildEditor(editable) {
     }
   })
   wireEditorDom()
+  wireFormatToolbar()
 }
 
 function getBubbleMenuEl() {
@@ -878,6 +879,8 @@ function wireEditorDom() {
   dom.addEventListener('click', e => {
     const el = e.target.closest && e.target.closest('a.wikilink')
     if (el) {
+      // 编辑时用 ⌘/Ctrl+Click 跳转；普通点击保留光标定位，符合 Obsidian 习惯。
+      if (editor && editor.isEditable && !e.metaKey && !e.ctrlKey) return
       e.preventDefault()
       const name = el.getAttribute('data-page')
       const anchor = el.getAttribute('data-anchor') || ''
@@ -888,6 +891,44 @@ function wireEditorDom() {
   })
   // v2.2.70：属性/双链均为编辑器内原生 markdown（顶部 ```yaml 代码块 + 正文 ## 反向链接 段），
   // 不再有 #fmBanner / #fmPageRefsContainer 注入式 DOM；双链点击统一由编辑器正文委托处理（见上）。
+}
+
+// 固定格式栏：补齐 Typora 常用入口，避免只有选中文字时才出现工具。
+function insertWikiTrigger() {
+  if (!editor || !editor.isEditable) return
+  const { from, to } = editor.state.selection
+  const tr = editor.state.tr.insertText('[[]]', from, to)
+  tr.setSelection(TextSelection.create(tr.doc, from + 2))
+  editor.view.dispatch(tr.scrollIntoView())
+}
+
+function wireFormatToolbar() {
+  const bar = document.getElementById('formatToolbar')
+  if (!bar || bar.dataset.wired) return
+  bar.dataset.wired = '1'
+  bar.addEventListener('mousedown', event => {
+    const button = event.target.closest && event.target.closest('button[data-cmd]')
+    if (!button || !editor || !editor.isEditable) return
+    event.preventDefault()
+    const cmd = button.getAttribute('data-cmd')
+    const actions = {
+      undo: () => editor.chain().focus().undo().run(),
+      redo: () => editor.chain().focus().redo().run(),
+      bold: () => editor.chain().focus().toggleBold().run(),
+      italic: () => editor.chain().focus().toggleItalic().run(),
+      strike: () => editor.chain().focus().toggleStrike().run(),
+      code: () => editor.chain().focus().toggleCode().run(),
+      h1: () => editor.chain().focus().toggleHeading({ level: 1 }).run(),
+      h2: () => editor.chain().focus().toggleHeading({ level: 2 }).run(),
+      h3: () => editor.chain().focus().toggleHeading({ level: 3 }).run(),
+      bullet: () => editor.chain().focus().toggleBulletList().run(),
+      ordered: () => editor.chain().focus().toggleOrderedList().run(),
+      task: () => editor.chain().focus().toggleTaskList().run(),
+      quote: () => editor.chain().focus().toggleBlockquote().run(),
+      wiki: insertWikiTrigger
+    }
+    if (actions[cmd]) actions[cmd]()
+  })
 }
 
 // ————————————————————————————————————————————————————————————————
@@ -984,6 +1025,10 @@ document.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'S')) {
     e.preventDefault()
     window.MMEditor.requestSave()
+  }
+  if ((e.metaKey || e.ctrlKey) && !e.shiftKey && (e.key === 'k' || e.key === 'K')) {
+    e.preventDefault()
+    insertWikiTrigger()
   }
 })
 

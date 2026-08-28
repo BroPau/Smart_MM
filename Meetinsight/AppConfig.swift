@@ -403,6 +403,13 @@ final class AppConfig {
         if let res = Bundle.main.resourceURL?.path {
             env["MM_APP_RESOURCES"] = res
         }
+        // Wiki 构建脚本随 PythonEngine 打入 bundle；工作目录只承载用户数据。
+        if let engine = Self.bundledPythonEngineURL() {
+            let wikiBuilder = engine.appendingPathComponent("005_LLMWiKi/wiki_build.py")
+            if FileManager.default.fileExists(atPath: wikiBuilder.path) {
+                env["MM_WIKI_BUILD_SCRIPT"] = wikiBuilder.path
+            }
+        }
         // Hugging Face 缓存根目录：沙箱 App 无法写 ~/.cache，改指容器可写 Caches/huggingface
         env["HF_HOME"] = huggingfaceHome.path
         // 用户选择跳过嵌入模型 → 停用语义 RAG

@@ -731,6 +731,7 @@ final class MinutesViewController: NSViewController,
         let langArg = (lang == "en") ? "en" : "zh"
         PipelineRunner.shared.run(
             arguments: ["--json-log", "--language", langArg],
+            cancellable: true,
             progress: { [weak self] p in self?.handleProgress(p) },
             completion: { [weak self] result in self?.handleCompletion(result) }
         )
