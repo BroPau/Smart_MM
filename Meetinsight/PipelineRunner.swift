@@ -31,10 +31,13 @@ final class PipelineRunner {
 
     static let shared = PipelineRunner()
 
-    // 只有用户明确可取消的长任务（会议生成）会登记在这里。Wiki 刷新、搜索等
-    // 短任务彼此独立，绝不能因后启动而覆盖生成任务的取消句柄。
-    private let processStateQueue = DispatchQueue(label: "pipeline.process-state")
-    private var cancellableProcess: Process?
+    private var currentProcess: Process?
+    private let outQueue = DispatchQueue(label: "pipeline.stdout")
+    private let errQueue = DispatchQueue(label: "pipeline.stderr")
+    // stderr 行缓冲（JSON-Lines 切分用，类属性以便 terminationHandler 收尾）
+    private var stderrBuffer = ""
+    // stderr 原始文本（出错时带回给用户看真正的 Python 报错）
+    private var stderrRawText = ""
 
     /// 运行 Python 脚本（默认 pipeline.py，Wiki 功能可传入 wiki_build.py / wiki_query.py 等）。
     /// - Parameters:
@@ -45,7 +48,6 @@ final class PipelineRunner {
     func run(
         script: URL? = nil,
         arguments: [String] = ["--json-log"],
-        cancellable: Bool = false,
         progress: @escaping (PipelineProgress) -> Void,
         completion: @escaping (PipelineResult) -> Void
     ) {
@@ -61,67 +63,53 @@ final class PipelineRunner {
         process.standardOutput = outPipe
         process.standardError = errPipe
 
-        // 每次调用拥有完全独立的 I/O 状态。此前这些状态挂在单例上，会让并发
-        // 的搜索/刷新/生成任务互相混入 stdout、stderr，取消也会指向错误进程。
-        let ioQueue = DispatchQueue(label: "pipeline.io.\(UUID().uuidString)")
         var stdoutData = Data()
-        var stderrBuffer = ""
-        var stderrRawText = ""
-
-        func consumeStderr(_ data: Data) {
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            stderrRawText += text
-            let combined = stderrBuffer + text
-            var lines = combined.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-            stderrBuffer = lines.popLast() ?? ""
-            for raw in lines {
-                let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !s.isEmpty, let d = s.data(using: .utf8),
-                      let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { continue }
-                let level = obj["level"] as? String ?? "info"
-                let msg = obj["msg"] as? String ?? ""
-                let step = obj["step"] as? String
-                let prog = (obj["progress"] as? NSNumber).map { $0.doubleValue }
-                DispatchQueue.main.async {
-                    progress(PipelineProgress(level: level, message: msg, step: step, progress: prog))
-                }
-            }
-        }
+        stderrBuffer = ""
+        stderrRawText = ""
 
         errPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            guard !data.isEmpty else { return }
-            ioQueue.async { consumeStderr(data) }
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            self.errQueue.async {
+                // 收集原始 stderr（出错时供用户看真正的 Python 报错）
+                self.stderrRawText += text
+                // 按行切分，保留未完成的半行到 stderrBuffer
+                let combined = self.stderrBuffer + text
+                var lines = combined.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+                self.stderrBuffer = lines.popLast() ?? ""
+                for raw in lines {
+                    let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !s.isEmpty, let d = s.data(using: .utf8),
+                          let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { continue }
+                    let level = obj["level"] as? String ?? "info"
+                    let msg = obj["msg"] as? String ?? ""
+                    let step = obj["step"] as? String
+                    let prog = (obj["progress"] as? NSNumber).map { $0.doubleValue }
+                    DispatchQueue.main.async {
+                        progress(PipelineProgress(level: level, message: msg, step: step, progress: prog))
+                    }
+                }
+            }
         }
 
         outPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
-            ioQueue.async { stdoutData.append(data) }
+            self.outQueue.async { stdoutData.append(data) }
         }
 
         process.terminationHandler = { proc in
-            // 停止回调后必须 drain EOF；仅等待队列无法读取尚留在 pipe 中的最后一段，
-            // 会造成短 JSON 输出偶发截断。
+            // 终止后立即关闭读 handler，避免继续触发空包回调
             errPipe.fileHandleForReading.readabilityHandler = nil
             outPipe.fileHandleForReading.readabilityHandler = nil
-            let trailingOut = outPipe.fileHandleForReading.readDataToEndOfFile()
-            let trailingErr = errPipe.fileHandleForReading.readDataToEndOfFile()
-            ioQueue.async {
-                stdoutData.append(trailingOut)
-                consumeStderr(trailingErr)
-            }
-            ioQueue.sync {}
 
-            if !stderrBuffer.isEmpty { stderrRawText += stderrBuffer }
+            // 确保 stdout/stderr 全部读取完毕
+            self.outQueue.sync {}
+            self.errQueue.sync {}
+
             let outText = String(data: stdoutData, encoding: .utf8) ?? ""
-            let capturedStderr = stderrRawText
+            let capturedStderr = self.stderrRawText
             let json = Self.parseTrailingJSON(outText)
-            if cancellable {
-                self.processStateQueue.async {
-                    if self.cancellableProcess === process { self.cancellableProcess = nil }
-                }
-            }
             DispatchQueue.main.async {
                 let ok = proc.terminationStatus == 0
                 let error: NSError? = ok ? nil : NSError(
@@ -140,25 +128,20 @@ final class PipelineRunner {
             }
         }
 
-        if cancellable {
-            processStateQueue.sync { cancellableProcess = process }
-        }
+        currentProcess = process
         do {
             try process.run()
         } catch {
-            if cancellable { processStateQueue.sync { cancellableProcess = nil } }
             DispatchQueue.main.async {
                 completion(PipelineResult(exitCode: -1, stdout: "", finalJSON: nil, error: error))
             }
         }
     }
 
-    /// 取消当前的可取消任务（会议生成）；不会误终止后台 Wiki 刷新或搜索。
+    /// 取消当前运行（若正在运行）。
     func cancel() {
-        processStateQueue.sync {
-            cancellableProcess?.terminate()
-            cancellableProcess = nil
-        }
+        currentProcess?.terminate()
+        currentProcess = nil
     }
 
     // MARK: - 解析 stdout 末尾 JSON（业务结果）
