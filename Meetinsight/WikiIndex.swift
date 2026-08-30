@@ -57,4 +57,21 @@ final class WikiIndex {
         guard let (_, page) = resolveWikiPage(in: pages, rawName: rawName) else { return nil }
         return page
     }
+
+    // MARK: - v2.2.75：跨模块读页（供纪要侧做双链预览 / 区块补全）
+
+    private var wikiDir: URL { AppConfig.shared.baseDir.appendingPathComponent("005_LLMWiKi") }
+
+    /// 某页的磁盘路径（首页在 005_LLMWiKi 根，其余在 wiki_pages/）。
+    func url(for page: WikiPage) -> URL {
+        page.isHome
+            ? wikiDir.appendingPathComponent(page.file)
+            : wikiDir.appendingPathComponent("wiki_pages").appendingPathComponent(page.file)
+    }
+
+    /// 按名称/别名解析并读取该页 Markdown 全文（含 frontmatter）；解析不到或读不出返回 nil。
+    func markdown(forRawName raw: String) -> String? {
+        guard let page = resolve(rawName: raw) else { return nil }
+        return try? String(contentsOf: url(for: page), encoding: .utf8)
+    }
 }

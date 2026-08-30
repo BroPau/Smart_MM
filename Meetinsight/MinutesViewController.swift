@@ -1035,9 +1035,69 @@ extension MinutesViewController: MarkdownEditorViewDelegate, SaveablePage {
         (self.parent as? MainContainerViewController)?.openWikiPage(name, anchor: anchor)
     }
 
-    func markdownEditorRequestsPageList(_ editor: MarkdownEditorView) -> [String] { [] }
+    /// v2.2.75：供容器（来自 LLM WiKi 页双链点击）调用 —— 打开同名纪要并可滚动到 #区块。
+    /// 若列表尚未扫描到该纪要（例如刚生成），先刷新一次再试。
+    func openMinute(named name: String, anchor: String? = nil) {
+        let clean = name.replacingOccurrences(of: "📥 ", with: "").trimmingCharacters(in: .whitespaces)
+        if items.first(where: { $0.name == clean }) == nil { items = scanMinutes(); tableView.reloadData() }
+        guard let item = items.first(where: { $0.name == clean }) else { return }
+        selectedIsSummary = false
+        selectedItem = item
+        if let idx = items.firstIndex(where: { $0.file == item.file }) {
+            tableView.selectRowIndexes(IndexSet(integer: idx + 1), byExtendingSelection: false)
+        }
+        showItem(item)
+        if let anchor = anchor, !anchor.isEmpty {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.editor.scrollToAnchor(anchor)
+            }
+        }
+    }
 
-    func markdownEditorPreviewForWikilink(_ editor: MarkdownEditorView, name: String) -> String? { nil }
+    /// v2.2.75【纪要 ↔ WiKi 双链互通 · 根因修复】
+    /// 此前这里返回 []，而 JS 在 DOMContentLoaded 时会主动发一次 getPages，
+    /// 回返的空数组把 showItem/showSummary 刚推下去的 WIKIPAGES 覆盖清空 ——
+    /// 结果纪要正文里所有 [[WiKi 页]] 都被判为「缺失页」（标红、自动补全无候选）。
+    /// 纪要与 LLM WiKi 原则上是同一个知识库，这里必须回返「Wiki 页名 + 纪要名」全集。
+    func markdownEditorRequestsPageList(_ editor: MarkdownEditorView) -> [String] {
+        Array(Set(WikiIndex.shared.wikiNames + items.map { $0.name }))
+    }
+
+    /// v2.2.75：悬浮预览也要互通 —— 目标可能是纪要，也可能是 WiKi 页；
+    /// 带 #区块 时只回返该区块，不带时只回返「概要块」，不再整页倾泻。
+    func markdownEditorPreviewForWikilink(_ editor: MarkdownEditorView, name: String) -> String? {
+        let (page, anchor) = Self.splitTarget(name)
+        guard !page.isEmpty else { return nil }
+        guard let text = readPageMarkdown(page) else { return nil }
+        if let a = anchor, !a.isEmpty, let block = MarkdownBlocks.block(named: a, in: text) { return block }
+        return MarkdownBlocks.summaryBlock(in: text)
+    }
+
+    /// v2.2.75：[[页面#区块]] 补全 —— 回返目标页（纪要或 WiKi 页）的区块标题。
+    func markdownEditorHeadings(_ editor: MarkdownEditorView, forPage page: String) -> [String] {
+        let (base, _) = Self.splitTarget(page)
+        guard let text = readPageMarkdown(base) else { return [] }
+        return MarkdownBlocks.headings(in: text)
+    }
+
+    /// 先按纪要名找，再按 WiKi 页名解析（别名一并解析）。
+    private func readPageMarkdown(_ name: String) -> String? {
+        let clean = name.replacingOccurrences(of: "📥 ", with: "").trimmingCharacters(in: .whitespaces)
+        if let item = items.first(where: { $0.name == clean }),
+           let text = try? String(contentsOf: item.url, encoding: .utf8) {
+            return text
+        }
+        return WikiIndex.shared.markdown(forRawName: clean)
+    }
+
+    /// 把「页面#区块」拆成 (页面, 区块)。
+    static func splitTarget(_ raw: String) -> (String, String?) {
+        let s = raw.trimmingCharacters(in: .whitespaces)
+        guard let h = s.firstIndex(of: "#") else { return (s, nil) }
+        let page = String(s[s.startIndex..<h]).trimmingCharacters(in: .whitespaces)
+        let anchor = String(s[s.index(after: h)...]).trimmingCharacters(in: .whitespaces)
+        return (page.isEmpty ? s : page, anchor.isEmpty ? nil : anchor)
+    }
 }
 
 // MARK: - 侧栏行视图：名称 +「导入」标记 + 右侧短日期，双击可改名

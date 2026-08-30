@@ -388,8 +388,8 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
             var hit = false
             regex?.enumerateMatches(in: text, options: [], range: range) { match, _, _ in
                 guard let match, let r = Range(match.range(at: 1), in: text) else { return }
-                let target = String(text[r]).trimmingCharacters(in: .whitespaces).lowercased()
-                if targets.contains(target) { hit = true }
+                // v2.2.75：去掉 #区块 锚点后再比对，块级引用同样算作引用本页
+                if targets.contains(Self.linkTargetKey(String(text[r]))) { hit = true }
             }
             guard hit else { continue }
             let key = p.name.lowercased()
@@ -409,7 +409,47 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
             if !fields.isEmpty { dict["fields"] = fields }
             out.append(dict)
         }
+        // v2.2.75【反向互通】LLM WiKi 与会议纪要是同一个知识库 ——
+        // 凡在 003_Meeting_Minutes 里 [[引用本页]] 的纪要，同样列入「引用本页的页面」。
+        out.append(contentsOf: minutesReferencing(targets: targets))
         return out
+    }
+
+    /// v2.2.75：扫描 003_Meeting_Minutes，找出正文里 [[引用了本页]] 的纪要。
+    private func minutesReferencing(targets: Set<String>) -> [[String: Any]] {
+        let dir = AppConfig.shared.baseDir.appendingPathComponent("003_Meeting_Minutes")
+        guard FileManager.default.fileExists(atPath: dir.path) else { return [] }
+        guard let en = FileManager.default.enumerator(
+            at: dir, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]
+        ) else { return [] }
+        let regex = try? NSRegularExpression(pattern: #"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]"#, options: [])
+        var out: [[String: Any]] = []
+        var seen = Set<String>()
+        for case let url as URL in en {
+            guard url.pathExtension.lowercased() == "md" else { continue }
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            var hit = false
+            let range = NSRange(text.startIndex..., in: text)
+            regex?.enumerateMatches(in: text, options: [], range: range) { match, _, _ in
+                guard let match, let r = Range(match.range(at: 1), in: text) else { return }
+                if targets.contains(Self.linkTargetKey(String(text[r]))) { hit = true }
+            }
+            guard hit else { continue }
+            let name = url.deletingPathExtension().lastPathComponent
+            let key = name.lowercased()
+            guard !seen.contains(key) else { continue }
+            seen.insert(key)
+            out.append(["name": name, "type": "会议纪要"])
+        }
+        return out.sorted { ($0["name"] as? String ?? "") < ($1["name"] as? String ?? "") }
+    }
+
+    /// v2.2.75：把 [[目标]] 里的原始文本归一为比较键 —— 去掉 #区块 锚点、去空白、小写。
+    /// （不做这一步，[[格力电器#三、四大业务板块]] 这类块级引用会算不进反向链接。）
+    static func linkTargetKey(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespaces)
+        if let h = s.firstIndex(of: "#") { s = String(s[s.startIndex..<h]) }
+        return s.trimmingCharacters(in: .whitespaces).lowercased()
     }
 
     /// v2.2.68：扫描「当前页正文里 [[链接]] 到的页面」（outgoing 出链），返回其「名称 + 类型 + 关键属性」明细，
@@ -422,7 +462,9 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         let range = NSRange(text.startIndex..., in: text)
         regex?.enumerateMatches(in: text, options: [], range: range) { match, _, _ in
             guard let match, let r = Range(match.range(at: 1), in: text) else { return }
-            let t = String(text[r]).trimmingCharacters(in: .whitespaces)
+            // v2.2.75：出链同样先剥掉 #区块 锚点，否则 [[页面#区块]] 解析不到目标页
+            var t = String(text[r]).trimmingCharacters(in: .whitespaces)
+            if let h = t.firstIndex(of: "#") { t = String(t[t.startIndex..<h]).trimmingCharacters(in: .whitespaces) }
             if !t.isEmpty { rawTargets.append(t) }
         }
         var out: [[String: Any]] = []
@@ -1174,6 +1216,12 @@ extension WikiViewController: MarkdownEditorViewDelegate, SaveablePage {
             }
             return
         }
+        // v2.2.75【反向互通】没命中 WiKi 页时，先看是不是一份会议纪要 ——
+        // 两个库互通，Wiki 页里的 [[纪要名]] 应当能直接跳到纪要页，而不是弹「新建 WiKi 页」。
+        if Self.minuteURL(named: name) != nil {
+            (self.parent as? MainContainerViewController)?.openMinute(name, anchor: anchor)
+            return
+        }
         // 没找到页、但带了锚点（例如旧数据里 [[#Heading]] 被当成页名）：尝试在当前页内滚动到该标题。
         if let anchor = anchor, !anchor.isEmpty {
             editor.scrollToAnchor(anchor)
@@ -1227,23 +1275,69 @@ extension WikiViewController: MarkdownEditorViewDelegate, SaveablePage {
     }
 
     /// 编辑器初始化时请求现有页面名列表（含别名），供双链自动完成 / 缺失页判定。
+    /// v2.2.75：把会议纪要名一并纳入 —— WiKi 页正文里的 [[纪要名]] 也应识别为已知页、可跳转。
     func markdownEditorRequestsPageList(_ editor: MarkdownEditorView) -> [String] {
-        Array(Set(pages.flatMap { [$0.name] + $0.aliases }))
+        Array(Set(pages.flatMap { [$0.name] + $0.aliases } + Self.minuteNames()))
     }
 
-    /// 悬浮预览：返回目标页正文（已剥离 frontmatter）；页面不存在返回 nil。
+    /// v2.2.75：列出 003_Meeting_Minutes 下所有纪要名（去扩展名，含 imported_* 子目录）。
+    static func minuteNames() -> [String] {
+        let dir = AppConfig.shared.baseDir.appendingPathComponent("003_Meeting_Minutes")
+        guard let en = FileManager.default.enumerator(
+            at: dir, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]
+        ) else { return [] }
+        var out: [String] = []
+        for case let url as URL in en where url.pathExtension.lowercased() == "md" {
+            out.append(url.deletingPathExtension().lastPathComponent)
+        }
+        return out
+    }
+
+    /// 悬浮预览：v2.2.75 起改为「按区块返回」——
+    ///   [[页面#区块]] → 只返回该区块（标题 + 其下内容，到下一个同级标题为止）
+    ///   [[页面]]      → 只返回「概要块」（H1 之后到首个二级标题之前）
+    /// 此前无条件回返全文，导致 frontmatter 的 Company 双链把整页内容都倾泻到气泡里。
     func markdownEditorPreviewForWikilink(_ editor: MarkdownEditorView, name: String) -> String? {
-        guard let (_, page) = resolveWikiPage(in: pages, rawName: name) else { return nil }
-        let url = page.isHome ? homeFile : wikiPagesDir.appendingPathComponent(page.file)
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
-        // 剥离 YAML frontmatter，仅返回正文
-        let lines = text.replacingOccurrences(of: "\r\n", with: "\n").split(separator: "\n", omittingEmptySubsequences: false)
-        guard lines.first?.trimmingCharacters(in: .whitespaces) == "---" else { return text }
-        var j = 1
-        while j < lines.count && lines[j].trimmingCharacters(in: .whitespaces) != "---" { j += 1 }
-        guard j < lines.count else { return text }
-        let body = lines.dropFirst(j + 1).joined(separator: "\n")
-        return body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : body
+        let (base, anchor) = MinutesViewController.splitTarget(name)
+        guard let text = pageMarkdown(forRawName: base) else { return nil }
+        if let a = anchor, !a.isEmpty, let block = MarkdownBlocks.block(named: a, in: text) { return block }
+        let summary = MarkdownBlocks.summaryBlock(in: text)
+        return summary.isEmpty ? nil : summary
+    }
+
+    /// v2.2.75：[[页面#区块]] 补全 —— 回返目标页（WiKi 页或纪要）的区块标题列表。
+    func markdownEditorHeadings(_ editor: MarkdownEditorView, forPage page: String) -> [String] {
+        let (base, _) = MinutesViewController.splitTarget(page)
+        guard let text = pageMarkdown(forRawName: base) else { return [] }
+        return MarkdownBlocks.headings(in: text)
+    }
+
+    /// 读取一页正文（含 frontmatter）：先按 WiKi 页解析，再回退到 003_Meeting_Minutes 的同名纪要。
+    /// —— 两个库互通，所以查找顺序上「本模块优先、跨模块兜底」。
+    private func pageMarkdown(forRawName raw: String) -> String? {
+        if let (_, page) = resolveWikiPage(in: pages, rawName: raw) {
+            let url = page.isHome ? homeFile : wikiPagesDir.appendingPathComponent(page.file)
+            if let text = try? String(contentsOf: url, encoding: .utf8) { return text }
+        }
+        if let url = Self.minuteURL(named: raw), let text = try? String(contentsOf: url, encoding: .utf8) {
+            return text
+        }
+        return nil
+    }
+
+    /// v2.2.75：在 003_Meeting_Minutes（含 imported_* 子目录）里按名称找纪要文件。
+    static func minuteURL(named raw: String) -> URL? {
+        let name = raw.replacingOccurrences(of: "📥 ", with: "").trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return nil }
+        let dir = AppConfig.shared.baseDir.appendingPathComponent("003_Meeting_Minutes")
+        guard let en = FileManager.default.enumerator(
+            at: dir, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]
+        ) else { return nil }
+        for case let url as URL in en {
+            guard url.pathExtension.lowercased() == "md" else { continue }
+            if url.deletingPathExtension().lastPathComponent == name { return url }
+        }
+        return nil
     }
 
     // MARK: - frontmatter 解析/渲染的唯一出口在 pipeline.py

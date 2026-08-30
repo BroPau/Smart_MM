@@ -31,6 +31,9 @@ protocol MarkdownEditorViewDelegate: AnyObject {
     /// v2.2.68：用户在正文末尾「双链关系」表格里输入页面名并回车，请求建立双链。
     /// mode = "out" 表示「本页引用该页」，mode = "in" 表示「该页引用本页」；name 为页面名（不存在则自动新建 WiKi 页）。
     func markdownEditorDidRequestAddPageLink(_ editor: MarkdownEditorView, mode: String, name: String)
+    /// v2.2.75：输入 [[页面# 时请求「目标页的区块标题列表」，供块级引用（[[页面#区块]]）自动补全。
+    /// 返回该页所有 Markdown 标题文本（不含 # 前缀）；页面不存在返回 []。
+    func markdownEditorHeadings(_ editor: MarkdownEditorView, forPage page: String) -> [String]
 }
 
 /// 接收 WKWebView 的 JS 消息，转发到主线程闭包。
@@ -49,6 +52,98 @@ fileprivate final class EditorMessageHandler: NSObject, WKScriptMessageHandler {
 extension MarkdownEditorViewDelegate {
     func markdownEditorDidRequestEditProperties(_ editor: MarkdownEditorView, markdown: String) {}
     func markdownEditorDidRequestAddPageLink(_ editor: MarkdownEditorView, mode: String, name: String) {}
+    func markdownEditorHeadings(_ editor: MarkdownEditorView, forPage page: String) -> [String] { [] }
+}
+
+/// v2.2.75：Markdown 标题 / 区块抽取工具 —— 供「块级引用」的补全与悬浮预览共用。
+/// 纪要与 WiKi 是同一个知识库，两侧解析规则必须一致，故收敛到一处。
+enum MarkdownBlocks {
+
+    /// 抽出全部标题文本（去掉前导 #、尾随空白与 Obsidian 尾部锚点）。
+    static func headings(in markdown: String) -> [String] {
+        var out: [String] = []
+        var inFence = false
+        for raw in stripFrontmatter(markdown).components(separatedBy: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("```") || line.hasPrefix("~~~") { inFence.toggle(); continue }
+            if inFence { continue }
+            guard line.hasPrefix("#") else { continue }
+            let hashes = line.prefix { $0 == "#" }
+            guard hashes.count <= 6, line.count > hashes.count else { continue }
+            let text = line.dropFirst(hashes.count).trimmingCharacters(in: .whitespaces)
+            if !text.isEmpty { out.append(text) }
+        }
+        return out
+    }
+
+    /// 取 anchor 对应的「区块」：从匹配标题起，到下一个同级或更高级标题止。
+    /// 匹配不到标题时返回 nil（调用方可回退为全文或首段）。
+    static func block(named anchor: String, in markdown: String) -> String? {
+        let target = normalize(anchor)
+        guard !target.isEmpty else { return nil }
+        let lines = stripFrontmatter(markdown).components(separatedBy: "\n")
+        var startIdx: Int? = nil
+        var startLevel = 0
+        var inFence = false
+        for (i, raw) in lines.enumerated() {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("```") || line.hasPrefix("~~~") { inFence.toggle(); continue }
+            if inFence { continue }
+            guard line.hasPrefix("#") else { continue }
+            let hashes = line.prefix { $0 == "#" }
+            let level = hashes.count
+            guard level <= 6 else { continue }
+            let text = line.dropFirst(level).trimmingCharacters(in: .whitespaces)
+            if startIdx == nil {
+                if normalize(text) == target { startIdx = i; startLevel = level }
+            } else if level <= startLevel {
+                return lines[startIdx!..<i].joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        guard let s = startIdx else { return nil }
+        return lines[s...].joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 「概要块」：H1 之后到首个二级标题之前的内容（没有则退化为正文前若干行）。
+    /// 用于无锚点双链的悬浮预览 —— 只给摘要，不再整页倾泻。
+    static func summaryBlock(in markdown: String, maxLines: Int = 14) -> String {
+        let body = stripFrontmatter(markdown)
+        var lines = body.components(separatedBy: "\n")
+        // 去掉开头的 H1 标题行与空行
+        while let f = lines.first {
+            let t = f.trimmingCharacters(in: .whitespaces)
+            if t.isEmpty || (t.hasPrefix("# ") && !t.hasPrefix("## ")) { lines.removeFirst() } else { break }
+        }
+        var out: [String] = []
+        var inFence = false
+        for raw in lines {
+            let t = raw.trimmingCharacters(in: .whitespaces)
+            if t.hasPrefix("```") || t.hasPrefix("~~~") { inFence.toggle() }
+            if !inFence, t.hasPrefix("#") { break }
+            out.append(raw)
+            if out.count >= maxLines { break }
+        }
+        let s = out.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return s.isEmpty ? body.trimmingCharacters(in: .whitespacesAndNewlines) : s
+    }
+
+    /// 剥离 YAML frontmatter（--- … ---）。
+    static func stripFrontmatter(_ markdown: String) -> String {
+        let text = markdown.replacingOccurrences(of: "\r\n", with: "\n")
+        let lines = text.components(separatedBy: "\n")
+        guard let first = lines.first, first.trimmingCharacters(in: .whitespaces) == "---" else { return text }
+        var j = 1
+        while j < lines.count, lines[j].trimmingCharacters(in: .whitespaces) != "---" { j += 1 }
+        guard j < lines.count else { return text }
+        return lines[(j + 1)...].joined(separator: "\n")
+    }
+
+    private static func normalize(_ s: String) -> String {
+        s.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "　", with: "")
+            .lowercased()
+    }
 }
 
 final class MarkdownEditorView: NSView, WKNavigationDelegate {
@@ -266,6 +361,18 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
                 let jsMd = jsString(md ?? "")
                 DispatchQueue.main.async {
                     self.webView.evaluateJavaScript("MMEditor.showPreview(\(jsName), \(jsMd))")
+                }
+            }
+        case "pageHeadings":
+            // v2.2.75：[[页面# 块级引用补全 —— 回返目标页的区块标题。
+            // 同样必须延后到下一个 runloop 再 evaluateJavaScript，规避 WebKit 消息通道死锁。
+            if let name = message["name"] as? String {
+                let heads = delegate?.markdownEditorHeadings(self, forPage: name) ?? []
+                let jsName = jsString(name)
+                let arr: String = (try? JSONSerialization.data(withJSONObject: heads))
+                    .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+                DispatchQueue.main.async { [weak self] in
+                    self?.webView.evaluateJavaScript("MMEditor.setPageHeadings(\(jsName), \(arr))")
                 }
             }
         case "getCustomTypes":
@@ -935,6 +1042,28 @@ fileprivate enum TipTapEditorHTML {
       .ProseMirror .pm-table th, .ProseMirror .pm-table td { border: 1px solid #d8d8e0; padding: 6px 10px; text-align: left; vertical-align: top; width: auto; }
       .ProseMirror .pm-table th { background: #f4f5f9; font-weight: 600; color: #2a2a2e; }
       .ProseMirror .pm-table colgroup col { width: auto !important; }
+      .ProseMirror .selectedCell { position: relative; }
+      .ProseMirror .selectedCell:after {
+        content: ""; position: absolute; inset: 0; background: rgba(91,84,214,0.12); pointer-events: none;
+      }
+      /* v2.2.75：表格增删行列浮动工具条（光标进入表格时浮现） */
+      .pm-table-bar {
+        position: absolute; z-index: 9200; display: none; align-items: center; gap: 3px;
+        background: #ffffff; border: 1px solid #d8d8e0; border-radius: 8px; padding: 3px 5px;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.13); font-size: 12px; white-space: nowrap;
+      }
+      .pm-table-bar-btn {
+        appearance: none; border: none; background: transparent; color: #35353c;
+        padding: 3px 7px; border-radius: 5px; cursor: pointer; font-size: 12px; line-height: 1.3;
+      }
+      .pm-table-bar-btn:hover { background: #eef0ff; color: #4a43c8; }
+      .pm-table-bar-btn.danger:hover { background: #fdecec; color: #c62f2f; }
+      .pm-table-bar-btn[data-disabled="1"] { opacity: 0.35; cursor: default; }
+      .pm-table-bar-btn[data-disabled="1"]:hover { background: transparent; color: #35353c; }
+      .pm-table-bar-sep { width: 1px; height: 14px; background: #e2e3e8; margin: 0 2px; }
+      .pm-table-bar-note { color: #8a8a92; font-size: 11px; padding: 0 4px; }
+      /* v2.2.75：带 #区块 锚点的双链 —— 加一枚小锚标记以区别整页引用 */
+      .wikilink-anchored::after { content: "§"; font-size: 0.78em; opacity: 0.62; margin-left: 1px; }
       .ProseMirror hr { border: none; border-top: 1px solid #e2e3e8; margin: 1em 0; }
       .ProseMirror img { max-width: 100%; border-radius: 6px; }
       .ProseMirror p.is-editor-empty:first-child::before {
@@ -1043,6 +1172,14 @@ fileprivate enum TipTapEditorHTML {
         .ProseMirror blockquote { border-left-color: #3a3a40; color: #b8b8c0; }
         .ProseMirror .pm-table th, .ProseMirror .pm-table td { border-color: #3a3a3e; }
         .ProseMirror .pm-table th { background: #26262b; }
+        .ProseMirror .selectedCell:after { background: rgba(179,168,255,0.16); }
+        .pm-table-bar { background: #2a2a2e; border-color: #3a3a3e; box-shadow: 0 4px 16px rgba(0,0,0,0.42); }
+        .pm-table-bar-btn { color: #d6d6de; }
+        .pm-table-bar-btn:hover { background: #3a3a52; color: #cfc6ff; }
+        .pm-table-bar-btn.danger:hover { background: #4a2b2b; color: #ff9c9c; }
+        .pm-table-bar-btn[data-disabled="1"]:hover { background: transparent; color: #d6d6de; }
+        .pm-table-bar-sep { background: #3a3a3e; }
+        .pm-table-bar-note { color: #8a8a92; }
         .ProseMirror hr { border-top-color: #3a3a3e; }
         .ProseMirror p.is-editor-empty:first-child::before { color: #7a7a82; }
         .wikilink { color: #b3a8ff; border-bottom-color: rgba(179,168,255,0.55); }
@@ -1183,6 +1320,28 @@ fileprivate enum MilkdownEditorHTML {
       .ProseMirror .pm-table th, .ProseMirror .pm-table td { border: 1px solid #d8d8e0; padding: 6px 10px; text-align: left; vertical-align: top; width: auto; }
       .ProseMirror .pm-table th { background: #f4f5f9; font-weight: 600; color: #2a2a2e; }
       .ProseMirror .pm-table colgroup col { width: auto !important; }
+      .ProseMirror .selectedCell { position: relative; }
+      .ProseMirror .selectedCell:after {
+        content: ""; position: absolute; inset: 0; background: rgba(91,84,214,0.12); pointer-events: none;
+      }
+      /* v2.2.75：表格增删行列浮动工具条（光标进入表格时浮现） */
+      .pm-table-bar {
+        position: absolute; z-index: 9200; display: none; align-items: center; gap: 3px;
+        background: #ffffff; border: 1px solid #d8d8e0; border-radius: 8px; padding: 3px 5px;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.13); font-size: 12px; white-space: nowrap;
+      }
+      .pm-table-bar-btn {
+        appearance: none; border: none; background: transparent; color: #35353c;
+        padding: 3px 7px; border-radius: 5px; cursor: pointer; font-size: 12px; line-height: 1.3;
+      }
+      .pm-table-bar-btn:hover { background: #eef0ff; color: #4a43c8; }
+      .pm-table-bar-btn.danger:hover { background: #fdecec; color: #c62f2f; }
+      .pm-table-bar-btn[data-disabled="1"] { opacity: 0.35; cursor: default; }
+      .pm-table-bar-btn[data-disabled="1"]:hover { background: transparent; color: #35353c; }
+      .pm-table-bar-sep { width: 1px; height: 14px; background: #e2e3e8; margin: 0 2px; }
+      .pm-table-bar-note { color: #8a8a92; font-size: 11px; padding: 0 4px; }
+      /* v2.2.75：带 #区块 锚点的双链 —— 加一枚小锚标记以区别整页引用 */
+      .wikilink-anchored::after { content: "§"; font-size: 0.78em; opacity: 0.62; margin-left: 1px; }
       .ProseMirror .fm-section-label { font-weight: 600; margin: 18px 0 4px; color: #3a3a40; font-size: 14px; }
       .ProseMirror .fm-section-divider { border: none; border-top: 1px dashed #d8d8e0; margin: 14px 0; }
       .ProseMirror > * { margin: 0 0 0.7em; }
@@ -1293,6 +1452,14 @@ fileprivate enum MilkdownEditorHTML {
         .ProseMirror blockquote { border-left-color: #3a3a40; color: #b8b8c0; }
         .ProseMirror .pm-table th, .ProseMirror .pm-table td { border-color: #3a3a3e; }
         .ProseMirror .pm-table th { background: #26262b; }
+        .ProseMirror .selectedCell:after { background: rgba(179,168,255,0.16); }
+        .pm-table-bar { background: #2a2a2e; border-color: #3a3a3e; box-shadow: 0 4px 16px rgba(0,0,0,0.42); }
+        .pm-table-bar-btn { color: #d6d6de; }
+        .pm-table-bar-btn:hover { background: #3a3a52; color: #cfc6ff; }
+        .pm-table-bar-btn.danger:hover { background: #4a2b2b; color: #ff9c9c; }
+        .pm-table-bar-btn[data-disabled="1"]:hover { background: transparent; color: #d6d6de; }
+        .pm-table-bar-sep { background: #3a3a3e; }
+        .pm-table-bar-note { color: #8a8a92; }
         .ProseMirror hr { border-top-color: #3a3a3e; }
         .ProseMirror p.is-editor-empty:first-child::before { color: #7a7a82; }
         .wikilink { color: #b3a8ff; border-bottom-color: rgba(179,168,255,0.55); }

@@ -25748,6 +25748,51 @@
     }
     return true;
   }
+  function rowIsHeader(map4, table, row) {
+    var _table$nodeAt;
+    const headerCell = tableNodeTypes(table.type.schema).header_cell;
+    for (let col = 0; col < map4.width; col++) if (((_table$nodeAt = table.nodeAt(map4.map[col + row * map4.width])) === null || _table$nodeAt === void 0 ? void 0 : _table$nodeAt.type) != headerCell) return false;
+    return true;
+  }
+  function addRow(tr, { map: map4, tableStart, table }, row) {
+    let rowPos = tableStart;
+    for (let i2 = 0; i2 < row; i2++) rowPos += table.child(i2).nodeSize;
+    const cells = [];
+    let refRow = row > 0 ? -1 : 0;
+    if (rowIsHeader(map4, table, row + refRow)) refRow = row == 0 || row == map4.height ? null : 0;
+    for (let col = 0, index2 = map4.width * row; col < map4.width; col++, index2++) if (row > 0 && row < map4.height && map4.map[index2] == map4.map[index2 - map4.width]) {
+      const pos = map4.map[index2];
+      const attrs = table.nodeAt(pos).attrs;
+      tr.setNodeMarkup(tableStart + pos, null, {
+        ...attrs,
+        rowspan: attrs.rowspan + 1
+      });
+      col += attrs.colspan - 1;
+    } else {
+      var _table$nodeAt2;
+      const type = refRow == null ? tableNodeTypes(table.type.schema).cell : (_table$nodeAt2 = table.nodeAt(map4.map[index2 + refRow * map4.width])) === null || _table$nodeAt2 === void 0 ? void 0 : _table$nodeAt2.type;
+      const node2 = type === null || type === void 0 ? void 0 : type.createAndFill();
+      if (node2) cells.push(node2);
+    }
+    tr.insert(rowPos, tableNodeTypes(table.type.schema).row.create(null, cells));
+    return tr;
+  }
+  function addRowBefore(state, dispatch) {
+    if (!isInTable(state)) return false;
+    if (dispatch) {
+      const rect = selectedRect(state);
+      dispatch(addRow(state.tr, rect, rect.top));
+    }
+    return true;
+  }
+  function addRowAfter(state, dispatch) {
+    if (!isInTable(state)) return false;
+    if (dispatch) {
+      const rect = selectedRect(state);
+      dispatch(addRow(state.tr, rect, rect.bottom));
+    }
+    return true;
+  }
   function removeRow(tr, { map: map4, table, tableStart }, row) {
     let rowPos = 0;
     for (let i2 = 0; i2 < row; i2++) rowPos += table.child(i2).nodeSize;
@@ -29775,6 +29820,9 @@
   function escapeHtml(s) {
     return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
+  function escapeAttr(s) {
+    return escapeHtml(s).replace(/"/g, "&quot;");
+  }
   function splitFrontmatter(md) {
     const L = (md || "").replace(/\r\n/g, "\n").split("\n");
     if (L.length && L[0].trim() === "---") {
@@ -29955,34 +30003,55 @@
   ];
   var FM_SKIP = { wiki_\u9996\u9875: 1, backlinks: 1 };
   var FM_WIKILINK_KEYS = { company: 1, alternative: 1, suspected_alias_of: 1 };
-  function itemToWikilink(v, display) {
+  function parseWikiTarget(v) {
     let s = v == null ? "" : String(v).trim();
-    const m = /^\[([^\]]*)\]\(wikilink:([^)\s]+)\)$/.exec(s);
-    let page = m ? m[2] : s;
-    try {
-      page = decodeURIComponent(page);
-    } catch (e) {
+    if (s.startsWith('"') && s.endsWith('"') || s.startsWith("'") && s.endsWith("'")) s = s.slice(1, -1).trim();
+    let target = s, alias = "";
+    let m = /^\[([^\]]*)\]\(wikilink:([^)\s]+)\)$/.exec(s);
+    if (m) {
+      alias = (m[1] || "").trim();
+      target = m[2];
+      try {
+        target = decodeURIComponent(target);
+      } catch (e) {
+      }
+    } else {
+      m = /^\[\[([^\[\]]+)\]\]$/.exec(s);
+      if (m) target = m[1].trim();
+      const bar = target.indexOf("|");
+      if (bar >= 0) {
+        alias = target.slice(bar + 1).trim();
+        target = target.slice(0, bar).trim();
+      }
     }
-    if (!display) return yamlScalar(page);
-    if (WIKIPAGES.length && WIKIPAGES.some((p) => p.toLowerCase() === page.toLowerCase())) {
-      const enc = encodeURIComponent(page);
-      return '"[' + page + "](wikilink:" + enc + ')"';
+    let page = target, anchor = "";
+    const h = target.indexOf("#");
+    if (h >= 0) {
+      page = target.slice(0, h).trim();
+      anchor = target.slice(h + 1).trim();
     }
-    return yamlScalar(page);
+    const full = page + (anchor ? "#" + anchor : "");
+    if (alias && (alias === full || alias === page)) alias = "";
+    return { page, anchor, alias, target: full };
+  }
+  function itemToWikilink(v, display) {
+    const t = parseWikiTarget(v);
+    if (!t.page) return yamlScalar(String(v == null ? "" : v).trim());
+    const full = t.target;
+    if (!display) {
+      const inner = full + (t.alias ? "|" + t.alias : "");
+      return yamlScalar("[[" + inner + "]]");
+    }
+    if (WIKIPAGES.length && WIKIPAGES.some((p) => p.toLowerCase() === t.page.toLowerCase())) {
+      const enc = encodeURIComponent(full);
+      return '"[' + (t.alias || full) + "](wikilink:" + enc + ')"';
+    }
+    return yamlScalar(full);
   }
   function parseWikilinkItem(s) {
     if (typeof s !== "string") return String(s);
-    let t = s.trim();
-    if (t.startsWith('"') && t.endsWith('"') || t.startsWith("'") && t.endsWith("'")) t = t.slice(1, -1).trim();
-    const m = /^\[([^\]]*)\]\(wikilink:([^)\s]+)\)$/.exec(t);
-    if (m) {
-      try {
-        return decodeURIComponent(m[2]);
-      } catch (e) {
-        return m[2];
-      }
-    }
-    return t;
+    const t = parseWikiTarget(s);
+    return t.page ? t.target : s.trim();
   }
   function fmOrderedKeys(fm) {
     const known = FM_ORDER.filter((k) => Object.prototype.hasOwnProperty.call(fm, k));
@@ -30014,7 +30083,7 @@
     }, 220);
   }
   function showPreviewFor(el) {
-    const name = el.getAttribute("data-page");
+    const name = el.getAttribute("data-wikilink") || el.getAttribute("data-page");
     if (!name) return;
     const pv = ensurePreviewEl();
     previewActiveName = name;
@@ -30090,12 +30159,14 @@
               anchor = target.slice(h + 1).trim();
             }
             const missing = page && WIKIPAGES.length && !WIKIPAGES.some((p) => p.toLowerCase() === page.toLowerCase());
-            const cls = "wikilink" + (missing ? " wikilink-missing" : "");
-            decos.push(Decoration.inline(pos, pos + node2.nodeSize, {
+            const cls = "wikilink" + (missing ? " wikilink-missing" : "") + (anchor ? " wikilink-anchored" : "");
+            const attrs = {
               class: cls,
               "data-wikilink": target,
               "data-page": page
-            }));
+            };
+            if (anchor) attrs["data-anchor"] = anchor;
+            decos.push(Decoration.inline(pos, pos + node2.nodeSize, attrs));
           });
           return DecorationSet.create(state.doc, decos);
         }
@@ -30196,7 +30267,7 @@
     });
   }
   var wikilinkInCodeKey = new PluginKey("wikilinkInCode");
-  var IN_CODE_WL_RE = /\[([^\]]*)\]\(wikilink:([^)\s]+)\)/g;
+  var IN_CODE_WL_RE = /\[([^\]]*)\]\(wikilink:([^)\s]+)\)|\[\[([^\[\]\n]+)\]\]/g;
   function wikilinkInsideCodePlugin() {
     return new Plugin({
       key: wikilinkInCodeKey,
@@ -30214,17 +30285,16 @@
             while ((m = IN_CODE_WL_RE.exec(text5)) !== null) {
               const start = base2 + m.index;
               const end = start + m[0].length;
-              let page = m[2];
-              try {
-                page = decodeURIComponent(page);
-              } catch (e) {
-              }
-              const missing = page && WIKIPAGES.length && !WIKIPAGES.some((p) => p.toLowerCase() === page.toLowerCase());
-              decos.push(Decoration.inline(start, end, {
-                class: "wikilink" + (missing ? " wikilink-missing" : ""),
-                "data-wikilink": page,
-                "data-page": page
-              }));
+              const t = parseWikiTarget(m[0]);
+              if (!t.page) continue;
+              const missing = WIKIPAGES.length && !WIKIPAGES.some((p) => p.toLowerCase() === t.page.toLowerCase());
+              const attrs = {
+                class: "wikilink" + (missing ? " wikilink-missing" : "") + (t.anchor ? " wikilink-anchored" : ""),
+                "data-wikilink": t.target,
+                "data-page": t.page
+              };
+              if (t.anchor) attrs["data-anchor"] = t.anchor;
+              decos.push(Decoration.inline(start, end, attrs));
             }
           });
           return DecorationSet.create(state.doc, decos);
@@ -30251,6 +30321,126 @@
       }
     });
   }
+  var TABLE_BAR_ACTIONS = [
+    { label: "\uFF0B\u884C\u2191", title: "\u5728\u4E0A\u65B9\u63D2\u5165\u4E00\u884C", cmd: addRowBefore },
+    { label: "\uFF0B\u884C\u2193", title: "\u5728\u4E0B\u65B9\u63D2\u5165\u4E00\u884C", cmd: addRowAfter },
+    { label: "\uFF0D\u884C", title: "\u5220\u9664\u5F53\u524D\u884C", cmd: deleteRow, danger: true },
+    { sep: true },
+    { label: "\uFF0B\u5217\u2190", title: "\u5728\u5DE6\u4FA7\u63D2\u5165\u4E00\u5217", cmd: addColumnBefore },
+    { label: "\uFF0B\u5217\u2192", title: "\u5728\u53F3\u4FA7\u63D2\u5165\u4E00\u5217", cmd: addColumnAfter },
+    { label: "\uFF0D\u5217", title: "\u5220\u9664\u5F53\u524D\u5217", cmd: deleteColumn, danger: true },
+    { sep: true },
+    { label: "\u8868\u5934", title: "\u5207\u6362\u9996\u884C\u4E3A\u8868\u5934", cmd: toggleHeaderRow },
+    { label: "\u5220\u8868", title: "\u5220\u9664\u6574\u5F20\u8868\u683C", cmd: deleteTable, danger: true }
+  ];
+  function derivedTableRanges(doc4) {
+    const ranges = [];
+    let open = -1;
+    doc4.descendants((node2, pos) => {
+      let raw = "";
+      if (node2.isText) raw = node2.text || "";
+      else if (node2.attrs && typeof node2.attrs.value === "string") raw = node2.attrs.value;
+      else raw = node2.textContent || "";
+      if (!raw) return;
+      if (raw.indexOf("REFS_TABLE_BEGIN") >= 0) open = pos;
+      else if (raw.indexOf("REFS_TABLE_END") >= 0 && open >= 0) {
+        ranges.push([open, pos]);
+        open = -1;
+      }
+    });
+    if (open >= 0) ranges.push([open, doc4.content.size]);
+    return ranges;
+  }
+  var tableBarKey = new PluginKey("pmTableBar");
+  var TableBarView = class {
+    constructor(view) {
+      this.view = view;
+      this.bar = document.createElement("div");
+      this.bar.className = "pm-table-bar";
+      this.bar.style.display = "none";
+      const host = view.dom.parentNode || document.body;
+      host.appendChild(this.bar);
+      this.bar.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        const btn = e.target.closest && e.target.closest("[data-act]");
+        if (!btn || btn.getAttribute("data-disabled") === "1") return;
+        const idx = parseInt(btn.getAttribute("data-act"), 10);
+        const act = TABLE_BAR_ACTIONS[idx];
+        if (act && act.cmd) {
+          act.cmd(this.view.state, this.view.dispatch, this.view);
+          this.view.focus();
+        }
+      });
+      this.renderedDisabled = null;
+      this.render(false);
+    }
+    render(disabled) {
+      if (this.renderedDisabled === disabled) return;
+      this.renderedDisabled = disabled;
+      let html2 = disabled ? '<span class="pm-table-bar-note">\u5F15\u7528\u8868\uFF08\u81EA\u52A8\u751F\u6210\uFF0C\u6539\u52A8\u4E0D\u4FDD\u5B58\uFF09</span>' : "";
+      TABLE_BAR_ACTIONS.forEach((a, i2) => {
+        if (a.sep) {
+          html2 += '<span class="pm-table-bar-sep"></span>';
+          return;
+        }
+        html2 += '<button type="button" class="pm-table-bar-btn' + (a.danger ? " danger" : "") + '" data-act="' + i2 + '"' + (disabled ? ' data-disabled="1"' : "") + ' title="' + escapeAttr(a.title) + '">' + escapeHtml(a.label) + "</button>";
+      });
+      this.bar.innerHTML = html2;
+    }
+    update(view) {
+      this.view = view;
+      const state = view.state;
+      if (!view.editable || !isInTable(state)) {
+        this.bar.style.display = "none";
+        return;
+      }
+      const t = findTable(state.selection.$from);
+      if (!t) {
+        this.bar.style.display = "none";
+        return;
+      }
+      const derived = derivedTableRanges(state.doc).some(([a, b]) => t.pos >= a && t.pos <= b);
+      this.render(derived);
+      try {
+        const coords = view.coordsAtPos(t.start);
+        const host = view.dom.parentNode;
+        const rect = host.getBoundingClientRect();
+        this.bar.style.display = "flex";
+        const barW = this.bar.offsetWidth || 320;
+        let left = coords.left - rect.left;
+        const maxLeft = Math.max(0, host.clientWidth - barW - 8);
+        if (left > maxLeft) left = maxLeft;
+        this.bar.style.left = Math.max(4, left) + "px";
+        this.bar.style.top = Math.max(2, coords.top - rect.top - 34) + "px";
+      } catch (e) {
+        this.bar.style.display = "none";
+      }
+    }
+    destroy() {
+      this.bar.remove();
+    }
+  };
+  function tableToolbarPlugin() {
+    return new Plugin({
+      key: tableBarKey,
+      view(editorView2) {
+        return new TableBarView(editorView2);
+      },
+      props: {
+        handleKeyDown(view, event) {
+          if (!view.editable || !isInTable(view.state)) return false;
+          if (event.key === "Tab") {
+            const dir = event.shiftKey ? -1 : 1;
+            if (goToNextCell(dir)(view.state, view.dispatch, view)) {
+              event.preventDefault();
+              return true;
+            }
+          }
+          return false;
+        }
+      }
+    });
+  }
   function applyWikiLink(view, page, from, to) {
     const { state } = view;
     const markType = state.schema.marks.link;
@@ -30273,7 +30463,7 @@
         }
       }
     }
-    const enc = encodeURIComponent(page);
+    const enc = encodeURIComponent(page + (anchor ? "#" + anchor : ""));
     const href = "wikilink:" + enc;
     let tr = state.tr;
     tr = tr.delete(from, to);
@@ -30303,13 +30493,13 @@
       anchor = target.slice(h + 1).trim();
     }
     const alias = m[2] ? m[2].trim() : null;
-    const display = alias || page;
+    const display = alias || (anchor ? page + "#" + anchor : page);
     const markType = state.schema.marks.link;
     if (!markType) return false;
     const full = m[0].length;
     const start = pos - full;
     const end = pos;
-    const enc = encodeURIComponent(page);
+    const enc = encodeURIComponent(page + (anchor ? "#" + anchor : ""));
     const href = "wikilink:" + enc;
     const tr = state.tr;
     tr.delete(start, end);
@@ -30320,6 +30510,32 @@
     view.dispatch(tr.scrollIntoView());
     return true;
   }
+  var PAGE_HEADINGS = /* @__PURE__ */ Object.create(null);
+  var PAGE_HEADINGS_PENDING = /* @__PURE__ */ Object.create(null);
+  window.__pageHeadings = PAGE_HEADINGS;
+  function requestPageHeadings(page) {
+    const key3 = String(page || "").trim();
+    if (!key3) return [];
+    if (PAGE_HEADINGS[key3]) return PAGE_HEADINGS[key3];
+    if (!PAGE_HEADINGS_PENDING[key3]) {
+      PAGE_HEADINGS_PENDING[key3] = true;
+      bridge({ type: "pageHeadings", name: key3 });
+    }
+    return [];
+  }
+  window.MMEditor_setPageHeadings = function(page, arr) {
+    const key3 = String(page || "").trim();
+    if (!key3) return;
+    PAGE_HEADINGS[key3] = Array.isArray(arr) ? arr : [];
+    delete PAGE_HEADINGS_PENDING[key3];
+    try {
+      if (editor) {
+        const view = editor.action((ctx) => ctx.get(editorViewCtx));
+        if (view) view.dispatch(view.state.tr.setMeta("mmPageHeadings", key3));
+      }
+    } catch (e) {
+    }
+  };
   var wikiAcKey = new PluginKey("milkdownWikiAc");
   var wikiAcViewRef = null;
   var WikiAutocompleteView = class {
@@ -30391,6 +30607,23 @@
         if (!m) return { active: false, items: [], index: 0 };
         const from = $from.pos - m[0].length;
         const query = m[1];
+        const hashAt = query.indexOf("#");
+        if (hashAt >= 0) {
+          const basePage = query.slice(0, hashAt).trim();
+          const headQ = query.slice(hashAt + 1).trim().toLowerCase();
+          const cur = (window.__currentPageName || "").trim();
+          const heads2 = basePage ? requestPageHeadings(basePage) : window.__currentHeadings || [];
+          const target = basePage || cur;
+          const items2 = (heads2 || []).filter((h) => !headQ || h.toLowerCase().includes(headQ)).slice(0, 8).map((h) => ({
+            kind: "heading",
+            label: (basePage ? basePage + " \u203A " : "# ") + h,
+            value: basePage ? basePage + "#" + h : "#" + h
+          }));
+          if (basePage && (!heads2 || heads2.length === 0)) {
+            items2.push({ kind: "heading", label: "\uFF08" + basePage + " \u6682\u65E0\u533A\u5757\u6807\u9898\uFF09", value: basePage });
+          }
+          return { active: true, from, to: sel.to, query, items: items2, index: 0, target };
+        }
         const q = (query || "").toLowerCase();
         const pages = (window.__wikiPages || []).filter((p) => p.toLowerCase().includes(q)).slice(0, 6).map((name) => ({ kind: "page", label: name, value: name }));
         const heads = (window.__currentHeadings || []).filter((h) => h.toLowerCase().includes(q)).slice(0, 4).map((label) => ({ kind: "heading", label: "# " + label, value: "#" + label }));
@@ -30758,7 +30991,7 @@
       const e = await Editor.make(async (ctx) => {
         ctx.set(rootCtx, document.getElementById("editor"));
         ctx.set(defaultValueCtx, "");
-      }).use(commonmark).use(gfm2).use($prose(() => wikiLinkPlugin())).use($prose(() => autocompletePlugin)).use($prose(() => autoPairPlugin)).use($prose(() => yamlHighlightPlugin())).use($prose(() => fmMarkerPlugin())).use($prose(() => wikilinkInsideCodePlugin())).use($prose(() => unifiedTableClassPlugin())).config((ctx) => {
+      }).use(commonmark).use(gfm2).use($prose(() => wikiLinkPlugin())).use($prose(() => autocompletePlugin)).use($prose(() => autoPairPlugin)).use($prose(() => yamlHighlightPlugin())).use($prose(() => fmMarkerPlugin())).use($prose(() => wikilinkInsideCodePlugin())).use($prose(() => unifiedTableClassPlugin())).use($prose(() => tableToolbarPlugin())).config((ctx) => {
         ctx.update(remarkStringifyOptionsCtx, (prev) => ({ ...prev, bullet: "-", listItemIndent: "one", fences: true }));
       }).create();
       editor = e;
@@ -30932,6 +31165,9 @@
     setCustomTypes,
     showPreview(name, html2) {
       window.MMEditor_showPreview(name, html2);
+    },
+    setPageHeadings(page, arr) {
+      window.MMEditor_setPageHeadings(page, arr);
     },
     requestCurrentMarkdown() {
       if (!editor) return pendingFrontmatter || "";

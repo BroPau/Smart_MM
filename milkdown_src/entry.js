@@ -16,6 +16,13 @@ import { gfm } from '@milkdown/preset-gfm'
 import { getMarkdown, replaceAll, $prose, insert } from '@milkdown/utils'
 import { Plugin, PluginKey, TextSelection } from '@milkdown/prose/state'
 import { Decoration, DecorationSet } from '@milkdown/prose/view'
+// v2.2.75：表格 WYSIWYG 增删行列（prosemirror-tables 命令已随 gfm 预设内置，此前缺的是「入口」）
+import {
+  isInTable, findTable, goToNextCell,
+  addRowBefore, addRowAfter, deleteRow,
+  addColumnBefore, addColumnAfter, deleteColumn,
+  toggleHeaderRow, deleteTable
+} from '@milkdown/prose/tables'
 
 const bridge = (msg) => {
   if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.editorBridge) {
@@ -153,27 +160,56 @@ const FM_SKIP = { wiki_首页: 1, backlinks: 1 }
 // v2.2.73：frontmatter 中「页面引用型」字段——其值本就是 Wiki 页名，
 // 在编辑器内渲染为可点击双链（仅显示层用 wikilink 语法，磁盘仍存纯页名）
 const FM_WIKILINK_KEYS = { company: 1, alternative: 1, suspected_alias_of: 1 }
-// 把单个值转成（display=显示层 wikilink 语法 / disk=磁盘纯页名）
-function itemToWikilink(v, display) {
+// v2.2.75：双链目标统一解析器 —— 三种书写形态归一为 { page, anchor, alias }
+//   1) [[页面]] / [[页面#区块]] / [[页面#区块|别名]]     ← Obsidian 原生（磁盘 & pipeline 使用）
+//   2) [别名](wikilink:ENCODED)                          ← 编辑器显示层（避开 GFM 表对 [[ ]] 的转义）
+//   3) 裸文本 页面 / 页面#区块                            ← 容错
+// anchor（区块）贯穿显示 → 点击 → 预览 → 磁盘全链路，不再被丢弃。
+function parseWikiTarget(v) {
   let s = (v == null) ? '' : String(v).trim()
-  const m = /^\[([^\]]*)\]\(wikilink:([^)\s]+)\)$/.exec(s)
-  let page = m ? m[2] : s
-  try { page = decodeURIComponent(page) } catch (e) {}
-  if (!display) return yamlScalar(page)
-  if (WIKIPAGES.length && WIKIPAGES.some(p => p.toLowerCase() === page.toLowerCase())) {
-    const enc = encodeURIComponent(page)
-    return '"[' + page + '](wikilink:' + enc + ')"'
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) s = s.slice(1, -1).trim()
+  let target = s, alias = ''
+  let m = /^\[([^\]]*)\]\(wikilink:([^)\s]+)\)$/.exec(s)
+  if (m) {
+    alias = (m[1] || '').trim()
+    target = m[2]
+    try { target = decodeURIComponent(target) } catch (e) {}
+  } else {
+    m = /^\[\[([^\[\]]+)\]\]$/.exec(s)
+    if (m) target = m[1].trim()
+    const bar = target.indexOf('|')
+    if (bar >= 0) { alias = target.slice(bar + 1).trim(); target = target.slice(0, bar).trim() }
   }
-  return yamlScalar(page)
+  let page = target, anchor = ''
+  const h = target.indexOf('#')
+  if (h >= 0) { page = target.slice(0, h).trim(); anchor = target.slice(h + 1).trim() }
+  // 显示层别名若与 target 相同则视为无别名（避免回写时冗余 |alias）
+  const full = page + (anchor ? '#' + anchor : '')
+  if (alias && (alias === full || alias === page)) alias = ''
+  return { page, anchor, alias, target: full }
 }
-// 从（可能带 wikilink 语法的）字符串里解析回纯页名
+// 把单个值转成（display=显示层 wikilink 语法 / disk=Obsidian [[页面#区块]] 形态）
+function itemToWikilink(v, display) {
+  const t = parseWikiTarget(v)
+  if (!t.page) return yamlScalar(String(v == null ? '' : v).trim())
+  const full = t.target
+  if (!display) {
+    // 磁盘：统一回写 Obsidian 原生 [[页面#区块|别名]]（与 pipeline 产出格式一致，锚点不丢）
+    const inner = full + (t.alias ? '|' + t.alias : '')
+    return yamlScalar('[[' + inner + ']]')
+  }
+  // 显示层：缺失判定只看 base page（带 #区块 时不应被误判为缺失页）
+  if (WIKIPAGES.length && WIKIPAGES.some(p => p.toLowerCase() === t.page.toLowerCase())) {
+    const enc = encodeURIComponent(full)
+    return '"[' + (t.alias || full) + '](wikilink:' + enc + ')"'
+  }
+  return yamlScalar(full)
+}
+// 从（可能带 wikilink 语法的）字符串里解析回「页面#区块」目标
 function parseWikilinkItem(s) {
   if (typeof s !== 'string') return String(s)
-  let t = s.trim()
-  if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) t = t.slice(1, -1).trim()
-  const m = /^\[([^\]]*)\]\(wikilink:([^)\s]+)\)$/.exec(t)
-  if (m) { try { return decodeURIComponent(m[2]) } catch (e) { return m[2] } }
-  return t
+  const t = parseWikiTarget(s)
+  return t.page ? t.target : s.trim()
 }
 const FM_LABEL_CN = {
   type: '类型',
@@ -302,7 +338,8 @@ function hidePreviewSoon() {
   previewHideTimer = setTimeout(() => { if (previewEl) previewEl.style.display = 'none' }, 220)
 }
 function showPreviewFor(el) {
-  const name = el.getAttribute('data-page')
+  // v2.2.75：优先取 data-wikilink（含「页面#区块」全量目标），让宿主只回返该区块而非全文
+  const name = el.getAttribute('data-wikilink') || el.getAttribute('data-page')
   if (!name) return
   const pv = ensurePreviewEl()
   previewActiveName = name
@@ -385,12 +422,14 @@ function wikiLinkPlugin() {
           const h = target.indexOf('#')
           if (h >= 0) { page = target.slice(0, h).trim(); anchor = target.slice(h + 1).trim() }
           const missing = page && WIKIPAGES.length && !WIKIPAGES.some(p => p.toLowerCase() === page.toLowerCase())
-          const cls = 'wikilink' + (missing ? ' wikilink-missing' : '')
-          decos.push(Decoration.inline(pos, pos + node.nodeSize, {
+          const cls = 'wikilink' + (missing ? ' wikilink-missing' : '') + (anchor ? ' wikilink-anchored' : '')
+          const attrs = {
             class: cls,
             'data-wikilink': target,
             'data-page': page
-          }))
+          }
+          if (anchor) attrs['data-anchor'] = anchor   // v2.2.75：区块锚点透传给点击/预览
+          decos.push(Decoration.inline(pos, pos + node.nodeSize, attrs))
         })
         return DecorationSet.create(state.doc, decos)
       }
@@ -500,7 +539,9 @@ function fmMarkerPlugin() {
 // ProseMirror 插件：YAML 代码块内的 [text](wikilink:Page) 文本装饰为可点击双链
 // （代码块内没有 link mark，wikiLinkPlugin 不会命中，这里单独处理 frontmatter 的页面引用字段）
 const wikilinkInCodeKey = new PluginKey('wikilinkInCode')
-const IN_CODE_WL_RE = /\[([^\]]*)\]\(wikilink:([^)\s]+)\)/g
+// v2.2.75：两种形态都装饰 —— 显示层 [别名](wikilink:ENC) 与 Obsidian 原生 [[页面#区块]]
+// （磁盘 frontmatter 用后者，未经 serializeFrontmatter 归一化时也要能点）
+const IN_CODE_WL_RE = /\[([^\]]*)\]\(wikilink:([^)\s]+)\)|\[\[([^\[\]\n]+)\]\]/g
 function wikilinkInsideCodePlugin() {
   return new Plugin({
     key: wikilinkInCodeKey,
@@ -518,14 +559,17 @@ function wikilinkInsideCodePlugin() {
           while ((m = IN_CODE_WL_RE.exec(text)) !== null) {
             const start = base + m.index
             const end = start + m[0].length
-            let page = m[2]
-            try { page = decodeURIComponent(page) } catch (e) {}
-            const missing = page && WIKIPAGES.length && !WIKIPAGES.some(p => p.toLowerCase() === page.toLowerCase())
-            decos.push(Decoration.inline(start, end, {
-              class: 'wikilink' + (missing ? ' wikilink-missing' : ''),
-              'data-wikilink': page,
-              'data-page': page
-            }))
+            const t = parseWikiTarget(m[0])
+            if (!t.page) continue
+            // 缺失判定只看 base page —— [[公司#区块]] 的区块不参与页面存在性判断
+            const missing = WIKIPAGES.length && !WIKIPAGES.some(p => p.toLowerCase() === t.page.toLowerCase())
+            const attrs = {
+              class: 'wikilink' + (missing ? ' wikilink-missing' : '') + (t.anchor ? ' wikilink-anchored' : ''),
+              'data-wikilink': t.target,
+              'data-page': t.page
+            }
+            if (t.anchor) attrs['data-anchor'] = t.anchor
+            decos.push(Decoration.inline(start, end, attrs))
           }
         })
         return DecorationSet.create(state.doc, decos)
@@ -557,6 +601,118 @@ function unifiedTableClassPlugin() {
     }
   })
 }
+// ————————————————————————————————————————————————————————————————
+//  v2.2.75【表格所见即所得编辑】浮动工具条
+//  prosemirror-tables 的 addRow/addColumn/deleteRow/... 命令本来就在 bundle 里（gfm 预设自带
+//  tableEditing），但没有任何 UI 入口 —— 这才是「表格仍然无法编辑」的真实原因。
+//  这里补一条光标进入表格时浮现的工具条 + Tab/Shift-Tab 跨单元格移动。
+//  派生表（refs 引用表）位于 <!--REFS_TABLE_BEGIN/END--> 之间，属自动生成、保存时会被剔除，
+//  所以对它只提示「自动生成」并禁用按钮，避免用户白改。
+// ————————————————————————————————————————————————————————————————
+const TABLE_BAR_ACTIONS = [
+  { label: '＋行↑', title: '在上方插入一行', cmd: addRowBefore },
+  { label: '＋行↓', title: '在下方插入一行', cmd: addRowAfter },
+  { label: '－行', title: '删除当前行', cmd: deleteRow, danger: true },
+  { sep: true },
+  { label: '＋列←', title: '在左侧插入一列', cmd: addColumnBefore },
+  { label: '＋列→', title: '在右侧插入一列', cmd: addColumnAfter },
+  { label: '－列', title: '删除当前列', cmd: deleteColumn, danger: true },
+  { sep: true },
+  { label: '表头', title: '切换首行为表头', cmd: toggleHeaderRow },
+  { label: '删表', title: '删除整张表格', cmd: deleteTable, danger: true }
+]
+// 找出所有「派生表区间」——即 REFS_TABLE_BEGIN / END 注释节点之间的文档位置
+function derivedTableRanges(doc) {
+  const ranges = []
+  let open = -1
+  doc.descendants((node, pos) => {
+    let raw = ''
+    if (node.isText) raw = node.text || ''
+    else if (node.attrs && typeof node.attrs.value === 'string') raw = node.attrs.value
+    else raw = node.textContent || ''
+    if (!raw) return
+    if (raw.indexOf('REFS_TABLE_BEGIN') >= 0) open = pos
+    else if (raw.indexOf('REFS_TABLE_END') >= 0 && open >= 0) { ranges.push([open, pos]); open = -1 }
+  })
+  if (open >= 0) ranges.push([open, doc.content.size])
+  return ranges
+}
+const tableBarKey = new PluginKey('pmTableBar')
+class TableBarView {
+  constructor(view) {
+    this.view = view
+    this.bar = document.createElement('div')
+    this.bar.className = 'pm-table-bar'
+    this.bar.style.display = 'none'
+    const host = view.dom.parentNode || document.body
+    host.appendChild(this.bar)
+    this.bar.addEventListener('mousedown', e => {
+      e.preventDefault()   // 关键：别让工具条抢走编辑器选区
+      const btn = e.target.closest && e.target.closest('[data-act]')
+      if (!btn || btn.getAttribute('data-disabled') === '1') return
+      const idx = parseInt(btn.getAttribute('data-act'), 10)
+      const act = TABLE_BAR_ACTIONS[idx]
+      if (act && act.cmd) {
+        act.cmd(this.view.state, this.view.dispatch, this.view)
+        this.view.focus()
+      }
+    })
+    this.renderedDisabled = null
+    this.render(false)
+  }
+  render(disabled) {
+    if (this.renderedDisabled === disabled) return
+    this.renderedDisabled = disabled
+    let html = disabled ? '<span class="pm-table-bar-note">引用表（自动生成，改动不保存）</span>' : ''
+    TABLE_BAR_ACTIONS.forEach((a, i) => {
+      if (a.sep) { html += '<span class="pm-table-bar-sep"></span>'; return }
+      html += '<button type="button" class="pm-table-bar-btn' + (a.danger ? ' danger' : '') + '"' +
+        ' data-act="' + i + '"' + (disabled ? ' data-disabled="1"' : '') +
+        ' title="' + escapeAttr(a.title) + '">' + escapeHtml(a.label) + '</button>'
+    })
+    this.bar.innerHTML = html
+  }
+  update(view) {
+    this.view = view
+    const state = view.state
+    // 光标在表格内即显示（CellSelection 多选态同样满足 isInTable）
+    if (!view.editable || !isInTable(state)) { this.bar.style.display = 'none'; return }
+    const t = findTable(state.selection.$from)
+    if (!t) { this.bar.style.display = 'none'; return }
+    const derived = derivedTableRanges(state.doc).some(([a, b]) => t.pos >= a && t.pos <= b)
+    this.render(derived)
+    try {
+      const coords = view.coordsAtPos(t.start)
+      const host = view.dom.parentNode
+      const rect = host.getBoundingClientRect()
+      this.bar.style.display = 'flex'
+      const barW = this.bar.offsetWidth || 320
+      let left = coords.left - rect.left
+      const maxLeft = Math.max(0, host.clientWidth - barW - 8)
+      if (left > maxLeft) left = maxLeft
+      this.bar.style.left = Math.max(4, left) + 'px'
+      this.bar.style.top = Math.max(2, coords.top - rect.top - 34) + 'px'
+    } catch (e) { this.bar.style.display = 'none' }
+  }
+  destroy() { this.bar.remove() }
+}
+function tableToolbarPlugin() {
+  return new Plugin({
+    key: tableBarKey,
+    view(editorView) { return new TableBarView(editorView) },
+    props: {
+      handleKeyDown(view, event) {
+        if (!view.editable || !isInTable(view.state)) return false
+        if (event.key === 'Tab') {
+          const dir = event.shiftKey ? -1 : 1
+          if (goToNextCell(dir)(view.state, view.dispatch, view)) { event.preventDefault(); return true }
+        }
+        return false
+      }
+    }
+  })
+}
+
 function applyWikiLink(view, page, from, to) {
   const { state } = view
   const markType = state.schema.marks.link
@@ -579,7 +735,8 @@ function applyWikiLink(view, page, from, to) {
       }
     }
   }
-  const enc = encodeURIComponent(page)
+  // v2.2.75：href 必须编码「页面#区块」全量目标，否则锚点在插入时就丢了
+  const enc = encodeURIComponent(page + (anchor ? '#' + anchor : ''))
   const href = 'wikilink:' + enc
   let tr = state.tr
   tr = tr.delete(from, to)
@@ -606,13 +763,14 @@ function autoRenderWikiLink(view, pos) {
   const h = target.indexOf('#')
   if (h >= 0) { page = target.slice(0, h).trim(); anchor = target.slice(h + 1).trim() }
   const alias = m[2] ? m[2].trim() : null
-  const display = alias || page
+  const display = alias || (anchor ? page + '#' + anchor : page)
   const markType = state.schema.marks.link
   if (!markType) return false
   const full = m[0].length
   const start = pos - full
   const end = pos
-  const enc = encodeURIComponent(page)
+  // v2.2.75：同 applyWikiLink，编码「页面#区块」全量目标
+  const enc = encodeURIComponent(page + (anchor ? '#' + anchor : ''))
   const href = 'wikilink:' + enc
   const tr = state.tr
   tr.delete(start, end)
@@ -622,6 +780,36 @@ function autoRenderWikiLink(view, pos) {
   tr.setSelection(TextSelection.create(tr.doc, newEnd))
   view.dispatch(tr.scrollIntoView())
   return true
+}
+
+// ————————————————————————————————————————————————————————————————
+//  v2.2.75：跨页「区块标题」缓存 —— 供 [[页面#区块]] 补全使用
+//  懒加载：首次需要某页标题时向宿主发 pageHeadings，宿主回填后派一个空事务刷新候选框。
+// ————————————————————————————————————————————————————————————————
+const PAGE_HEADINGS = Object.create(null)
+const PAGE_HEADINGS_PENDING = Object.create(null)
+window.__pageHeadings = PAGE_HEADINGS
+function requestPageHeadings(page) {
+  const key = String(page || '').trim()
+  if (!key) return []
+  if (PAGE_HEADINGS[key]) return PAGE_HEADINGS[key]
+  if (!PAGE_HEADINGS_PENDING[key]) {
+    PAGE_HEADINGS_PENDING[key] = true
+    bridge({ type: 'pageHeadings', name: key })
+  }
+  return []
+}
+window.MMEditor_setPageHeadings = function (page, arr) {
+  const key = String(page || '').trim()
+  if (!key) return
+  PAGE_HEADINGS[key] = Array.isArray(arr) ? arr : []
+  delete PAGE_HEADINGS_PENDING[key]
+  try {
+    if (editor) {
+      const view = editor.action(ctx => ctx.get(editorViewCtx))
+      if (view) view.dispatch(view.state.tr.setMeta('mmPageHeadings', key))
+    }
+  } catch (e) {}
 }
 
 // 自动补全候选视图
@@ -688,6 +876,31 @@ const autocompletePlugin = new Plugin({
       if (!m) return { active: false, items: [], index: 0 }
       const from = $from.pos - m[0].length
       const query = m[1]
+      // v2.2.75【区块引用】输入 [[页面# 时，改为补全「目标页的区块标题」，
+      // 使 [[公司#三、四大业务板块]] 这类块级引用可发现、可选取（不必手记标题）。
+      const hashAt = query.indexOf('#')
+      if (hashAt >= 0) {
+        const basePage = query.slice(0, hashAt).trim()
+        const headQ = query.slice(hashAt + 1).trim().toLowerCase()
+        const cur = (window.__currentPageName || '').trim()
+        // basePage 为空 → 补当前页标题（旧行为，页内跳转）
+        const heads = basePage
+          ? requestPageHeadings(basePage)
+          : (window.__currentHeadings || [])
+        const target = basePage || cur
+        const items = (heads || [])
+          .filter(h => !headQ || h.toLowerCase().includes(headQ))
+          .slice(0, 8)
+          .map(h => ({
+            kind: 'heading',
+            label: (basePage ? basePage + ' › ' : '# ') + h,
+            value: basePage ? (basePage + '#' + h) : ('#' + h)
+          }))
+        if (basePage && (!heads || heads.length === 0)) {
+          items.push({ kind: 'heading', label: '（' + basePage + ' 暂无区块标题）', value: basePage })
+        }
+        return { active: true, from, to: sel.to, query, items, index: 0, target }
+      }
       const q = (query || '').toLowerCase()
       const pages = (window.__wikiPages || [])
         .filter(p => p.toLowerCase().includes(q))
@@ -1092,6 +1305,7 @@ async function buildEditor(editable) {
       .use($prose(() => fmMarkerPlugin()))
       .use($prose(() => wikilinkInsideCodePlugin()))
       .use($prose(() => unifiedTableClassPlugin()))
+      .use($prose(() => tableToolbarPlugin()))
       .config(ctx => {
         ctx.update(remarkStringifyOptionsCtx, prev => ({ ...prev, bullet: '-', listItemIndent: 'one', fences: true }))
       })
@@ -1274,6 +1488,7 @@ window.MMEditor = {
   setPageReferencesOut,
   setCustomTypes,
   showPreview(name, html) { window.MMEditor_showPreview(name, html) },
+  setPageHeadings(page, arr) { window.MMEditor_setPageHeadings(page, arr) },
   requestCurrentMarkdown() {
     if (!editor) return pendingFrontmatter || ''
     let body = editor.action(getMarkdown())

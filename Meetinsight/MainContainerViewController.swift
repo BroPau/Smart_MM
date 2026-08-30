@@ -202,6 +202,13 @@ final class MainContainerViewController: NSViewController {
         wikiVC.openWikiPageResolved(name, anchor: anchor)
     }
 
+    /// v2.2.75：由「LLM WiKi」页双链点击路由而来（反向互通）：切到会议纪要分页并打开同名纪要。
+    /// LLM WiKi 与会议纪要是同一个知识库，[[ ]] 双链两个方向都必须能走通。
+    func openMinute(_ name: String, anchor: String? = nil) {
+        selectTab(.minutes)
+        minutesVC.openMinute(named: name, anchor: anchor)
+    }
+
     // MARK: - 供退出拦截查询
 
     /// 会议纪要是否正在生成（供 AppDelegate 在关窗 / 退出时拦截）。
