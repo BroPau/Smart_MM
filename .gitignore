@@ -17,3 +17,8 @@ __pycache__/
 
 # Editor / tooling
 .workbuddy/
+
+# Local working docs (intentionally NOT in repo — 不入库 rule)
+SOP.md
+README.md
+BUG_FIX_LOG.md
