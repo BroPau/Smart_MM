@@ -467,6 +467,10 @@ function yamlHighlightPlugin() {
 // 仅视觉隐藏（display:none），绝不从文档移除——这些标记是保存时反解 YAML / refs 的边界，磁盘不写。
 const fmMarkerKey = new PluginKey('fmMarker')
 const FM_MARKER_RE = /<!--(FM_TABLE_BEGIN|FM_TABLE_END|REFS_TABLE_BEGIN|REFS_TABLE_END)-->/
+// Milkdown 把 <!-- ... --> 注释节点映射为 html_block / html_inline leaf node，
+// HTML 字符串存在 node.attrs.value（见 bundle: span[data-value]={node.attrs.value}）。
+// Leaf node 没有 children，node.textContent 恒为 ''——所以必须从 attrs.value 取。
+const HTML_NODE_NAMES = { html_block: 1, htmlBlock: 1, html_inline: 1, htmlInline: 1 }
 function fmMarkerPlugin() {
   return new Plugin({
     key: fmMarkerKey,
@@ -474,9 +478,19 @@ function fmMarkerPlugin() {
       decorations(state) {
         const decos = []
         state.doc.descendants((node, pos) => {
-          const text = node.isText ? node.text : (node.textContent || '')
-          if (text && FM_MARKER_RE.test(text)) {
+          const tname = (node.type && node.type.name) || ''
+          let raw = ''
+          if (HTML_NODE_NAMES[tname]) {
+            const a = node.attrs || {}
+            raw = a.value || a.text || a.html || a.source || ''
+          } else if (node.isText) {
+            raw = node.text || ''
+          } else {
+            raw = node.textContent || ''
+          }
+          if (raw && FM_MARKER_RE.test(raw)) {
             decos.push(Decoration.node(pos, pos + node.nodeSize, { class: 'fm-hidden' }))
+            return false
           }
         })
         return DecorationSet.create(state.doc, decos)
