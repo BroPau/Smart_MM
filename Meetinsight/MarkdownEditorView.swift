@@ -3,11 +3,10 @@
 //  Meetinsight
 //
 //  Obsidian / Typora 式「所见即所得」Markdown 编辑器（纯本地、离线可用）：
-//  - 底层由离线内置的 Vditor 引擎驱动（Lute 渲染内核，位于 Resources/vditor）。
-//  - 默认模式 = IR（Instant Rendering，即 Obsidian 的「实时预览」：保留 Markdown 源码、
-//    语法符号淡显、标题/列表/代码块/引用/图片即时渲染）。
-//  - 工具栏「模式」按钮可在 IR(实时预览) / WYSIWYG(Typora 真·所见即所得) / SV(分屏) 间切换。
-//  - [[双链]] 渲染为可点击 pill，点击经 editorBridge 通知宿主跳转。
+//  - 默认引擎 = Milkdown（ProseMirror 系，真·WYSIWYG，离线打包 milkdown.bundle.js，位于 Resources/milkdown）。
+//  - 回退引擎：TipTap（tiptap.bundle.js）/ Vditor（vditor/dist），终端 `defaults write` 切换。
+//  - Milkdown 始终为真·WYSIWYG（markdown-native）：所见即渲染结果，无 Markdown 源码符号残留。
+//  - [[双链]] 渲染为可点击 pill（link mark，href=wikilink:ENCODED），缺失页标红，点击经 editorBridge 通知宿主跳转。
 //  - [[name|alias]] 解析为：跳转目标 = 左侧 name，显示文字 = 右侧 alias。
 //  - YAML frontmatter 顶部渲染为「页面属性」信息卡（与旧版一致），编辑区只放正文，
 //    保存时自动回贴 frontmatter，源文件不被破坏。
@@ -78,6 +77,11 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
         cfg.userContentController = uc
         cfg.defaultWebpagePreferences.allowsContentJavaScript = true
         cfg.preferences.javaScriptCanOpenWindowsAutomatically = false
+        // 关键：禁用所有缓存。理由：用户重启 app 仍可能看到旧 banner 英文 label，
+        // 是因为 WKWebView 默认会缓存 loadHTMLString 的 HTML 模板与 %MILKDOWN_BASE% 子资源。
+        // 关掉后每次 setup 都从磁盘读最新模板 + 最新 milkdown.bundle.js，
+        // 确保 bundle 替换立即生效（v2.2.30 部署铁律）。
+        cfg.websiteDataStore = WKWebsiteDataStore.nonPersistent()
         webView = WKWebView(frame: .zero, configuration: cfg)
         super.init(frame: frameRect)
         setup()
@@ -119,7 +123,10 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
             self?.handle(message: msg)
         }
         let engine = Self.engine
-        if engine == "tiptap", let base = Self.tiptapBaseURL() {
+        if engine == "milkdown", let base = Self.milkdownBaseURL() {
+            let html = MilkdownEditorHTML.template
+            webView.loadHTMLString(html, baseURL: base)
+        } else if engine == "tiptap", let base = Self.tiptapBaseURL() {
             var html = TipTapEditorHTML.template
             html = html.replacingOccurrences(of: "%TIPTAP_BASE%",
                                             with: base.absoluteString)
@@ -131,7 +138,7 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
             webView.loadHTMLString(html, baseURL: base)
         } else {
             // 兜底：编辑引擎资源缺失时给出可读报错，避免白屏无提示
-            webView.loadHTMLString("<html><body style='font-family:sans-serif;padding:24px;color:#b00'>编辑器资源缺失：Resources/tiptap 或 Resources/vditor 未打包进 App。</body></html>", baseURL: nil)
+            webView.loadHTMLString("<html><body style='font-family:sans-serif;padding:24px;color:#b00'>编辑器资源缺失：Resources/milkdown 或 Resources/tiptap 或 Resources/vditor 未打包进 App。</body></html>", baseURL: nil)
         }
     }
 
@@ -166,7 +173,7 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
 
     /// 推送现有页面名列表给 JS（双链自动完成 + 缺失页判定）。
     func setWikiPages(_ names: [String]) {
-        guard Self.engine == "tiptap" else { return }
+        guard Self.engine != "vditor" else { return }
         let json = (try? JSONSerialization.data(withJSONObject: names)) ?? Data("[]".utf8)
         let js = String(data: json, encoding: .utf8) ?? "[]"
         webView.evaluateJavaScript("MMEditor.setWikiPages(\(js))")
@@ -174,7 +181,7 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
 
     /// 推送「自动双链」目标名列表（仅 Wiki 页名）给 JS；加载纪要时把正文里出现的裸词包裹为 [[名称]]。
     func setAutoLinkNames(_ names: [String]) {
-        guard Self.engine == "tiptap" else { return }
+        guard Self.engine != "vditor" else { return }
         let json = (try? JSONSerialization.data(withJSONObject: names)) ?? Data("[]".utf8)
         let js = String(data: json, encoding: .utf8) ?? "[]"
         webView.evaluateJavaScript("MMEditor.setAutoLinkNames(\(js))")
@@ -183,7 +190,7 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
     /// v2.2.67：推送「引用此页面的页面」明细（含类型 + 关键属性）给 JS，
     /// 供当前页正文末尾渲染可点击回跳的反链嵌入表格。适用于所有类型（不再局限于 Company）。
     func setPageReferences(_ refs: [[String: Any]]) {
-        guard Self.engine == "tiptap" else { return }
+        guard Self.engine != "vditor" else { return }
         let json = (try? JSONSerialization.data(withJSONObject: refs)) ?? Data("[]".utf8)
         let js = String(data: json, encoding: .utf8) ?? "[]"
         webView.evaluateJavaScript("MMEditor.setPageReferences(\(js))")
@@ -192,7 +199,7 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
     /// v2.2.68：推送「本页引用的页面」明细（出链，含类型 + 关键属性）给 JS，
     /// 供当前页正文末尾「双链关系」表格的出链区渲染。适用于所有类型。
     func setPageReferencesOut(_ refs: [[String: Any]]) {
-        guard Self.engine == "tiptap" else { return }
+        guard Self.engine != "vditor" else { return }
         let json = (try? JSONSerialization.data(withJSONObject: refs)) ?? Data("[]".utf8)
         let js = String(data: json, encoding: .utf8) ?? "[]"
         webView.evaluateJavaScript("MMEditor.setPageReferencesOut(\(js))")
@@ -200,14 +207,14 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
 
     /// v2.2.68：在当前编辑器正文末尾插入一条 [[Page]] 双链（用于「本页引用的页面」添加，目标页不存在则新建）。
     func appendWikiLink(_ name: String) {
-        guard Self.engine == "tiptap", !name.isEmpty else { return }
+        guard Self.engine != "vditor", !name.isEmpty else { return }
         let js = "MMEditor.appendWikiLink(\(jsString(name)))"
         webView.evaluateJavaScript(js)
     }
 
     /// 跳转到 Wiki 页内某标题锚点（Obsidian 式 [[Page#Heading]]）；无匹配标题时静默忽略。
     func scrollToAnchor(_ anchor: String) {
-        guard Self.engine == "tiptap", !anchor.isEmpty else { return }
+        guard Self.engine != "vditor", !anchor.isEmpty else { return }
         let js = "MMEditor.scrollToAnchor(\(jsString(anchor)))"
         webView.evaluateJavaScript(js)
     }
@@ -340,11 +347,15 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
         webView.evaluateJavaScript(js)
     }
 
-    /// 当前编辑引擎：默认 TipTap（真·WYSIWYG）。
-    /// 可在终端用 `defaults write com.weilu.meetingminutes editorEngine vditor` 回退到 Vditor。
+    /// 当前编辑引擎：默认 Milkdown（ProseMirror 系，真·WYSIWYG，离线打包 milkdown.bundle.js）。
+    /// 可在终端回退：
+    ///   defaults write com.weilu.meetingminutes editorEngine tiptap   （旧 TipTap 引擎）
+    ///   defaults write com.weilu.meetingminutes editorEngine vditor   （旧 Vditor 引擎）
     static var engine: String {
         let v = UserDefaults.standard.string(forKey: "editorEngine")
-        return (v == "vditor") ? "vditor" : "tiptap"
+        if v == "vditor" { return "vditor" }
+        if v == "tiptap" { return "tiptap" }
+        return "milkdown"
     }
 
     /// 定位打包进 App 的 TipTap 目录（Resources/tiptap，内含 tiptap.bundle.js）。
@@ -375,6 +386,21 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
         ]
         return candidates.compactMap { $0 }.first {
             fm.fileExists(atPath: $0.appendingPathComponent("dist/index.min.js").path)
+        }
+    }
+
+    /// 定位打包进 App 的 Milkdown 目录（Resources/milkdown，内含 milkdown.bundle.js）。
+    /// Xcode 项目的「Copy Milkdown」Run Script Build Phase 会在每次构建时自动
+    /// 从 ${PROJECT_DIR}/milkdown 拷过去（milkdown.bundle.js 由 milkdown_src/ 经 esbuild 生成）。
+    static func milkdownBaseURL() -> URL? {
+        let fm = FileManager.default
+        let candidates: [URL?] = [
+            Bundle.main.resourceURL?.appendingPathComponent("milkdown"),
+            Bundle.main.resourceURL?.appendingPathComponent("Resources/milkdown"),
+            Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/milkdown"),
+        ]
+        return candidates.compactMap { $0 }.first {
+            fm.fileExists(atPath: $0.appendingPathComponent("milkdown.bundle.js").path)
         }
     }
 
@@ -1045,6 +1071,275 @@ fileprivate enum TipTapEditorHTML {
         }
       });
     </script>
+    </body>
+    </html>
+    """
+}
+
+// MARK: - Milkdown 模板（真·WYSIWYG，Typora 风格；离线打包 milkdown.bundle.js）
+//   DOM 结构与 CSS 与 TipTap 模板完全一致：#fmBanner / #fmBody / #editor / #fmPageRefsContainer，
+//   milkdown.bundle.js 内部已在 DOMContentLoaded 时自注册 window.MMEditor、暴露 window.loadMarkdown/requestSave/setMode
+//   全局函数、并主动 postMessage({type:'getPages'})，故这里无需再写初始化脚本。
+fileprivate enum MilkdownEditorHTML {
+    static let template: String = """
+    <!DOCTYPE html>
+    <html lang="zh-CN">
+    <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+      :root { color-scheme: light dark; }
+      html, body { margin: 0; padding: 0; }
+      body {
+        font-family: -apple-system, "PingFang SC", "Helvetica Neue", Arial, "Apple Color Emoji", "Apple Symbols", sans-serif;
+        background: #ffffff; color: #1c1c1e;
+      }
+      #fmBanner {
+        max-width: 860px; margin: 14px auto 0; padding: 8px 14px;
+        border: 1px solid #d8d8e0; border-radius: 8px; background: #f6f7fb;
+        font-size: 12.5px; color: #555;
+      }
+      #fmBanner > summary { cursor: pointer; font-weight: 600; color: #2f6fdb; outline: none; user-select: none; }
+      #fmBanner[open] > summary { margin-bottom: 6px; }
+      .fm-edit-btn {
+        margin-left: auto; padding: 2px 9px; font-size: 11px; font-family: inherit;
+        background: #ffffff; color: #2f6fdb; border: 1px solid #c8d6f5; border-radius: 5px;
+        cursor: pointer; line-height: 1.4;
+      }
+      .fm-edit-btn:hover { background: #eef3ff; }
+      .fm-edit-btn:active { background: #d8e3fb; }
+      .fm-table { border-collapse: collapse; width: 100%; margin-top: 4px; font-size: 13px; }
+      .fm-table th, .fm-table td { padding: 5px 10px; vertical-align: top; text-align: left; border-bottom: 1px dashed #e2e3e8; }
+      .fm-table th { color: #6b6b75; font-weight: 500; width: 96px; white-space: nowrap; }
+      .fm-table td { color: #1c1c1e; word-break: break-word; }
+      .fm-grid { display: grid; grid-template-columns: minmax(80px, max-content) 1fr; row-gap: 2px; column-gap: 10px; margin-top: 2px; align-items: start; }
+      .fm-row { display: contents; }
+      .fm-row:hover { background: rgba(0,0,0,0.045); border-radius: 6px; }
+      .fm-row:hover > .fm-row-label, .fm-row:hover > .fm-row-value { background: rgba(0,0,0,0.045); }
+      .fm-row-label {
+        display: flex; align-items: center; gap: 6px;
+        color: #6b6b75; font-weight: 500; font-size: 13px; padding-top: 6px; text-align: left;
+        overflow: hidden; white-space: nowrap; min-height: 26px;
+      }
+      .fm-icon { font-size: 13px; width: 16px; text-align: center; opacity: 0.82; flex: 0 0 auto; }
+      .fm-key { overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
+      .fm-row-value { min-width: 0; padding: 3px 0; }
+      .fm-row-value > input[type="text"], .fm-row-value > input[type="date"], .fm-row-value > select, .fm-row-value > textarea {
+        font-family: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid #e2e3e8;
+        border-radius: 6px; background: #fff; color: #1c1c1e; width: 100%; box-sizing: border-box;
+        display: block;
+      }
+      .fm-row-value input:focus, .fm-row-value select:focus, .fm-row-value textarea:focus {
+        outline: none; border-color: #2f6fdb; box-shadow: 0 0 0 2px rgba(47,111,219,0.12); background: #fff;
+      }
+      .fm-row-value textarea { resize: vertical; min-height: 56px; line-height: 1.55; }
+      .fm-select { appearance: none; -webkit-appearance: none; background: #fff; cursor: pointer; }
+      .fm-type-row { display: flex; gap: 6px; align-items: center; width: 100%; }
+      .fm-type-row select { flex: 1 1 auto; }
+      .fm-addtype {
+        flex: 0 0 auto; width: 24px; height: 24px; padding: 0; font-size: 14px; line-height: 1;
+        background: #fff; color: #2f6fdb; border: 1px solid #c8d6f5; border-radius: 6px; cursor: pointer;
+      }
+      .fm-addtype:hover { background: #eef3ff; }
+      .fm-chips { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; border: 1px solid #e2e3e8; padding: 4px 6px; border-radius: 6px; background: #fff; min-height: 30px; }
+      .fm-chip {
+        display: inline-flex; align-items: center; gap: 3px; padding: 2px 6px; max-width: 100%;
+        background: #eef3ff; color: #2f6fdb; border: 1px solid #c8d6f5; border-radius: 5px;
+        font-size: 12px; font-family: inherit;
+      }
+      .fm-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .fm-chip-x { border: none; background: transparent; color: inherit; cursor: pointer; font-size: 13px; line-height: 1; padding: 0 2px; opacity: 0.65; }
+      .fm-chip-x:hover { opacity: 1; }
+      .fm-chip-add { flex: 1 1 60px; min-width: 60px; width: auto !important; border: 1px dashed #c8d6f5 !important; background: transparent !important; color: #6b6b75 !important; font-size: 12px; padding: 2px 4px !important; border-radius: 4px !important; }
+      .fm-add-input {
+        font-family: inherit; font-size: 13px; padding: 4px 8px; border: 1px dashed #c8d6f5;
+        border-radius: 6px; background: transparent; color: #6b6b75; width: 100%; box-sizing: border-box; display: block;
+      }
+      .fm-add-input:focus { outline: none; border-color: #2f6fdb; background: #fff; color: #1c1c1e; }
+      #fmBanner .wikilink { color: #2f6fdb; border-bottom: 1px solid rgba(47,111,219,0.5); text-decoration: none; }
+      #fmBanner .wikilink:hover { background: rgba(47,111,219,0.10); }
+      .fm-row-long > .fm-row-label { padding-top: 4px; align-self: start; }
+      .fm-row-long > .fm-row-value { grid-column: 1 / -1; padding-top: 0; padding-bottom: 4px; }
+      .fm-date { cursor: pointer; }
+      .fm-date-val, .fm-scalar-val, .fm-longtext-val { color: #1c1c1e; line-height: 1.6; }
+      .fm-longtext-val { white-space: pre-wrap; }
+      .fm-empty { color: #9a9aa2; }
+      .fm-readonly { font-size: 13px; color: #1c1c1e; line-height: 1.9; padding: 6px 0; }
+      .fm-backlink-pill {
+        display: inline-block; padding: 1px 8px; margin: 1px 4px 1px 0;
+        background: #eef3ff; color: #2f6fdb; border: 1px solid #c8d6f5; border-radius: 4px;
+        font-size: 12px; font-family: inherit;
+      }
+      .fm-company-refs { margin-top: 8px; padding-top: 8px; border-top: 1px dashed #e2e3e8; }
+      .fm-ref-title { font-size: 12px; color: #6b6b73; margin-bottom: 4px; font-weight: 600; }
+      .fm-ref-table { border-collapse: collapse; width: 100%; font-size: 12px; }
+      .fm-ref-table th, .fm-ref-table td { border: 1px solid #e2e3e8; padding: 4px 8px; text-align: left; vertical-align: top; }
+      .fm-ref-table th { background: #f5f6f8; color: #3a3a40; font-weight: 600; }
+      .fm-ref-type { color: #6b6b73; white-space: nowrap; }
+      .fm-ref-fields { color: #1c1c1e; }
+      .fm-ref-fields .fm-ref-label { color: #6b6b75; margin-right: 2px; }
+      .fm-backlink-group { margin: 2px 0; }
+      .fm-backlink-grp-label { color: #9a9aa2; margin-right: 4px; }
+      .fm-backlink-item { display: inline-flex; align-items: center; margin: 1px 4px 1px 0; background: #eef3ff; color: #2f6fdb; border: 1px solid #c8d6f5; border-radius: 4px; padding: 1px 2px 1px 8px; font-size: 12px; }
+      .fm-backlink-x { border: none; background: transparent; color: #c0392b; cursor: pointer; font-size: 13px; line-height: 1; padding: 0 4px; }
+      .fm-backlink-x:hover { color: #e74c3c; }
+      .fm-backlinks-edit { line-height: 1.5; }
+      .fm-bl-sub { margin: 4px 0; }
+      .fm-bl-tag {
+        display: inline-block; font-size: 11px; font-weight: 600; color: #6b6b75;
+        background: #eef0f4; border-radius: 4px; padding: 1px 7px; margin-right: 8px;
+      }
+      .fm-bl-edit {
+        width: 100%; box-sizing: border-box; font-family: inherit; font-size: 13px;
+        padding: 6px 8px; border: 1px solid #e2e3e8; border-radius: 6px; background: #fff;
+        color: #1c1c1e; resize: vertical; line-height: 1.6; margin-top: 4px;
+      }
+      .fm-bl-edit:focus { outline: none; border-color: #2f6fdb; box-shadow: 0 0 0 2px rgba(47,111,219,0.12); }
+      #fmPageRefsContainer { max-width: 860px; margin: 16px auto 0; display: none; }
+      .fm-ref-add { margin-top: 8px; }
+      .fm-ref-add-input {
+        width: 100%; box-sizing: border-box; font-family: inherit; font-size: 13px;
+        padding: 6px 8px; border: 1px solid #e2e3e8; border-radius: 6px; background: #fff; color: #1c1c1e;
+      }
+      .fm-ref-add-input:focus { outline: none; border-color: #2f6fdb; box-shadow: 0 0 0 2px rgba(47,111,219,0.12); }
+      .fm-ref-empty { color: #9a9aa2; font-style: italic; }
+      .fm-add-row { grid-column: 2; margin-top: 6px; }
+      .fm-add-prop {
+        padding: 3px 8px; font-size: 12px; font-family: inherit;
+        background: transparent; color: #2f6fdb; border: none; border-radius: 6px; cursor: pointer; text-align: left;
+      }
+      .fm-add-prop:hover { background: rgba(47,111,219,0.08); }
+      .fm-row-new { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(80px, max-content) 1fr; gap: 10px; }
+      .fm-row-new .fm-newkey, .fm-row-new .fm-newval { border: 1px solid #e2e3e8 !important; background: #fff; font-size: 13px; padding: 4px 8px; border-radius: 6px; width: 100%; box-sizing: border-box; display: block; }
+
+      #editor { position: relative; max-width: 860px; margin: 0 auto; }
+      .ProseMirror {
+        outline: none; padding: 16px 22px 90px; font-size: 15px; line-height: 1.72;
+        min-height: 60vh;
+      }
+      .ProseMirror > * { margin: 0 0 0.7em; }
+      .ProseMirror h1 { font-size: 1.85em; font-weight: 700; margin: 0.4em 0 0.5em; line-height: 1.25; }
+      .ProseMirror h2 { font-size: 1.45em; font-weight: 700; margin: 0.4em 0 0.45em; }
+      .ProseMirror h3 { font-size: 1.18em; font-weight: 600; margin: 0.4em 0 0.4em; }
+      .ProseMirror h4 { font-size: 1.02em; font-weight: 600; }
+      .ProseMirror ul, .ProseMirror ol { padding-left: 1.5em; }
+      .ProseMirror li { margin: 0.15em 0; }
+      .ProseMirror ul[data-type="taskList"] { list-style: none; padding-left: 0.4em; }
+      .ProseMirror ul[data-type="taskList"] li { display: flex; align-items: flex-start; }
+      .ProseMirror ul[data-type="taskList"] li > label { margin-right: 0.5em; margin-top: 0.2em; flex: 0 0 auto; user-select: none; }
+      .ProseMirror ul[data-type="taskList"] li > div { flex: 1 1 auto; min-width: 0; }
+      .ProseMirror ul[data-type="taskList"] input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; }
+      .ProseMirror blockquote { border-left: 3px solid #cfcfd6; margin-left: 0; padding: 2px 0 2px 14px; color: #555; }
+      .ProseMirror code { background: #f0f0f4; border-radius: 4px; padding: 1px 5px; font-size: 0.9em; font-family: "SF Mono", Menlo, Consolas, monospace; }
+      .ProseMirror pre { background: #f4f4f7; border-radius: 8px; padding: 12px 14px; overflow: auto; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 13px; }
+      .ProseMirror pre code { background: none; padding: 0; }
+      .ProseMirror a:not(.wikilink) { color: #2f6fdb; }
+      .ProseMirror table { border-collapse: collapse; width: 100%; margin: 0.5em 0; }
+      .ProseMirror th, .ProseMirror td { border: 1px solid #d8d8e0; padding: 6px 10px; text-align: left; }
+      .ProseMirror th { background: #f4f5f9; font-weight: 600; }
+      .ProseMirror hr { border: none; border-top: 1px solid #e2e3e8; margin: 1em 0; }
+      .ProseMirror img { max-width: 100%; border-radius: 6px; }
+      .ProseMirror p.is-editor-empty:first-child::before { content: attr(data-placeholder); color: #9a9aa2; float: left; height: 0; pointer-events: none; }
+
+      .wikilink {
+        color: #5b54d6; border-bottom: 1px solid rgba(91,84,214,0.55);
+        cursor: pointer; border-radius: 3px; padding: 0 2px; text-decoration: none;
+      }
+      .wikilink:hover { background: rgba(91,84,214,0.10); }
+      .wikilink-missing { color: #d23b3b; border-bottom: 1px dashed #d23b3b; }
+      .wikilink-missing:hover { background: rgba(210,59,59,0.10); }
+
+      .wiki-ac {
+        position: absolute; z-index: 9000; background: #ffffff; border: 1px solid #d8d8e0;
+        border-radius: 8px; box-shadow: 0 6px 22px rgba(0,0,0,0.14); padding: 4px;
+        font-size: 12.5px; min-width: 190px; max-height: 230px; overflow-y: auto;
+      }
+      .wiki-ac-item { padding: 4px 10px; border-radius: 5px; color: #1c1c1e; cursor: pointer; white-space: nowrap; }
+      .wiki-ac-item.active, .wiki-ac-item:hover { background: #eef0ff; }
+
+      .wiki-preview {
+        position: fixed; z-index: 9500; width: 340px; max-height: 264px; overflow-y: auto;
+        background: #ffffff; border: 1px solid #d8d8e0; border-radius: 10px;
+        box-shadow: 0 8px 30px rgba(0,0,0,0.18); padding: 12px 14px; font-size: 13px; line-height: 1.6; color: #1c1c1e;
+      }
+      .wiki-preview-body h1 { font-size: 1.15em; margin: 0 0 0.4em; }
+      .wiki-preview-body h2 { font-size: 1.02em; margin: 0.6em 0 0.3em; }
+      .wiki-preview-body p { margin: 0 0 0.5em; }
+      .wiki-preview-body code { background: #f0f0f4; border-radius: 4px; padding: 1px 4px; font-size: 0.9em; }
+      .wiki-preview-loading { color: #9a9aa2; }
+      .wiki-preview-missing { color: #d23b3b; }
+      .wiki-preview-hint { color: #9a9aa2; font-size: 11.5px; }
+
+      #bubbleMenu { display: flex; gap: 4px; background: #2a2a2e; border-radius: 8px; padding: 4px; box-shadow: 0 6px 22px rgba(0,0,0,0.28); }
+      #bubbleMenu button { background: transparent; color: #f2f2f5; border: none; border-radius: 5px; padding: 4px 9px; font-size: 12px; cursor: pointer; font-family: inherit; }
+      #bubbleMenu button:hover { background: rgba(255,255,255,0.14); }
+
+      @media (prefers-color-scheme: dark) {
+        body { background: #1c1c1e; color: #ebebf0; }
+        #fmBanner { background: #24242a; border-color: #3a3a40; color: #d8d8de; }
+        #fmBanner > summary { color: #74b1ff; }
+        .fm-table th { color: #b8b8c0; }
+        .fm-table td { color: #ebebf0; }
+        .fm-table th, .fm-table td { border-bottom-color: #3a3a40; }
+        .fm-row:hover > .fm-row-label, .fm-row:hover > .fm-row-value { background: rgba(255,255,255,0.05); }
+        .fm-row-label { color: #b8b8c0; }
+        .fm-row-value > input[type="text"], .fm-row-value > input[type="date"], .fm-row-value > select, .fm-row-value > textarea {
+          font-family: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid #4a4a52;
+          border-radius: 6px; background: #2c2c32; color: #ebebf0; width: 100%; box-sizing: border-box; display: block;
+        }
+        .fm-row-value input:focus, .fm-row-value select:focus, .fm-row-value textarea:focus {
+          outline: none; border-color: #74b1ff; box-shadow: 0 0 0 2px rgba(116,177,255,0.18); background: #2c2c32;
+        }
+        .fm-select { background: #2c2c32; cursor: pointer; }
+        .fm-addtype { background: #2c2c32; color: #74b1ff; border: 1px solid #4a4a52; }
+        .fm-addtype:hover { background: #3a3a52; }
+        .fm-chip { background: rgba(116,177,255,0.15); color: #74b1ff; border: 1px solid #3a4a5e; }
+        .fm-chip-add { border: 1px dashed #3a4a5e !important; background: transparent !important; color: #b8b8c0 !important; }
+        .fm-add-input { border: 1px dashed #3a4a5e; background: transparent; color: #b8b8c0; width: 100%; box-sizing: border-box; display: block; padding: 4px 8px; font-family: inherit; font-size: 13px; border-radius: 6px; }
+        .fm-add-input:focus { outline: none; border-color: #74b1ff; background: #2c2c32; color: #ebebf0; }
+        #fmBanner .wikilink { color: #74b1ff; border-bottom-color: rgba(116,177,255,0.55); }
+        #fmBanner .wikilink:hover { background: rgba(116,177,255,0.14); }
+        .fm-chips { background: #2c2c32; border-color: #4a4a52; }
+        .fm-date-val, .fm-scalar-val, .fm-longtext-val { color: #ebebf0; }
+        .fm-readonly { font-size: 13px; color: #ebebf0; line-height: 1.9; padding: 6px 0; }
+        .fm-backlink-pill { display: inline-block; padding: 1px 8px; margin: 1px 4px 1px 0; background: rgba(116,177,255,0.15); color: #74b1ff; border: 1px solid #3a4a5e; border-radius: 4px; font-size: 12px; font-family: inherit; }
+        .fm-company-refs { margin-top: 8px; padding-top: 8px; border-top: 1px dashed #3a3a3e; }
+        .fm-ref-title { font-size: 12px; color: #b8b8c0; margin-bottom: 4px; font-weight: 600; }
+        .fm-ref-table { border-collapse: collapse; width: 100%; font-size: 12px; }
+        .fm-ref-table th, .fm-ref-table td { border: 1px solid #3a3a3e; padding: 4px 8px; text-align: left; vertical-align: top; }
+        .fm-ref-table th { background: #26262b; color: #ebebf0; font-weight: 600; }
+        .fm-ref-type { color: #b8b8c0; white-space: nowrap; }
+        .fm-ref-fields { color: #ebebf0; }
+        .fm-ref-fields .fm-ref-label { color: #b8b8c0; margin-right: 2px; }
+        .fm-backlink-group { margin: 2px 0; }
+        .fm-backlink-grp-label { color: #7a7a82; margin-right: 4px; }
+        .fm-backlink-item { display: inline-flex; align-items: center; margin: 1px 4px 1px 0; background: rgba(116,177,255,0.15); color: #74b1ff; border: 1px solid #3a4a5e; border-radius: 4px; padding: 1px 2px 1px 8px; font-size: 12px; }
+        .fm-backlink-x { border: none; background: transparent; color: #ff7a7a; cursor: pointer; font-size: 13px; line-height: 1; padding: 0 4px; }
+        .fm-backlink-x:hover { color: #ff9a9a; }
+        .fm-bl-tag { background: #2c2c32; color: #b8b8c0; }
+        .ProseMirror code { background: #2a2a2e; }
+        .ProseMirror pre { background: #26262b; }
+        .ProseMirror blockquote { border-left-color: #3a3a40; color: #b8b8c0; }
+        .ProseMirror th, .ProseMirror td { border-color: #3a3a3e; }
+        .ProseMirror th { background: #26262b; }
+        .ProseMirror hr { border-top-color: #3a3a3e; }
+        .ProseMirror p.is-editor-empty:first-child::before { color: #7a7a82; }
+        .wikilink { color: #b3a8ff; border-bottom-color: rgba(179,168,255,0.55); }
+        .wikilink:hover { background: rgba(179,168,255,0.14); }
+        .wikilink-missing { color: #ff7a7a; border-bottom-color: #ff7a7a; }
+        .wiki-ac { background: #2a2a2e; border-color: #3a3a3e; color: #ebebf0; }
+        .wiki-ac-item { color: #ebebf0; }
+        .wiki-ac-item.active, .wiki-ac-item:hover { background: #3a3a52; }
+        .wiki-preview { background: #2a2a2e; border-color: #3a3a3e; color: #ebebf0; }
+        .wiki-preview-body code { background: #26262b; }
+      }
+    </style>
+    </head>
+    <body>
+    <details id="fmBanner" class="fm-banner" open><summary>笔记属性</summary><div id="fmBody"></div></details>
+    <div id="editor"></div>
+    <div id="fmPageRefsContainer"></div>
+    <script src="milkdown.bundle.js"></script>
     </body>
     </html>
     """

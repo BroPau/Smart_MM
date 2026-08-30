@@ -1,0 +1,22 @@
+{
+  "name": "milkdown_src",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@milkdown/core": "^7.22.1",
+    "@milkdown/ctx": "^7.22.1",
+    "@milkdown/preset-commonmark": "^7.22.1",
+    "@milkdown/preset-gfm": "^7.22.1",
+    "@milkdown/transformer": "^7.22.1",
+    "@milkdown/utils": "^7.22.1",
+    "esbuild": "^0.28.2",
+    "jsdom": "^30.0.1"
+  }
+}
