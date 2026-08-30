@@ -113,39 +113,32 @@ extension WikiPageSpec {
         //     此前用中文 key（"类型"/"规范名"/...）会让 spec.get("type") 永远 None → "type 必须是 ...，收到：空"。
         //     值仍保持 PascalCase（Person/Company/Chip/...），与磁盘 YAML `type: Person`、UI picker、错误消息一致。
         //     中文 key 同步发送作为兜底（pipeline v2.2.63 起容错，同时接受 type/类型 等中英键）。
+        // v2.2.72：spec 只发纯英文 PascalCase 键（与 pipeline _FM_DISPLAY 写回一致，frontmatter 不再中英文混合）
         var d: [String: Any] = [
             "type": type,
-            "类型": type,
             "canonical_name": name,
-            "规范名": name,
             "aliases": aliases,
-            "别名": aliases,
             "tags": tags,
-            "标签": tags,
             "updated": updated,
-            "更新时间": updated,
-            "backlinks": backlinks,
-            "反向链接": backlinks
+            "backlinks": backlinks
         ]
         switch type {
         case "Person":
-            d["中文名"]    = chineseName
-            d["公司"]      = company
-            d["company"]  = company   // pipeline 读英文键
-            d["职位"]      = jobTitle
-            d["title"]    = jobTitle  // pipeline 读英文键
-            d["职能范围"]  = role
+            d["ChineseName"] = chineseName
+            d["company"] = company
+            d["title"] = jobTitle
+            d["FunctionScope"] = role
         case "Company":
-            d["公司类型"]  = companyType
-            d["所属行业"]  = industry
-            d["公司简介"]  = companyIntro
+            d["CompanyType"] = companyType
+            d["Industry"] = industry
+            d["CompanyProfile"] = companyIntro
         case "Chip":
-            d["品牌"]      = brand
-            d["具体型号"]  = model
-            d["类别"]      = category
-            d["功能简述"]  = functionDesc
-            d["状态"]      = status
-            d["替代料"]    = replacement
+            d["Brand"] = brand
+            d["Model"] = model
+            d["Category"] = category
+            d["Description"] = functionDesc
+            d["Status"] = status
+            d["Alternative"] = replacement
         default: break  // Project/Topic/Method 无专属字段
         }
         return d

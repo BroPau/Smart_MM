@@ -29823,34 +29823,92 @@
     return fm;
   }
   var KEY_ALIASES = {
-    \u7C7B\u578B: "type",
-    Type: "type",
+    // canonical 小写英文 → 自身（identity）
     type: "type",
-    \u89C4\u8303\u540D: "canonical_name",
-    CanonicalName: "canonical_name",
     canonical_name: "canonical_name",
     canonicalname: "canonical_name",
-    \u522B\u540D: "aliases",
-    Aliases: "aliases",
     aliases: "aliases",
-    \u6807\u7B7E: "tags",
-    Tags: "tags",
     tags: "tags",
-    \u66F4\u65B0\u65F6\u95F4: "updated",
-    Updated: "updated",
     updated: "updated",
-    \u53CD\u5411\u94FE\u63A5: "backlinks",
-    Backlinks: "backlinks",
     backlinks: "backlinks",
-    \u516C\u53F8: "company",
-    Company: "company",
     company: "company",
+    title: "title",
+    summary: "summary",
+    suspected_alias_of: "suspected_alias_of",
+    // 旧中文标签 → canonical
+    \u7C7B\u578B: "type",
+    \u89C4\u8303\u540D: "canonical_name",
+    \u522B\u540D: "aliases",
+    \u6807\u7B7E: "tags",
+    \u66F4\u65B0\u65F6\u95F4: "updated",
+    \u53CD\u5411\u94FE\u63A5: "backlinks",
+    \u516C\u53F8: "company",
     \u804C\u4F4D: "title",
+    // 中文专属键 → canonical（identity，保持中文内部键稳定）
+    \u4E2D\u6587\u540D: "\u4E2D\u6587\u540D",
+    \u804C\u80FD\u8303\u56F4: "\u804C\u80FD\u8303\u56F4",
+    \u516C\u53F8\u7C7B\u578B: "\u516C\u53F8\u7C7B\u578B",
+    \u6240\u5C5E\u884C\u4E1A: "\u6240\u5C5E\u884C\u4E1A",
+    \u516C\u53F8\u7B80\u4ECB: "\u516C\u53F8\u7B80\u4ECB",
+    \u54C1\u724C: "\u54C1\u724C",
+    \u5177\u4F53\u578B\u53F7: "\u5177\u4F53\u578B\u53F7",
+    \u7C7B\u522B: "\u7C7B\u522B",
+    \u529F\u80FD\u7B80\u8FF0: "\u529F\u80FD\u7B80\u8FF0",
+    \u72B6\u6001: "\u72B6\u6001",
+    \u66FF\u4EE3\u6599: "\u66FF\u4EE3\u6599",
+    // v2.2.72：纯英文 PascalCase 显示键 → canonical（磁盘统一 PascalCase 后仍能正确归一）
+    Type: "type",
+    CanonicalName: "canonical_name",
+    Aliases: "aliases",
+    Tags: "tags",
+    Updated: "updated",
+    Backlinks: "backlinks",
+    Company: "company",
     Title: "title",
-    title: "title"
+    Summary: "summary",
+    SuspectedAliasOf: "suspected_alias_of",
+    ChineseName: "\u4E2D\u6587\u540D",
+    FunctionScope: "\u804C\u80FD\u8303\u56F4",
+    CompanyType: "\u516C\u53F8\u7C7B\u578B",
+    Industry: "\u6240\u5C5E\u884C\u4E1A",
+    CompanyProfile: "\u516C\u53F8\u7B80\u4ECB",
+    Brand: "\u54C1\u724C",
+    Model: "\u5177\u4F53\u578B\u53F7",
+    Category: "\u7C7B\u522B",
+    Description: "\u529F\u80FD\u7B80\u8FF0",
+    Status: "\u72B6\u6001",
+    Alternative: "\u66FF\u4EE3\u6599"
   };
   function fmCanonical(k) {
     return KEY_ALIASES[k] || k;
+  }
+  var FM_DISPLAY = {
+    type: "Type",
+    canonical_name: "CanonicalName",
+    aliases: "Aliases",
+    tags: "Tags",
+    updated: "Updated",
+    backlinks: "Backlinks",
+    company: "Company",
+    title: "Title",
+    summary: "Summary",
+    suspected_alias_of: "SuspectedAliasOf",
+    \u4E2D\u6587\u540D: "ChineseName",
+    \u804C\u80FD\u8303\u56F4: "FunctionScope",
+    \u516C\u53F8\u7C7B\u578B: "CompanyType",
+    \u6240\u5C5E\u884C\u4E1A: "Industry",
+    \u516C\u53F8\u7B80\u4ECB: "CompanyProfile",
+    \u54C1\u724C: "Brand",
+    \u5177\u4F53\u578B\u53F7: "Model",
+    \u7C7B\u522B: "Category",
+    \u529F\u80FD\u7B80\u8FF0: "Description",
+    \u72B6\u6001: "Status",
+    \u66FF\u4EE3\u6599: "Alternative"
+  };
+  function fmDisplayName(k) {
+    if (FM_DISPLAY[k]) return FM_DISPLAY[k];
+    if (/^[A-Za-z0-9_]+$/.test(k)) return k.charAt(0).toUpperCase() + k.slice(1);
+    return k;
   }
   function fmNormalize(fm) {
     const out = {};
@@ -29997,6 +30055,72 @@
               "data-wikilink": target,
               "data-page": page
             }));
+          });
+          return DecorationSet.create(state.doc, decos);
+        }
+      }
+    });
+  }
+  var yamlHighlightKey = new PluginKey("yamlHighlight");
+  function classifyYamlValue(s) {
+    const t = s.trim();
+    if (t === "") return "yml-v";
+    if (t.startsWith("#")) return "yml-c";
+    if (/^".*"$/.test(t) || /^'.*'$/.test(t)) return "yml-s";
+    if (/^-?\d+(\.\d+)?$/.test(t)) return "yml-n";
+    if (t === "true" || t === "false" || t === "null" || t === "~") return "yml-n";
+    return "yml-v";
+  }
+  function yamlHighlightPlugin() {
+    return new Plugin({
+      key: yamlHighlightKey,
+      props: {
+        decorations(state) {
+          const decos = [];
+          state.doc.descendants((node2, pos) => {
+            if (node2.type.name !== "code_block" && node2.type.name !== "codeBlock") return;
+            const lang = node2.attrs && (node2.attrs.language || node2.attrs.lang) || "";
+            const text5 = node2.textContent;
+            const isYaml = lang === "yaml" || lang === "yml";
+            if (!isYaml) return;
+            const lines = text5.split("\n");
+            let offset = pos + 1;
+            for (const line of lines) {
+              const lineStart = offset;
+              if (line.length === 0) {
+                offset += 1;
+                continue;
+              }
+              const kvM = /^(\s*)([A-Za-z_][A-Za-z0-9_]*):(\s*)(.*)$/.exec(line);
+              if (kvM) {
+                const keyStart = lineStart + kvM[1].length;
+                const keyEnd = keyStart + kvM[2].length;
+                decos.push(Decoration.inline(keyStart, keyEnd, { class: "yml-k" }));
+                const sepStart = keyEnd;
+                const sepEnd = sepStart + 1;
+                decos.push(Decoration.inline(sepStart, sepEnd, { class: "yml-sep" }));
+                const valStr = kvM[4];
+                if (valStr.length) {
+                  const valStart = sepEnd + kvM[3].length;
+                  const valEnd = valStart + valStr.length;
+                  decos.push(Decoration.inline(valStart, valEnd, { class: classifyYamlValue(valStr) }));
+                }
+              } else {
+                const dashM = /^\s*-\s+/.exec(line);
+                if (dashM) {
+                  const dashStart = lineStart + dashM[0].length - 1;
+                  decos.push(Decoration.inline(dashStart, dashStart + 1, { class: "yml-dash" }));
+                  const rest = line.slice(dashM[0].length);
+                  if (rest.length) {
+                    const rs = lineStart + dashM[0].length;
+                    decos.push(Decoration.inline(rs, rs + rest.length, { class: classifyYamlValue(rest) }));
+                  }
+                } else if (/^\s*#/.test(line)) {
+                  decos.push(Decoration.inline(lineStart, lineStart + line.length, { class: "yml-c" }));
+                }
+              }
+              offset += line.length + 1;
+            }
           });
           return DecorationSet.create(state.doc, decos);
         }
@@ -30318,22 +30442,23 @@
     if (!fm || Object.keys(fm).length === 0) return "";
     const lines = ["---"];
     Object.keys(fm).forEach((k) => {
+      const dk = fmDisplayName(k);
       const v = fm[k];
       if (v === void 0 || v === null) return;
       if (Array.isArray(v)) {
         if (v.length === 0) {
-          lines.push(k + ": []");
+          lines.push(dk + ": []");
           return;
         }
-        lines.push(k + ":");
+        lines.push(dk + ":");
         v.forEach((item) => lines.push("  - " + yamlScalar(item)));
       } else {
         const s = String(v);
         if (s === "") {
-          lines.push(k + ': ""');
+          lines.push(dk + ': ""');
           return;
         }
-        lines.push(k + ": " + yamlScalar(s));
+        lines.push(dk + ": " + yamlScalar(s));
       }
     });
     lines.push("---");
@@ -30490,7 +30615,7 @@
       const e = await Editor.make(async (ctx) => {
         ctx.set(rootCtx, document.getElementById("editor"));
         ctx.set(defaultValueCtx, "");
-      }).use(commonmark).use(gfm2).use($prose(() => wikiLinkPlugin())).use($prose(() => autocompletePlugin)).use($prose(() => autoPairPlugin)).config((ctx) => {
+      }).use(commonmark).use(gfm2).use($prose(() => wikiLinkPlugin())).use($prose(() => autocompletePlugin)).use($prose(() => autoPairPlugin)).use($prose(() => yamlHighlightPlugin())).config((ctx) => {
         ctx.update(remarkStringifyOptionsCtx, (prev) => ({ ...prev, bullet: "-", listItemIndent: "one", fences: true }));
       }).create();
       editor = e;

@@ -80,16 +80,43 @@ function parseFrontmatter(lines) {
   return fm
 }
 const KEY_ALIASES = {
-  类型: 'type', Type: 'type', type: 'type',
-  规范名: 'canonical_name', CanonicalName: 'canonical_name', canonical_name: 'canonical_name', canonicalname: 'canonical_name',
-  别名: 'aliases', Aliases: 'aliases', aliases: 'aliases',
-  标签: 'tags', Tags: 'tags', tags: 'tags',
-  更新时间: 'updated', Updated: 'updated', updated: 'updated',
-  反向链接: 'backlinks', Backlinks: 'backlinks', backlinks: 'backlinks',
-  公司: 'company', Company: 'company', company: 'company',
-  职位: 'title', Title: 'title', title: 'title'
+  // canonical 小写英文 → 自身（identity）
+  type: 'type', canonical_name: 'canonical_name', canonicalname: 'canonical_name',
+  aliases: 'aliases', tags: 'tags', updated: 'updated', backlinks: 'backlinks',
+  company: 'company', title: 'title', summary: 'summary',
+  suspected_alias_of: 'suspected_alias_of',
+  // 旧中文标签 → canonical
+  类型: 'type', 规范名: 'canonical_name', 别名: 'aliases', 标签: 'tags',
+  更新时间: 'updated', 反向链接: 'backlinks', 公司: 'company', 职位: 'title',
+  // 中文专属键 → canonical（identity，保持中文内部键稳定）
+  中文名: '中文名', 职能范围: '职能范围', 公司类型: '公司类型',
+  所属行业: '所属行业', 公司简介: '公司简介', 品牌: '品牌',
+  具体型号: '具体型号', 类别: '类别', 功能简述: '功能简述', 状态: '状态', 替代料: '替代料',
+  // v2.2.72：纯英文 PascalCase 显示键 → canonical（磁盘统一 PascalCase 后仍能正确归一）
+  Type: 'type', CanonicalName: 'canonical_name', Aliases: 'aliases',
+  Tags: 'tags', Updated: 'updated', Backlinks: 'backlinks', Company: 'company', Title: 'title',
+  Summary: 'summary', SuspectedAliasOf: 'suspected_alias_of',
+  ChineseName: '中文名', FunctionScope: '职能范围', CompanyType: '公司类型',
+  Industry: '所属行业', CompanyProfile: '公司简介', Brand: '品牌',
+  Model: '具体型号', Category: '类别', Description: '功能简述', Status: '状态', Alternative: '替代料',
 }
 function fmCanonical(k) { return KEY_ALIASES[k] || k }
+// canonical（内部稳定键）→ 纯英文 PascalCase 显示键（v2.2.72：frontmatter 不再中英文混合）
+const FM_DISPLAY = {
+  type: 'Type', canonical_name: 'CanonicalName', aliases: 'Aliases',
+  tags: 'Tags', updated: 'Updated', backlinks: 'Backlinks',
+  company: 'Company', title: 'Title', summary: 'Summary',
+  suspected_alias_of: 'SuspectedAliasOf',
+  中文名: 'ChineseName', 职能范围: 'FunctionScope', 公司类型: 'CompanyType',
+  所属行业: 'Industry', 公司简介: 'CompanyProfile', 品牌: 'Brand',
+  具体型号: 'Model', 类别: 'Category', 功能简述: 'Description', 状态: 'Status', 替代料: 'Alternative',
+}
+function fmDisplayName(k) {
+  if (FM_DISPLAY[k]) return FM_DISPLAY[k]
+  // ASCII 兜底：首字母大写（保持纯英文），避免落入中文混合
+  if (/^[A-Za-z0-9_]+$/.test(k)) return k.charAt(0).toUpperCase() + k.slice(1)
+  return k
+}
 function fmNormalize(fm) {
   const out = {}
   const seen = new Set()
@@ -323,6 +350,71 @@ function wikiLinkPlugin() {
             'data-wikilink': target,
             'data-page': page
           }))
+        })
+        return DecorationSet.create(state.doc, decos)
+      }
+    }
+  })
+}
+
+// ProseMirror 插件：YAML 代码块语法高亮（v2.2.72，零依赖自绘装饰）
+const yamlHighlightKey = new PluginKey('yamlHighlight')
+function classifyYamlValue(s) {
+  const t = s.trim()
+  if (t === '') return 'yml-v'
+  if (t.startsWith('#')) return 'yml-c'
+  if (/^".*"$/.test(t) || /^'.*'$/.test(t)) return 'yml-s'
+  if (/^-?\d+(\.\d+)?$/.test(t)) return 'yml-n'
+  if (t === 'true' || t === 'false' || t === 'null' || t === '~') return 'yml-n'
+  return 'yml-v'
+}
+function yamlHighlightPlugin() {
+  return new Plugin({
+    key: yamlHighlightKey,
+    props: {
+      decorations(state) {
+        const decos = []
+        state.doc.descendants((node, pos) => {
+          if (node.type.name !== 'code_block' && node.type.name !== 'codeBlock') return
+          const lang = (node.attrs && (node.attrs.language || node.attrs.lang)) || ''
+          const text = node.textContent
+          const isYaml = lang === 'yaml' || lang === 'yml'
+          if (!isYaml) return
+          const lines = text.split('\n')
+          let offset = pos + 1 // code_block 内容首字符位置
+          for (const line of lines) {
+            const lineStart = offset
+            if (line.length === 0) { offset += 1; continue }
+            const kvM = /^(\s*)([A-Za-z_][A-Za-z0-9_]*):(\s*)(.*)$/.exec(line)
+            if (kvM) {
+              const keyStart = lineStart + kvM[1].length
+              const keyEnd = keyStart + kvM[2].length
+              decos.push(Decoration.inline(keyStart, keyEnd, { class: 'yml-k' }))
+              const sepStart = keyEnd
+              const sepEnd = sepStart + 1
+              decos.push(Decoration.inline(sepStart, sepEnd, { class: 'yml-sep' }))
+              const valStr = kvM[4]
+              if (valStr.length) {
+                const valStart = sepEnd + kvM[3].length
+                const valEnd = valStart + valStr.length
+                decos.push(Decoration.inline(valStart, valEnd, { class: classifyYamlValue(valStr) }))
+              }
+            } else {
+              const dashM = /^\s*-\s+/.exec(line)
+              if (dashM) {
+                const dashStart = lineStart + dashM[0].length - 1
+                decos.push(Decoration.inline(dashStart, dashStart + 1, { class: 'yml-dash' }))
+                const rest = line.slice(dashM[0].length)
+                if (rest.length) {
+                  const rs = lineStart + dashM[0].length
+                  decos.push(Decoration.inline(rs, rs + rest.length, { class: classifyYamlValue(rest) }))
+                }
+              } else if (/^\s*#/.test(line)) {
+                decos.push(Decoration.inline(lineStart, lineStart + line.length, { class: 'yml-c' }))
+              }
+            }
+            offset += line.length + 1 // +1 换行
+          }
         })
         return DecorationSet.create(state.doc, decos)
       }
@@ -635,16 +727,17 @@ function serializeFrontmatter(fm) {
   if (!fm || Object.keys(fm).length === 0) return ''
   const lines = ['---']
   Object.keys(fm).forEach(k => {
+    const dk = fmDisplayName(k)        // 纯英文 PascalCase 显示键（v2.2.72）
     const v = fm[k]
     if (v === undefined || v === null) return
     if (Array.isArray(v)) {
-      if (v.length === 0) { lines.push(k + ': []'); return }
-      lines.push(k + ':')
+      if (v.length === 0) { lines.push(dk + ': []'); return }
+      lines.push(dk + ':')
       v.forEach(item => lines.push('  - ' + yamlScalar(item)))
     } else {
       const s = String(v)
-      if (s === '') { lines.push(k + ': ""'); return }
-      lines.push(k + ': ' + yamlScalar(s))
+      if (s === '') { lines.push(dk + ': ""'); return }
+      lines.push(dk + ': ' + yamlScalar(s))
     }
   })
   lines.push('---')
@@ -844,6 +937,7 @@ async function buildEditor(editable) {
       .use($prose(() => wikiLinkPlugin()))
       .use($prose(() => autocompletePlugin))
       .use($prose(() => autoPairPlugin))
+      .use($prose(() => yamlHighlightPlugin()))
       .config(ctx => {
         ctx.update(remarkStringifyOptionsCtx, prev => ({ ...prev, bullet: '-', listItemIndent: 'one', fences: true }))
       })

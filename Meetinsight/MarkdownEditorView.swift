@@ -1200,6 +1200,13 @@ fileprivate enum MilkdownEditorHTML {
       .ProseMirror code { background: #f0f0f4; border-radius: 4px; padding: 1px 5px; font-size: 0.9em; font-family: "SF Mono", Menlo, Consolas, monospace; }
       .ProseMirror pre { background: #f4f4f7; border-radius: 8px; padding: 12px 14px; overflow: auto; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 13px; }
       .ProseMirror pre code { background: none; padding: 0; }
+      .ProseMirror pre .yml-k { color: #0b58a8; font-weight: 600; }
+      .ProseMirror pre .yml-sep { color: #8a8a93; }
+      .ProseMirror pre .yml-v { color: #1c1c1e; }
+      .ProseMirror pre .yml-s { color: #1c7a3a; }
+      .ProseMirror pre .yml-n { color: #b5530a; }
+      .ProseMirror pre .yml-c { color: #9a9aa2; font-style: italic; }
+      .ProseMirror pre .yml-dash { color: #8a4bce; font-weight: 600; }
       .ProseMirror a:not(.wikilink) { color: #2f6fdb; }
       .ProseMirror table { border-collapse: collapse; width: 100%; margin: 0.5em 0; }
       .ProseMirror th, .ProseMirror td { border: 1px solid #d8d8e0; padding: 6px 10px; text-align: left; }
@@ -1294,6 +1301,13 @@ fileprivate enum MilkdownEditorHTML {
         .wiki-ac-item.active, .wiki-ac-item:hover { background: #3a3a52; }
         .wiki-preview { background: #2a2a2e; border-color: #3a3a3e; color: #ebebf0; }
         .wiki-preview-body code { background: #26262b; }
+        .ProseMirror pre .yml-k { color: #6cb6ff; font-weight: 600; }
+        .ProseMirror pre .yml-sep { color: #7a7a82; }
+        .ProseMirror pre .yml-v { color: #ebebf0; }
+        .ProseMirror pre .yml-s { color: #7ee0a0; }
+        .ProseMirror pre .yml-n { color: #f0a060; }
+        .ProseMirror pre .yml-c { color: #8a8a93; font-style: italic; }
+        .ProseMirror pre .yml-dash { color: #c8a0ff; font-weight: 600; }
       }
     </style>
     </head>
