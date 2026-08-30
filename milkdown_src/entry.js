@@ -533,6 +533,30 @@ function wikilinkInsideCodePlugin() {
     }
   })
 }
+
+// v2.2.74：给所有 GFM 表格（含两张 refs 引用表）统一注 class="pm-table"，
+// 以便 Swift 模板用单一 `.ProseMirror .pm-table` 规则统一列宽/边框/背景，去掉散乱的多套 table CSS。
+// 探测用 node.type.name==='table'（prosemirror-tables 节点名），双保险 node.type.spec.tableRole==='table'，
+// 不依赖具体 milkdown 版本对 type 名的实现（动态验证为 "table"）。保留 prosemirror-tables 原生增删行列能力——不加任何结构锁。
+const pmTableClassKey = new PluginKey('pmTableClass')
+function unifiedTableClassPlugin() {
+  return new Plugin({
+    key: pmTableClassKey,
+    props: {
+      decorations(state) {
+        const decos = []
+        state.doc.descendants((node, pos) => {
+          const t = node.type || {}
+          const isTable = t.name === 'table' || (t.spec && t.spec.tableRole === 'table')
+          if (isTable) {
+            decos.push(Decoration.node(pos, pos + node.nodeSize, { class: 'pm-table' }))
+          }
+        })
+        return DecorationSet.create(state.doc, decos)
+      }
+    }
+  })
+}
 function applyWikiLink(view, page, from, to) {
   const { state } = view
   const markType = state.schema.marks.link
@@ -1067,6 +1091,7 @@ async function buildEditor(editable) {
       .use($prose(() => yamlHighlightPlugin()))
       .use($prose(() => fmMarkerPlugin()))
       .use($prose(() => wikilinkInsideCodePlugin()))
+      .use($prose(() => unifiedTableClassPlugin()))
       .config(ctx => {
         ctx.update(remarkStringifyOptionsCtx, prev => ({ ...prev, bullet: '-', listItemIndent: 'one', fences: true }))
       })

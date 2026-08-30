@@ -931,9 +931,10 @@ fileprivate enum TipTapEditorHTML {
       }
       .ProseMirror pre code { background: none; padding: 0; }
       .ProseMirror a:not(.wikilink) { color: #2f6fdb; }
-      .ProseMirror table { border-collapse: collapse; width: 100%; margin: 0.5em 0; }
-      .ProseMirror th, .ProseMirror td { border: 1px solid #d8d8e0; padding: 6px 10px; text-align: left; }
-      .ProseMirror th { background: #f4f5f9; font-weight: 600; }
+      .ProseMirror .pm-table { border-collapse: collapse; width: 100%; margin: 0.5em 0; table-layout: auto; }
+      .ProseMirror .pm-table th, .ProseMirror .pm-table td { border: 1px solid #d8d8e0; padding: 6px 10px; text-align: left; vertical-align: top; width: auto; }
+      .ProseMirror .pm-table th { background: #f4f5f9; font-weight: 600; color: #2a2a2e; }
+      .ProseMirror .pm-table colgroup col { width: auto !important; }
       .ProseMirror hr { border: none; border-top: 1px solid #e2e3e8; margin: 1em 0; }
       .ProseMirror img { max-width: 100%; border-radius: 6px; }
       .ProseMirror p.is-editor-empty:first-child::before {
@@ -1040,8 +1041,8 @@ fileprivate enum TipTapEditorHTML {
       .ProseMirror code { background: #2a2a2e; }
         .ProseMirror pre { background: #26262b; }
         .ProseMirror blockquote { border-left-color: #3a3a40; color: #b8b8c0; }
-        .ProseMirror th, .ProseMirror td { border-color: #3a3a3e; }
-        .ProseMirror th { background: #26262b; }
+        .ProseMirror .pm-table th, .ProseMirror .pm-table td { border-color: #3a3a3e; }
+        .ProseMirror .pm-table th { background: #26262b; }
         .ProseMirror hr { border-top-color: #3a3a3e; }
         .ProseMirror p.is-editor-empty:first-child::before { color: #7a7a82; }
         .wikilink { color: #b3a8ff; border-bottom-color: rgba(179,168,255,0.55); }
@@ -1177,11 +1178,11 @@ fileprivate enum MilkdownEditorHTML {
         outline: none; padding: 16px 22px 90px; font-size: 15px; line-height: 1.72;
         min-height: 60vh; max-width: 860px; margin: 0 auto; box-sizing: border-box;
       }
-      /* v2.2.70：frontmatter Markdown 表（正文首段）+ 双链表（正文末段）统一样式 */
-      .ProseMirror table.fm-block { border-collapse: collapse; width: 100%; margin: 0 0 12px; font-size: 13.5px; }
-      .ProseMirror table.fm-block th, .ProseMirror table.fm-block td { border: 1px solid #d8d8e0; padding: 6px 10px; text-align: left; vertical-align: top; }
-      .ProseMirror table.fm-block th { background: #f4f5f9; font-weight: 600; color: #2a2a2e; }
-      .ProseMirror table.fm-block td { background: rgba(116,177,255,0.04); color: #1c1c1e; }
+      /* v2.2.74：所有 GFM 表格（含两张 refs 引用表）统一走 .pm-table（由 unifiedTableClassPlugin 注入 class） */
+      .ProseMirror .pm-table { border-collapse: collapse; width: 100%; margin: 0.5em 0; table-layout: auto; }
+      .ProseMirror .pm-table th, .ProseMirror .pm-table td { border: 1px solid #d8d8e0; padding: 6px 10px; text-align: left; vertical-align: top; width: auto; }
+      .ProseMirror .pm-table th { background: #f4f5f9; font-weight: 600; color: #2a2a2e; }
+      .ProseMirror .pm-table colgroup col { width: auto !important; }
       .ProseMirror .fm-section-label { font-weight: 600; margin: 18px 0 4px; color: #3a3a40; font-size: 14px; }
       .ProseMirror .fm-section-divider { border: none; border-top: 1px dashed #d8d8e0; margin: 14px 0; }
       .ProseMirror > * { margin: 0 0 0.7em; }
@@ -1211,9 +1212,7 @@ fileprivate enum MilkdownEditorHTML {
       .ProseMirror pre .wikilink { color: #5b54d6; border-bottom: 1px solid rgba(91,84,214,0.5); text-decoration: none; cursor: pointer; }
       .ProseMirror pre .wikilink-missing { color: #d23b3b; border-bottom: 1px dashed #d23b3b; }
       .ProseMirror a:not(.wikilink) { color: #2f6fdb; }
-      .ProseMirror table { border-collapse: collapse; width: 100%; margin: 0.5em 0; }
-      .ProseMirror th, .ProseMirror td { border: 1px solid #d8d8e0; padding: 6px 10px; text-align: left; }
-      .ProseMirror th { background: #f4f5f9; font-weight: 600; }
+      /* v2.2.74：所有 GFM 表格统一走 .pm-table（见上方定义），此处不再单独定义 .ProseMirror table */
       .ProseMirror hr { border: none; border-top: 1px solid #e2e3e8; margin: 1em 0; }
       .ProseMirror img { max-width: 100%; border-radius: 6px; }
       .ProseMirror p.is-editor-empty:first-child::before { content: attr(data-placeholder); color: #9a9aa2; float: left; height: 0; pointer-events: none; }
@@ -1292,8 +1291,8 @@ fileprivate enum MilkdownEditorHTML {
         .ProseMirror code { background: #2a2a2e; }
         .ProseMirror pre { background: #26262b; line-height: 1.45; caret-color: #ebebf0; }
         .ProseMirror blockquote { border-left-color: #3a3a40; color: #b8b8c0; }
-        .ProseMirror th, .ProseMirror td { border-color: #3a3a3e; }
-        .ProseMirror th { background: #26262b; }
+        .ProseMirror .pm-table th, .ProseMirror .pm-table td { border-color: #3a3a3e; }
+        .ProseMirror .pm-table th { background: #26262b; }
         .ProseMirror hr { border-top-color: #3a3a3e; }
         .ProseMirror p.is-editor-empty:first-child::before { color: #7a7a82; }
         .wikilink { color: #b3a8ff; border-bottom-color: rgba(179,168,255,0.55); }

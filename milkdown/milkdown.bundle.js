@@ -30232,6 +30232,25 @@
       }
     });
   }
+  var pmTableClassKey = new PluginKey("pmTableClass");
+  function unifiedTableClassPlugin() {
+    return new Plugin({
+      key: pmTableClassKey,
+      props: {
+        decorations(state) {
+          const decos = [];
+          state.doc.descendants((node2, pos) => {
+            const t = node2.type || {};
+            const isTable = t.name === "table" || t.spec && t.spec.tableRole === "table";
+            if (isTable) {
+              decos.push(Decoration.node(pos, pos + node2.nodeSize, { class: "pm-table" }));
+            }
+          });
+          return DecorationSet.create(state.doc, decos);
+        }
+      }
+    });
+  }
   function applyWikiLink(view, page, from, to) {
     const { state } = view;
     const markType = state.schema.marks.link;
@@ -30739,7 +30758,7 @@
       const e = await Editor.make(async (ctx) => {
         ctx.set(rootCtx, document.getElementById("editor"));
         ctx.set(defaultValueCtx, "");
-      }).use(commonmark).use(gfm2).use($prose(() => wikiLinkPlugin())).use($prose(() => autocompletePlugin)).use($prose(() => autoPairPlugin)).use($prose(() => yamlHighlightPlugin())).use($prose(() => fmMarkerPlugin())).use($prose(() => wikilinkInsideCodePlugin())).config((ctx) => {
+      }).use(commonmark).use(gfm2).use($prose(() => wikiLinkPlugin())).use($prose(() => autocompletePlugin)).use($prose(() => autoPairPlugin)).use($prose(() => yamlHighlightPlugin())).use($prose(() => fmMarkerPlugin())).use($prose(() => wikilinkInsideCodePlugin())).use($prose(() => unifiedTableClassPlugin())).config((ctx) => {
         ctx.update(remarkStringifyOptionsCtx, (prev) => ({ ...prev, bullet: "-", listItemIndent: "one", fences: true }));
       }).create();
       editor = e;
