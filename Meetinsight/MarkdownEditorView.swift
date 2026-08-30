@@ -896,7 +896,9 @@ fileprivate enum TipTapEditorHTML {
       .fm-row-new .fm-newkey, .fm-row-new .fm-newval { border: 1px solid #e2e3e8 !important; background: #fff; font-size: 13px; padding: 4px 8px; border-radius: 6px; width: 100%; box-sizing: border-box; display: block; }
 
       /* —— 编辑器容器 —————————————————————————————————————————— */
-      #editor { position: relative; max-width: 860px; margin: 0 auto; }
+      /* v2.2.70：统一容器包，确保三段对齐 */
+      #editorWrap { max-width: 100%; padding: 0 4px; box-sizing: border-box; }
+      #editor { position: relative; max-width: 860px; margin: 0 auto; box-sizing: border-box; }
       .ProseMirror {
         outline: none; padding: 16px 22px 90px; font-size: 15px; line-height: 1.72;
         min-height: 60vh;
@@ -1212,11 +1214,21 @@ fileprivate enum MilkdownEditorHTML {
       .fm-row-new { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(80px, max-content) 1fr; gap: 10px; }
       .fm-row-new .fm-newkey, .fm-row-new .fm-newval { border: 1px solid #e2e3e8 !important; background: #fff; font-size: 13px; padding: 4px 8px; border-radius: 6px; width: 100%; box-sizing: border-box; display: block; }
 
-      #editor { position: relative; max-width: 860px; margin: 0 auto; }
+      /* v2.2.70：editorWrap 是统一容器（跟随 WKWebView resize，max-width 860 居中）。
+         banner / editor / refs 三段共享同一容器 → 严格对齐 */
+      #editorWrap { max-width: 100%; padding: 0 4px; box-sizing: border-box; }
+      #editor { position: relative; max-width: 860px; margin: 0 auto; padding: 4px 0; box-sizing: border-box; }
       .ProseMirror {
         outline: none; padding: 16px 22px 90px; font-size: 15px; line-height: 1.72;
-        min-height: 60vh;
+        min-height: 60vh; max-width: 860px; margin: 0 auto; box-sizing: border-box;
       }
+      /* v2.2.70：frontmatter Markdown 表（正文首段）+ 双链表（正文末段）统一样式 */
+      .ProseMirror table.fm-block { border-collapse: collapse; width: 100%; margin: 0 0 12px; font-size: 13.5px; }
+      .ProseMirror table.fm-block th, .ProseMirror table.fm-block td { border: 1px solid #d8d8e0; padding: 6px 10px; text-align: left; vertical-align: top; }
+      .ProseMirror table.fm-block th { background: #f4f5f9; font-weight: 600; color: #2a2a2e; }
+      .ProseMirror table.fm-block td { background: rgba(116,177,255,0.04); color: #1c1c1e; }
+      .ProseMirror .fm-section-label { font-weight: 600; margin: 18px 0 4px; color: #3a3a40; font-size: 14px; }
+      .ProseMirror .fm-section-divider { border: none; border-top: 1px dashed #d8d8e0; margin: 14px 0; }
       .ProseMirror > * { margin: 0 0 0.7em; }
       .ProseMirror h1 { font-size: 1.85em; font-weight: 700; margin: 0.4em 0 0.5em; line-height: 1.25; }
       .ProseMirror h2 { font-size: 1.45em; font-weight: 700; margin: 0.4em 0 0.45em; }
@@ -1336,9 +1348,8 @@ fileprivate enum MilkdownEditorHTML {
     </style>
     </head>
     <body>
-    <details id="fmBanner" class="fm-banner" open><summary>笔记属性</summary><div id="fmBody"></div></details>
-    <div id="editor"></div>
-    <div id="fmPageRefsContainer"></div>
+    <!-- v2.2.70：对齐铁律 —— #editorWrap 是统一容器，跟随 WKWebView 宽度自适应；前端把 frontmatter 表与双链表都注入正文内，banner / refs 单独 DOM 不再需要 -->
+    <div id="editorWrap"><div id="editor"></div></div>
     <script src="milkdown.bundle.js"></script>
     </body>
     </html>

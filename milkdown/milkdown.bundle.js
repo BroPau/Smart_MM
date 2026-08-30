@@ -29775,9 +29775,6 @@
   function escapeHtml(s) {
     return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
-  function escapeAttr(s) {
-    return escapeHtml(s).replace(/"/g, "&quot;");
-  }
   function splitFrontmatter(md) {
     const L = (md || "").replace(/\r\n/g, "\n").split("\n");
     if (L.length && L[0].trim() === "---") {
@@ -29888,103 +29885,10 @@
     "updated"
   ];
   var FM_SKIP = { wiki_\u9996\u9875: 1, backlinks: 1 };
-  var FM_LABEL_CN = {
-    type: "\u7C7B\u578B",
-    canonical_name: "\u89C4\u8303\u540D",
-    company: "\u516C\u53F8",
-    title: "\u804C\u4F4D",
-    aliases: "\u522B\u540D",
-    tags: "\u6807\u7B7E",
-    updated: "\u66F4\u65B0\u65F6\u95F4"
-  };
-  function fmLabel(k) {
-    return FM_LABEL_CN[k] || k;
-  }
-  function fmFieldType(key3, value) {
-    if (key3 === "type") return "select";
-    if (key3 === "aliases" || key3 === "tags") return "list";
-    const kl = String(key3).toLowerCase();
-    if (kl === "updated" || kl === "created" || kl === "date" || kl.endsWith("_date")) return "date";
-    if (key3 === "\u516C\u53F8\u7B80\u4ECB" || key3 === "\u804C\u80FD\u8303\u56F4" || key3 === "\u529F\u80FD\u7B80\u8FF0" || key3 === "\u6982\u8981" || key3 === "summary" || key3 === "description") return "longtext";
-    return "text";
-  }
-  function fmFieldIcon(type, key3) {
-    if (type === "list" && key3 === "tags") return "\u{1F3F7}";
-    if (type === "list") return "\u2197";
-    if (type === "date") return "\u{1F4C5}";
-    if (type === "select") return "\u2261";
-    return "\u2261";
-  }
   function fmOrderedKeys(fm) {
     const known = FM_ORDER.filter((k) => Object.prototype.hasOwnProperty.call(fm, k));
     const unknown2 = Object.keys(fm).filter((k) => !FM_ORDER.includes(k) && !FM_SKIP[k]);
     return known.concat(unknown2);
-  }
-  function fmDisplay(v) {
-    if (v === void 0 || v === null) return "";
-    let s = Array.isArray(v) ? v.map((x) => String(x).trim()).filter(Boolean).join("\u3001") : String(v).trim();
-    s = s.replace(/^[\[\(](.*)[\]\)]$/, "$1").replace(/^["“”']|["“”']$/g, "");
-    return s;
-  }
-  function fmListItems(v) {
-    if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean);
-    if (v == null) return [];
-    let s = String(v).trim().replace(/^[\[\(](.*)[\]\)]$/, "$1").trim();
-    if (!s) return [];
-    return s.split(/[,，、]/).map((x) => x.trim()).filter(Boolean);
-  }
-  function renderWikiText(s) {
-    if (!s) return "";
-    const esc = escapeHtml(s);
-    return esc.replace(/\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]/g, (m, p, a) => {
-      const target = (p || "").trim();
-      const alias = (a || "").trim();
-      if (!target) return m;
-      let page = target, anchor = "";
-      const h = target.indexOf("#");
-      if (h >= 0) {
-        page = target.slice(0, h).trim();
-        anchor = target.slice(h + 1).trim();
-        if (!page) page = anchor;
-      }
-      if (!page) return m;
-      const anchorAttr = anchor ? ' data-anchor="' + escapeAttr(anchor) + '"' : "";
-      return '<a class="wikilink" data-wikilink data-page="' + escapeAttr(page) + '"' + (alias ? ' data-alias="' + escapeAttr(alias) + '"' : "") + anchorAttr + ">" + escapeHtml(alias || page) + "</a>";
-    });
-  }
-  function renderFrontmatterBanner(fm) {
-    if (!fm || Object.keys(fm).length === 0) return "";
-    const rows = [];
-    fmOrderedKeys(fm).forEach((k) => {
-      if (FM_SKIP[k]) return;
-      const t = fmFieldType(k, fm[k]);
-      const icon = fmFieldIcon(t, k);
-      const label = fmLabel(k);
-      if (t === "list") {
-        const items = fmListItems(fm[k]);
-        if (!items.length) return;
-        const chips = '<span class="fm-chips readonly">' + items.map((it) => '<span class="fm-chip">' + escapeHtml(it) + "</span>").join("") + "</span>";
-        rows.push(fmRowHtml(icon, label, chips));
-      } else if (t === "date") {
-        const dv = (fm[k] || "").toString().trim();
-        if (!dv) return;
-        rows.push(fmRowHtml(icon, label, '<span class="fm-date-val">' + escapeHtml(dv) + "</span>"));
-      } else if (t === "longtext") {
-        const dv = (fm[k] == null ? "" : String(fm[k])).trim();
-        const inner = dv ? '<div class="fm-longtext-val">' + renderWikiText(dv) + "</div>" : '<div class="fm-longtext-val fm-empty">\uFF08\u7A7A\uFF09</div>';
-        rows.push(fmRowHtml(icon, label, inner));
-      } else {
-        const dv = fmDisplay(fm[k]);
-        if (!dv) return;
-        rows.push(fmRowHtml(icon, label, '<span class="fm-scalar-val">' + renderWikiText(dv) + "</span>"));
-      }
-    });
-    if (rows.length === 0) return "";
-    return '<div class="fm-grid">' + rows.join("") + "</div>";
-  }
-  function fmRowHtml(icon, label, valueHtml, opts) {
-    const cls = opts && opts.long ? "fm-row fm-row-long" : "fm-row";
-    return '<div class="' + cls + '"><div class="fm-row-label"><span class="fm-icon">' + icon + '</span><span class="fm-key">' + escapeHtml(label) + '</span></div><div class="fm-row-value">' + valueHtml + "</div></div>";
   }
   var previewEl = null;
   var previewHideTimer = null;
@@ -30409,271 +30313,6 @@
     return s;
   }
   function renderBanner() {
-    const det = document.getElementById("fmBanner");
-    const body = document.getElementById("fmBody");
-    if (!det || !body) return;
-    if (!currentFM || Object.keys(currentFM).length === 0) {
-      det.style.display = "none";
-      body.innerHTML = "";
-      return;
-    }
-    det.style.display = "";
-    det.open = true;
-    if (currentEditable) {
-      body.innerHTML = renderBannerEditForm(currentFM);
-      wireBannerForm(body);
-    } else {
-      const html2 = renderFrontmatterBanner(currentFM);
-      if (html2) {
-        body.innerHTML = html2;
-      } else {
-        det.style.display = "none";
-        body.innerHTML = "";
-      }
-    }
-    renderPageRefsIntoContainer();
-  }
-  function renderBannerEditForm(fm) {
-    if (!fm) fm = {};
-    const TYPES = ["Person", "Company", "Chip", "Project", "Topic", "Method"];
-    const rawType = (fm["type"] || "").toString().trim();
-    let html2 = '<div class="fm-grid edit">';
-    fmOrderedKeys(fm).forEach((k) => {
-      if (FM_SKIP[k]) return;
-      const t = fmFieldType(k, fm[k]);
-      const icon = fmFieldIcon(t, k);
-      const label = fmLabel(k);
-      let valHtml = "";
-      if (t === "select") {
-        const base2 = TYPES.slice();
-        if (rawType && !base2.includes(rawType)) base2.push(rawType);
-        const opts = base2.concat(CUSTOM_TYPES.filter((x) => !base2.includes(x)));
-        valHtml = '<select data-fm="type" data-kind="scalar" class="fm-select">' + opts.map((o) => '<option value="' + escapeAttr(o) + '"' + (rawType === o ? " selected" : "") + ">" + escapeHtml(o) + "</option>").join("") + "</select>";
-        html2 += fmRowHtml(icon, label, valHtml);
-        html2 += '<div class="fm-add-row"><input type="text" class="fm-add-input" data-addtype-input="1" placeholder="\uFF0B \u65B0\u589E\u81EA\u5B9A\u4E49\u7C7B\u578B\uFF08\u5171\u4EAB\u5230\u6240\u6709 WiKi \u9875\uFF09"></div>';
-        return;
-      } else if (t === "list") {
-        const items = fmListItems(fm[k]);
-        valHtml = '<div class="fm-chips" data-list="' + escapeAttr(k) + '">' + items.map((it) => '<span class="fm-chip" data-val="' + escapeAttr(it) + '"><span>' + escapeHtml(it) + '</span><button type="button" class="fm-chip-x" data-remove-chip="' + escapeAttr(k) + '" data-val="' + escapeAttr(it) + '">\xD7</button></span>').join("") + "</div>";
-        html2 += fmRowHtml(icon, label, valHtml);
-        html2 += '<div class="fm-add-row"><input type="text" class="fm-add-input" data-add-chip="' + escapeAttr(k) + '" placeholder="\u6DFB\u52A0\u2026"></div>';
-        return;
-      } else if (t === "date") {
-        const dv = (fm[k] || "").toString().trim();
-        valHtml = '<input type="date" data-fm="' + escapeAttr(k) + '" data-kind="scalar" value="' + escapeAttr(dv) + '" class="fm-date">';
-      } else if (t === "longtext") {
-        valHtml = '<textarea data-fm="' + escapeAttr(k) + '" data-kind="scalar" class="fm-textarea" placeholder="\uFF08\u7A7A\uFF09" rows="3">' + escapeHtml(fm[k] == null ? "" : String(fm[k])) + "</textarea>";
-        html2 += fmRowHtml(icon, label, valHtml);
-        return;
-      } else {
-        valHtml = '<input type="text" data-fm="' + escapeAttr(k) + '" data-kind="scalar" value="' + escapeAttr(fm[k] == null ? "" : String(fm[k])) + '" class="fm-text">';
-      }
-      html2 += fmRowHtml(icon, label, valHtml);
-    });
-    html2 += '<div class="fm-add-row"><button type="button" class="fm-add-prop" data-add-prop="1">+ \u6DFB\u52A0\u7B14\u8BB0\u5C5E\u6027</button></div>';
-    html2 += "</div>";
-    return html2;
-  }
-  var _bannerSaveTimer = null;
-  function scheduleSave() {
-    if (_bannerSaveTimer) clearTimeout(_bannerSaveTimer);
-    _bannerSaveTimer = setTimeout(() => {
-      if (window.MMEditor && window.MMEditor.requestSave) window.MMEditor.requestSave();
-    }, 400);
-  }
-  function onChipRemove(e) {
-    const btn = e.currentTarget;
-    const k = btn.getAttribute("data-remove-chip");
-    const v = btn.getAttribute("data-val");
-    if (Array.isArray(currentFM[k])) {
-      currentFM[k] = currentFM[k].filter((x) => x !== v);
-      pendingFrontmatter = serializeFrontmatter(currentFM);
-      const chip = btn.closest(".fm-chip");
-      if (chip && chip.parentNode) chip.parentNode.removeChild(chip);
-      scheduleSave();
-    }
-  }
-  function wireBannerForm(root2) {
-    if (!root2) return;
-    root2.querySelectorAll("[data-fm]").forEach((el) => {
-      const onEdit = () => {
-        const k = el.getAttribute("data-fm");
-        const kind = el.getAttribute("data-kind");
-        const v = el.value;
-        if (kind === "list") {
-          currentFM[k] = v.split(/[\n,，、]/).map((s) => s.trim()).filter(Boolean);
-        } else {
-          currentFM[k] = v.trim();
-        }
-        pendingFrontmatter = serializeFrontmatter(currentFM);
-        scheduleSave();
-      };
-      el.addEventListener("input", onEdit);
-      el.addEventListener("change", onEdit);
-      if (el.tagName === "SELECT" && el.getAttribute("data-fm") === "type") {
-        el.addEventListener("change", () => {
-          setTimeout(renderBanner, 0);
-          const newType = (currentFM["type"] || "").toString().trim();
-          const TYPE_TOKENS = ["Person", "Company", "Chip", "Project", "Topic", "Method", "person", "company", "chip", "project", "product", "topic", "method"];
-          if (Array.isArray(currentFM["tags"])) {
-            currentFM["tags"] = currentFM["tags"].filter((t) => t && t !== "wiki" && !TYPE_TOKENS.includes(t));
-            if (newType && !currentFM["tags"].includes(newType)) currentFM["tags"].push(newType);
-          }
-          pendingFrontmatter = serializeFrontmatter(currentFM);
-        });
-      }
-    });
-    root2.querySelectorAll("[data-addtype-input]").forEach((inp) => {
-      const addType = () => {
-        const name = inp.value.trim();
-        if (!name) return;
-        bridge({ type: "addCustomType", name });
-        inp.value = "";
-      };
-      inp.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          addType();
-        }
-      });
-      inp.addEventListener("blur", addType);
-    });
-    root2.querySelectorAll("[data-remove-chip]").forEach((btn) => {
-      btn.addEventListener("click", onChipRemove);
-    });
-    root2.querySelectorAll("[data-add-chip]").forEach((inp) => {
-      const addItem = () => {
-        const k = inp.getAttribute("data-add-chip");
-        const v = inp.value.trim();
-        if (!v) return;
-        if (!Array.isArray(currentFM[k])) currentFM[k] = [];
-        if (!currentFM[k].includes(v)) {
-          currentFM[k].push(v);
-          const chip = document.createElement("span");
-          chip.className = "fm-chip";
-          chip.setAttribute("data-val", v);
-          chip.innerHTML = "<span>" + escapeHtml(v) + '</span><button type="button" class="fm-chip-x" data-remove-chip="' + escapeAttr(k) + '" data-val="' + escapeAttr(v) + '">\xD7</button>';
-          inp.parentNode.insertBefore(chip, inp);
-          chip.querySelector(".fm-chip-x").addEventListener("click", onChipRemove);
-          pendingFrontmatter = serializeFrontmatter(currentFM);
-          scheduleSave();
-        }
-        inp.value = "";
-      };
-      inp.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          addItem();
-        }
-      });
-      inp.addEventListener("blur", addItem);
-    });
-    root2.querySelectorAll("[data-add-prop]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const form = btn.closest(".fm-grid.edit") || root2;
-        const row = document.createElement("div");
-        row.className = "fm-row fm-row-new";
-        row.innerHTML = '<div class="fm-row-label"><span class="fm-icon">\u2261</span><input type="text" class="fm-newkey" placeholder="\u5C5E\u6027\u540D"></div><div class="fm-row-value"><input type="text" class="fm-newval" placeholder="\u503C"></div>';
-        form.insertBefore(row, btn.closest(".fm-add-row"));
-        const keyInput = row.querySelector(".fm-newkey");
-        const valInput = row.querySelector(".fm-newval");
-        keyInput.focus();
-        const finishRow = () => {
-          if (!row.parentNode) return;
-          const nk = keyInput.value.trim();
-          const nv = valInput.value.trim();
-          if (nk) {
-            currentFM[nk] = nv;
-            pendingFrontmatter = serializeFrontmatter(currentFM);
-            renderBanner();
-            scheduleSave();
-          } else if (row.parentNode) {
-            row.parentNode.removeChild(row);
-          }
-        };
-        const onBlur = () => {
-          setTimeout(() => {
-            if (!row.contains(document.activeElement)) finishRow();
-          }, 0);
-        };
-        keyInput.addEventListener("blur", onBlur);
-        valInput.addEventListener("blur", onBlur);
-        const onEscape = (e) => {
-          if (e.key === "Escape") {
-            e.preventDefault();
-            if (row.parentNode) row.parentNode.removeChild(row);
-          }
-        };
-        keyInput.addEventListener("keydown", (e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            valInput.focus();
-            return;
-          }
-          onEscape(e);
-        });
-        valInput.addEventListener("keydown", (e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            finishRow();
-            return;
-          }
-          onEscape(e);
-        });
-      });
-    });
-    root2.querySelectorAll("[data-add-backlink]").forEach((inp) => {
-      const normalize3 = (raw) => {
-        const v = String(raw || "").trim();
-        if (!v) return "";
-        const m = v.match(/^\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]$/);
-        let page = "", alias = "", anchor = "";
-        if (m) {
-          const target = (m[1] || "").trim();
-          alias = (m[2] || "").trim();
-          const h = target.indexOf("#");
-          if (h >= 0) {
-            page = target.slice(0, h).trim();
-            anchor = target.slice(h + 1).trim();
-          } else {
-            page = target;
-          }
-        } else {
-          const h = v.indexOf("#");
-          if (h >= 0) {
-            page = v.slice(0, h).trim();
-            anchor = v.slice(h + 1).trim();
-          } else {
-            page = v;
-          }
-        }
-        if (!page) return "";
-        return "[[" + page + (alias ? "|" + alias : "") + (anchor ? "#" + anchor : "") + "]]";
-      };
-      const addBl = () => {
-        const v = normalize3(inp.value);
-        if (!v) {
-          inp.value = "";
-          return;
-        }
-        if (!Array.isArray(currentFM["backlinks"])) currentFM["backlinks"] = [];
-        const exists = currentFM["backlinks"].map((x) => String(x).trim().toLowerCase()).includes(v.toLowerCase());
-        if (!exists) {
-          currentFM["backlinks"].push(v);
-          pendingFrontmatter = serializeFrontmatter(currentFM);
-          renderBanner();
-          scheduleSave();
-        }
-        inp.value = "";
-      };
-      inp.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          addBl();
-        }
-      });
-      inp.addEventListener("blur", addBl);
-    });
   }
   function serializeFrontmatter(fm) {
     if (!fm || Object.keys(fm).length === 0) return "";
@@ -30707,35 +30346,84 @@
     }
     return s;
   }
-  function renderPageRefsTable(title, refs, mode) {
-    const rows = (refs || []).map((r) => {
+  function renderFrontmatterMarkdownTable(fm) {
+    if (!fm || typeof fm !== "object") return "";
+    const keys2 = fmOrderedKeys(fm).filter((k) => !FM_SKIP[k]);
+    if (keys2.length === 0) return "";
+    const headerRow = "| " + keys2.map((k) => escMdTable(k)).join(" | ") + " |";
+    const sepRow = "| " + keys2.map((_) => "---").join(" | ") + " |";
+    const valRow = "| " + keys2.map((k) => {
+      const v = fm[k];
+      if (v == null) return "";
+      if (Array.isArray(v)) {
+        return escMdTable(v.map((x) => String(x).trim()).filter(Boolean).join("\u3001"));
+      }
+      return escMdTable(String(v).replace(/\r?\n/g, " ").trim());
+    }).join(" | ") + " |";
+    return "<!--FM_TABLE_BEGIN-->\n\n" + headerRow + "\n" + sepRow + "\n" + valRow + "\n\n<!--FM_TABLE_END-->";
+  }
+  function escMdTable(s) {
+    if (s == null) return "";
+    return String(s).replace(/\|/g, "\\|").replace(/\n/g, " ");
+  }
+  function splitEditorBlocks(body) {
+    let fmRaw = "";
+    let refsRaw = "";
+    const fmMatch = body.match(/<!--FM_TABLE_BEGIN-->([\s\S]*?)<!--FM_TABLE_END-->/);
+    if (fmMatch) {
+      const tbl = fmMatch[1].trim();
+      if (tbl) {
+        const lines = tbl.split("\n").map((l) => l.replace(/\|$/, "").trim()).filter(Boolean);
+        if (lines.length >= 3) {
+          const headerCells = lines[0].split("|").slice(1, -1).map((c) => c.trim());
+          const sepOk = lines[1].split("|").slice(1, -1).every((c) => /^:?-+:?$/.test(c.trim()));
+          if (sepOk) {
+            const vals = lines[2].split("|").slice(1, -1).map((c) => c.trim().replace(/\\\|/g, "|"));
+            const obj = {};
+            headerCells.forEach((k, i2) => {
+              const v = vals[i2] || "";
+              if (v === "" || v === "\u2014") return;
+              obj[k] = v;
+            });
+            fmRaw = serializeFrontmatter(obj);
+          }
+        }
+      }
+      body = body.replace(fmMatch[0], "").replace(/^\s*[\r\n]+/g, "").replace(/[\r\n]+\s*$/g, "");
+    }
+    const refsMatch = body.match(/<!--REFS_TABLE_BEGIN-->([\s\S]*?)<!--REFS_TABLE_END-->/);
+    if (refsMatch) {
+      refsRaw = refsMatch[1].trim();
+      body = body.replace(refsMatch[0], "").replace(/^\s*[\r\n]+/g, "").replace(/[\r\n]+\s*$/g, "");
+    }
+    return { fmRaw, body: body.trim(), refsRaw };
+  }
+  function renderRefsSectionMarkdown(refsOut, refsIn) {
+    let refsMd = "";
+    if (Array.isArray(refsOut) && refsOut.length) {
+      refsMd += "\n\n**\u2197 \u672C\u9875\u5F15\u7528\u7684\u9875\u9762**\n\n" + renderRefsTableMarkdown(refsOut);
+    }
+    if (Array.isArray(refsIn) && refsIn.length) {
+      refsMd += "\n\n**\u{1F517} \u5F15\u7528\u672C\u9875\u7684\u9875\u9762**\n\n" + renderRefsTableMarkdown(refsIn);
+    }
+    if (!refsMd) return "";
+    return "<!--REFS_TABLE_BEGIN-->" + refsMd + "\n\n<!--REFS_TABLE_END-->";
+  }
+  function renderRefsTableMarkdown(refs) {
+    const rows = refs.map((r) => {
       const name = String(r.name || "").trim();
       if (!name) return "";
       const type = String(r.type || "").trim();
       const fields = Array.isArray(r.fields) ? r.fields : [];
-      const fieldCell = fields.map((f) => {
-        const lbl = String(f.label || "");
-        const val = String(f.value || "");
-        return lbl + "\uFF1A" + val;
-      }).filter(Boolean).join("\u3001");
-      const nameCell = '<a class="wikilink" data-wikilink data-page="' + escapeAttr(name) + '">' + escapeHtml(name) + "</a>";
-      const fieldsCell = fieldCell ? '<td class="fm-ref-fields">' + renderWikiText(fieldCell) + "</td>" : '<td class="fm-ref-fields fm-empty">\u2014</td>';
-      return '<tr><td class="fm-ref-name">' + nameCell + '</td><td class="fm-ref-type">' + escapeHtml(type) + "</td>" + fieldsCell + "</tr>";
-    }).filter(Boolean).join("");
-    const bodyRows = rows || '<tr><td colspan="3" class="fm-ref-empty">\uFF08\u6682\u65E0\uFF0C\u53EF\u5728\u4E0B\u65B9\u6DFB\u52A0\uFF09</td></tr>';
-    return '<div class="fm-company-refs"><div class="fm-ref-title">' + title + '</div><table class="fm-ref-table"><thead><tr><th>\u9875\u9762</th><th>\u7C7B\u578B</th><th>\u5173\u952E\u5C5E\u6027</th></tr></thead><tbody>' + bodyRows + '</tbody></table><div class="fm-ref-add"><input type="text" class="fm-ref-add-input" data-add-link="' + escapeAttr(mode) + '" placeholder="\uFF0B \u6DFB\u52A0\u53CC\u94FE\uFF1A\u8F93\u5165\u9875\u9762\u540D\uFF0C\u56DE\u8F66\u5373\u5EFA\u7ACB\u94FE\u63A5\uFF08\u4E0D\u5B58\u5728\u5219\u81EA\u52A8\u65B0\u5EFA\uFF09"></div></div>';
-  }
-  function renderPageRefsSection() {
-    const out = renderPageRefsTable("\u2197 \u672C\u9875\u5F15\u7528\u7684\u9875\u9762", pageRefsOut || [], "out");
-    const inc = renderPageRefsTable("\u{1F517} \u5F15\u7528\u672C\u9875\u7684\u9875\u9762", pageRefsIn || [], "in");
-    return out + inc;
-  }
-  function renderPageRefsIntoContainer() {
-    const el = document.getElementById("fmPageRefsContainer");
-    if (!el) return;
-    const sec = renderPageRefsSection();
-    el.innerHTML = sec || "";
-    el.style.display = sec ? "block" : "none";
+      const fieldCell = fields.map((f) => f.label + "\uFF1A" + f.value).filter(Boolean).join("\u3001");
+      const enc = encodeURIComponent(name);
+      const wikiCell = "[" + escMdTable(name) + "](wikilink:" + enc + ")";
+      const safeFields = escMdTable(fieldCell);
+      const safeType = escMdTable(type);
+      return "| " + wikiCell + " | " + safeType + " | " + safeFields + " |";
+    }).filter(Boolean);
+    if (!rows.length) return "";
+    return "| \u9875\u9762 | \u7C7B\u578B | \u5173\u952E\u5C5E\u6027 |\n| --- | --- | --- |\n" + rows.join("\n");
   }
   function wireEditorDom() {
     if (wired) return;
@@ -30749,48 +30437,15 @@
       const el = e.target.closest && e.target.closest("a.wikilink");
       if (el) hidePreviewSoon();
     });
-    const banner = document.getElementById("fmBanner");
-    if (banner) {
-      banner.addEventListener("click", (e) => {
-        const el = e.target.closest && e.target.closest("a.wikilink");
-        if (el) {
-          e.preventDefault();
-          const name = el.getAttribute("data-page");
-          const anchor = el.getAttribute("data-anchor") || "";
-          if (name) bridge({ type: "wikilink", name, anchor });
-        }
-      });
-    }
-    const refsContainer = document.getElementById("fmPageRefsContainer");
-    if (refsContainer) {
-      refsContainer.addEventListener("mouseover", (e) => {
-        const el = e.target.closest && e.target.closest("a.wikilink");
-        if (el) showPreviewFor(el);
-      });
-      refsContainer.addEventListener("mouseout", (e) => {
-        const el = e.target.closest && e.target.closest("a.wikilink");
-        if (el) hidePreviewSoon();
-      });
-      refsContainer.addEventListener("click", (e) => {
-        const el = e.target.closest && e.target.closest("a.wikilink");
-        if (el) {
-          e.preventDefault();
-          const name = el.getAttribute("data-page");
-          const anchor = el.getAttribute("data-anchor") || "";
-          if (name) bridge({ type: "wikilink", name, anchor });
-        }
-      });
-      refsContainer.addEventListener("keydown", (e) => {
-        if (e.key !== "Enter") return;
-        const inp = e.target.closest && e.target.closest("input.fm-ref-add-input");
-        if (!inp) return;
+    dom.addEventListener("click", (e) => {
+      const el = e.target.closest && e.target.closest("a.wikilink");
+      if (el) {
         e.preventDefault();
-        const mode = inp.getAttribute("data-add-link") || "out";
-        const name = (inp.value || "").trim();
-        if (name) bridge({ type: "addPageLink", mode, name });
-        inp.value = "";
-      });
-    }
+        const name = el.getAttribute("data-page");
+        const anchor = el.getAttribute("data-anchor") || "";
+        if (name) bridge({ type: "wikilink", name, anchor });
+      }
+    });
   }
   var buildPromise = null;
   async function buildEditor(editable) {
@@ -30831,16 +30486,18 @@
     pendingFrontmatter = sp.fmRaw;
     currentFM = sp.fmRaw ? fmNormalize(parseFrontmatter(sp.fmRaw.split("\n").slice(1, -1))) : {};
     currentEditable = editable !== false;
-    pageRefsOut = [];
-    pageRefsIn = [];
-    renderBanner();
     bridge({ type: "getCustomTypes" });
-    let body = sp.body || "";
-    if (autoLink && AUTO_LINK_NAMES.length) body = autoLinkWiki(body, AUTO_LINK_NAMES);
-    const pre = preProcessWiki(body);
+    let userBody = sp.body || "";
+    if (autoLink && AUTO_LINK_NAMES.length) userBody = autoLinkWiki(userBody, AUTO_LINK_NAMES);
+    const fmMd = renderFrontmatterMarkdownTable(currentFM);
+    let composed = "";
+    if (fmMd) composed += fmMd + "\n\n";
+    composed += userBody.trimStart();
+    const pre = preProcessWiki(composed);
     const finish = () => {
       editor.action(replaceAll(pre));
       editor.action((ctx) => ctx.get(editorViewCtx).setProps({ editable: () => currentEditable }));
+      injectRefsBlockIntoBody();
       captureHeadings();
     };
     if (!editor) {
@@ -30849,12 +30506,40 @@
       finish();
     }
   }
+  function injectRefsBlockIntoBody() {
+    if (!editor) return;
+    const refsMd = renderRefsSectionMarkdown(pageRefsOut, pageRefsIn);
+    if (!refsMd) return;
+    let body = editor.action(getMarkdown());
+    body = postProcessWiki(body);
+    body = body.replace(/<!--REFS_TABLE_BEGIN-->[\s\S]*?<!--REFS_TABLE_END-->\s*/g, "");
+    body = body.replace(/\n{3,}/g, "\n\n").trim();
+    body += "\n\n" + refsMd;
+    const pre = preProcessWiki(body);
+    editor.action(replaceAll(pre));
+  }
+  function rebuildBodyWithRefs() {
+    if (!editor) return;
+    let body = editor.action(getMarkdown());
+    body = postProcessWiki(body);
+    body = body.replace(/<!--REFS_TABLE_BEGIN-->[\s\S]*?<!--REFS_TABLE_END-->\s*/g, "");
+    body = body.replace(/\n{3,}/g, "\n\n").trim();
+    const refsMd = renderRefsSectionMarkdown(pageRefsOut, pageRefsIn);
+    if (refsMd) body += "\n\n" + refsMd;
+    const pre = preProcessWiki(body);
+    editor.action(replaceAll(pre));
+  }
   function requestSave() {
     if (!editor) return;
     let body = editor.action(getMarkdown());
     body = postProcessWiki(body);
     body = body.replace(/\n{3,}/g, "\n\n").replace(/[ \t]+$/gm, "");
-    const out = (pendingFrontmatter ? pendingFrontmatter + "\n" : "") + body;
+    const { fmRaw, body: userBody } = splitEditorBlocks(body);
+    if (fmRaw) pendingFrontmatter = fmRaw;
+    const user = userBody.trim();
+    let out = "";
+    if (pendingFrontmatter) out += pendingFrontmatter + "\n";
+    out += user;
     bridge({ type: "save", markdown: out.trimEnd() });
     return out.trimEnd();
   }
@@ -30901,11 +30586,11 @@
   }
   function setPageReferences(arr) {
     pageRefsIn = Array.isArray(arr) ? arr : [];
-    renderBanner();
+    rebuildBodyWithRefs();
   }
   function setPageReferencesOut(arr) {
     pageRefsOut = Array.isArray(arr) ? arr : [];
-    renderBanner();
+    rebuildBodyWithRefs();
   }
   function setCustomTypes(arr, selectName) {
     CUSTOM_TYPES = Array.isArray(arr) ? arr : [];
@@ -30949,7 +30634,13 @@
       let body = editor.action(getMarkdown());
       body = postProcessWiki(body);
       body = body.replace(/\n{3,}/g, "\n\n").replace(/[ \t]+$/gm, "");
-      return (pendingFrontmatter ? pendingFrontmatter + "\n" : "") + body.trimEnd();
+      const { fmRaw, body: userBody } = splitEditorBlocks(body);
+      if (fmRaw) pendingFrontmatter = fmRaw;
+      const user = userBody.trim();
+      let out = "";
+      if (pendingFrontmatter) out += pendingFrontmatter + "\n";
+      out += user;
+      return out.trimEnd();
     }
   };
   window.addEventListener("DOMContentLoaded", function() {

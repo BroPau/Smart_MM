@@ -614,73 +614,14 @@ function autoLinkLine(line, sorted) {
 }
 
 // ————————————————————————————————————————————————————————————————
-//  顶部属性 banner 渲染（内联可编辑 / 只读，与正文同处一个编辑器窗口）
+//  v2.2.70：[C] frontmatter 直接作为正文 Markdown 表格（disk 仍存 YAML）
+//  - 旧 renderBanner / renderBannerEditForm / wireBannerForm 全部下线
+//  - 当前 currentFM 与 pendingFrontmatter 仍保留为内存镜像，用于：
+//    · Wiki 页打开时把已有 YAML 转成 Markdown 表注入正文
+//    · save 时从正文 Markdown 表反解回 YAML
+//  - 在编辑器里**直接编辑** Markdown 表即可改属性，Milkdown auto-save
 // ————————————————————————————————————————————————————————————————
-function renderBanner() {
-  const det = document.getElementById('fmBanner')
-  const body = document.getElementById('fmBody')
-  if (!det || !body) return
-  if (!currentFM || Object.keys(currentFM).length === 0) {
-    det.style.display = 'none'
-    body.innerHTML = ''
-    return
-  }
-  det.style.display = ''
-  det.open = true
-  if (currentEditable) {
-    body.innerHTML = renderBannerEditForm(currentFM)
-    wireBannerForm(body)
-  } else {
-    const html = renderFrontmatterBanner(currentFM)
-    if (html) { body.innerHTML = html } else { det.style.display = 'none'; body.innerHTML = '' }
-  }
-  renderPageRefsIntoContainer()
-}
-
-function renderBannerEditForm(fm) {
-  if (!fm) fm = {}
-  const TYPES = ['Person', 'Company', 'Chip', 'Project', 'Topic', 'Method']
-  const rawType = (fm['type'] || '').toString().trim()
-
-  let html = '<div class="fm-grid edit">'
-  fmOrderedKeys(fm).forEach(k => {
-    if (FM_SKIP[k]) return
-    const t = fmFieldType(k, fm[k])
-    const icon = fmFieldIcon(t, k)
-    const label = fmLabel(k)
-    let valHtml = ''
-    if (t === 'select') {
-      const base = TYPES.slice()
-      if (rawType && !base.includes(rawType)) base.push(rawType)
-      const opts = base.concat(CUSTOM_TYPES.filter(x => !base.includes(x)))
-      valHtml = '<select data-fm="type" data-kind="scalar" class="fm-select">' +
-        opts.map(o => '<option value="' + escapeAttr(o) + '"' + (rawType === o ? ' selected' : '') + '>' + escapeHtml(o) + '</option>').join('') + '</select>'
-      html += fmRowHtml(icon, label, valHtml)
-      html += '<div class="fm-add-row"><input type="text" class="fm-add-input" data-addtype-input="1" placeholder="＋ 新增自定义类型（共享到所有 WiKi 页）"></div>'
-      return
-    } else if (t === 'list') {
-      const items = fmListItems(fm[k])
-      valHtml = '<div class="fm-chips" data-list="' + escapeAttr(k) + '">' +
-        items.map(it => '<span class="fm-chip" data-val="' + escapeAttr(it) + '"><span>' + escapeHtml(it) + '</span><button type="button" class="fm-chip-x" data-remove-chip="' + escapeAttr(k) + '" data-val="' + escapeAttr(it) + '">×</button></span>').join('') + '</div>'
-      html += fmRowHtml(icon, label, valHtml)
-      html += '<div class="fm-add-row"><input type="text" class="fm-add-input" data-add-chip="' + escapeAttr(k) + '" placeholder="添加…"></div>'
-      return
-    } else if (t === 'date') {
-      const dv = (fm[k] || '').toString().trim()
-      valHtml = '<input type="date" data-fm="' + escapeAttr(k) + '" data-kind="scalar" value="' + escapeAttr(dv) + '" class="fm-date">'
-    } else if (t === 'longtext') {
-      valHtml = '<textarea data-fm="' + escapeAttr(k) + '" data-kind="scalar" class="fm-textarea" placeholder="（空）" rows="3">' + escapeHtml(fm[k] == null ? '' : String(fm[k])) + '</textarea>'
-      html += fmRowHtml(icon, label, valHtml)
-      return
-    } else {
-      valHtml = '<input type="text" data-fm="' + escapeAttr(k) + '" data-kind="scalar" value="' + escapeAttr(fm[k] == null ? '' : String(fm[k])) + '" class="fm-text">'
-    }
-    html += fmRowHtml(icon, label, valHtml)
-  })
-  html += '<div class="fm-add-row"><button type="button" class="fm-add-prop" data-add-prop="1">+ 添加笔记属性</button></div>'
-  html += '</div>'
-  return html
-}
+function renderBanner() { /* v2.2.70：frontmatter 已迁到正文 Markdown 表，banner 渲染下线 */ }
 
 let _bannerSaveTimer = null
 function scheduleSave() {
@@ -688,166 +629,6 @@ function scheduleSave() {
   _bannerSaveTimer = setTimeout(() => {
     if (window.MMEditor && window.MMEditor.requestSave) window.MMEditor.requestSave()
   }, 400)
-}
-
-function onChipRemove(e) {
-  const btn = e.currentTarget
-  const k = btn.getAttribute('data-remove-chip')
-  const v = btn.getAttribute('data-val')
-  if (Array.isArray(currentFM[k])) {
-    currentFM[k] = currentFM[k].filter(x => x !== v)
-    pendingFrontmatter = serializeFrontmatter(currentFM)
-    const chip = btn.closest('.fm-chip')
-    if (chip && chip.parentNode) chip.parentNode.removeChild(chip)
-    scheduleSave()
-  }
-}
-function wireBannerForm(root) {
-  if (!root) return
-  root.querySelectorAll('[data-fm]').forEach(el => {
-    const onEdit = () => {
-      const k = el.getAttribute('data-fm')
-      const kind = el.getAttribute('data-kind')
-      const v = el.value
-      if (kind === 'list') {
-        currentFM[k] = v.split(/[\n,，、]/).map(s => s.trim()).filter(Boolean)
-      } else {
-        currentFM[k] = v.trim()
-      }
-      pendingFrontmatter = serializeFrontmatter(currentFM)
-      scheduleSave()
-    }
-    el.addEventListener('input', onEdit)
-    el.addEventListener('change', onEdit)
-    if (el.tagName === 'SELECT' && el.getAttribute('data-fm') === 'type') {
-      el.addEventListener('change', () => {
-        setTimeout(renderBanner, 0)
-        const newType = (currentFM['type'] || '').toString().trim()
-        const TYPE_TOKENS = ['Person', 'Company', 'Chip', 'Project', 'Topic', 'Method', 'person', 'company', 'chip', 'project', 'product', 'topic', 'method']
-        if (Array.isArray(currentFM['tags'])) {
-          currentFM['tags'] = currentFM['tags'].filter(t => t && t !== 'wiki' && !TYPE_TOKENS.includes(t))
-          if (newType && !currentFM['tags'].includes(newType)) currentFM['tags'].push(newType)
-        }
-        pendingFrontmatter = serializeFrontmatter(currentFM)
-      })
-    }
-  })
-  root.querySelectorAll('[data-addtype-input]').forEach(inp => {
-    const addType = () => {
-      const name = inp.value.trim()
-      if (!name) return
-      bridge({ type: 'addCustomType', name: name })
-      inp.value = ''
-    }
-    inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addType() } })
-    inp.addEventListener('blur', addType)
-  })
-  root.querySelectorAll('[data-remove-chip]').forEach(btn => {
-    btn.addEventListener('click', onChipRemove)
-  })
-  root.querySelectorAll('[data-add-chip]').forEach(inp => {
-    const addItem = () => {
-      const k = inp.getAttribute('data-add-chip')
-      const v = inp.value.trim()
-      if (!v) return
-      if (!Array.isArray(currentFM[k])) currentFM[k] = []
-      if (!currentFM[k].includes(v)) {
-        currentFM[k].push(v)
-        const chip = document.createElement('span')
-        chip.className = 'fm-chip'
-        chip.setAttribute('data-val', v)
-        chip.innerHTML = '<span>' + escapeHtml(v) + '</span><button type="button" class="fm-chip-x" data-remove-chip="' + escapeAttr(k) + '" data-val="' + escapeAttr(v) + '">×</button>'
-        inp.parentNode.insertBefore(chip, inp)
-        chip.querySelector('.fm-chip-x').addEventListener('click', onChipRemove)
-        pendingFrontmatter = serializeFrontmatter(currentFM)
-        scheduleSave()
-      }
-      inp.value = ''
-    }
-    inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addItem() } })
-    inp.addEventListener('blur', addItem)
-  })
-  root.querySelectorAll('[data-add-prop]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const form = btn.closest('.fm-grid.edit') || root
-      const row = document.createElement('div')
-      row.className = 'fm-row fm-row-new'
-      row.innerHTML = '<div class="fm-row-label"><span class="fm-icon">≡</span><input type="text" class="fm-newkey" placeholder="属性名"></div>' +
-        '<div class="fm-row-value"><input type="text" class="fm-newval" placeholder="值"></div>'
-      form.insertBefore(row, btn.closest('.fm-add-row'))
-      const keyInput = row.querySelector('.fm-newkey')
-      const valInput = row.querySelector('.fm-newval')
-      keyInput.focus()
-      const finishRow = () => {
-        if (!row.parentNode) return
-        const nk = keyInput.value.trim()
-        const nv = valInput.value.trim()
-        if (nk) {
-          currentFM[nk] = nv
-          pendingFrontmatter = serializeFrontmatter(currentFM)
-          renderBanner()
-          scheduleSave()
-        } else if (row.parentNode) {
-          row.parentNode.removeChild(row)
-        }
-      }
-      const onBlur = () => {
-        setTimeout(() => { if (!row.contains(document.activeElement)) finishRow() }, 0)
-      }
-      keyInput.addEventListener('blur', onBlur)
-      valInput.addEventListener('blur', onBlur)
-      const onEscape = (e) => {
-        if (e.key === 'Escape') {
-          e.preventDefault()
-          if (row.parentNode) row.parentNode.removeChild(row)
-        }
-      }
-      keyInput.addEventListener('keydown', e => {
-        if (e.key === 'Enter') { e.preventDefault(); valInput.focus(); return }
-        onEscape(e)
-      })
-      valInput.addEventListener('keydown', e => {
-        if (e.key === 'Enter') { e.preventDefault(); finishRow(); return }
-        onEscape(e)
-      })
-    })
-  })
-  root.querySelectorAll('[data-add-backlink]').forEach(inp => {
-    const normalize = (raw) => {
-      const v = String(raw || '').trim()
-      if (!v) return ''
-      const m = v.match(/^\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]$/)
-      let page = '', alias = '', anchor = ''
-      if (m) {
-        const target = (m[1] || '').trim()
-        alias = (m[2] || '').trim()
-        const h = target.indexOf('#')
-        if (h >= 0) { page = target.slice(0, h).trim(); anchor = target.slice(h + 1).trim() }
-        else { page = target }
-      } else {
-        const h = v.indexOf('#')
-        if (h >= 0) { page = v.slice(0, h).trim(); anchor = v.slice(h + 1).trim() }
-        else { page = v }
-      }
-      if (!page) return ''
-      return '[[' + page + (alias ? '|' + alias : '') + (anchor ? '#' + anchor : '') + ']]'
-    }
-    const addBl = () => {
-      const v = normalize(inp.value)
-      if (!v) { inp.value = ''; return }
-      if (!Array.isArray(currentFM['backlinks'])) currentFM['backlinks'] = []
-      const exists = currentFM['backlinks'].map(x => String(x).trim().toLowerCase()).includes(v.toLowerCase())
-      if (!exists) {
-        currentFM['backlinks'].push(v)
-        pendingFrontmatter = serializeFrontmatter(currentFM)
-        renderBanner()
-        scheduleSave()
-      }
-      inp.value = ''
-    }
-    inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addBl() } })
-    inp.addEventListener('blur', addBl)
-  })
 }
 
 function serializeFrontmatter(fm) {
@@ -878,56 +659,112 @@ function yamlScalar(s) {
 }
 
 // ————————————————————————————————————————————————————————————————
-//  v2.2.68：双链关系嵌入表格（双向分区，所有类型）
+//  v2.2.70：[A] frontmatter → 编辑器正文内 Markdown 表格（磁盘仍为 YAML）
+//  - HTML 注释 <!--FM_TABLE_BEGIN-->...<!--FM_TABLE_END--> 作为块标记
+//  - 表头 = YAML 原 key（类型、Type、canonical_name 等）
+//  - 列表值（aliases / tags）以「、」在单元格内串接
+//  - 加载：currentFM → 注入正文首段；保存：从正文首段反解回 YAML
+//  - 此形态让用户能直接在 Milkdown 表格里改属性，跟正文 markdown 完全同构
 // ————————————————————————————————————————————————————————————————
-function renderPageRefsTable(title, refs, mode) {
-  const rows = (refs || []).map(r => {
+function renderFrontmatterMarkdownTable(fm) {
+  if (!fm || typeof fm !== 'object') return ''
+  const keys = fmOrderedKeys(fm).filter(k => !FM_SKIP[k])
+  if (keys.length === 0) return ''
+  const headerRow = '| ' + keys.map(k => escMdTable(k)).join(' | ') + ' |'
+  const sepRow = '| ' + keys.map(_ => '---').join(' | ') + ' |'
+  const valRow = '| ' + keys.map(k => {
+    const v = fm[k]
+    if (v == null) return ''
+    if (Array.isArray(v)) {
+      return escMdTable(v.map(x => String(x).trim()).filter(Boolean).join('、'))
+    }
+    return escMdTable(String(v).replace(/\r?\n/g, ' ').trim())
+  }).join(' | ') + ' |'
+  return '<!--FM_TABLE_BEGIN-->\n\n' + headerRow + '\n' + sepRow + '\n' + valRow + '\n\n<!--FM_TABLE_END-->'
+}
+function escMdTable(s) {
+  if (s == null) return ''
+  return String(s).replace(/\|/g, '\\|').replace(/\n/g, ' ')
+}
+// 从 markdown 正文里提取 frontmatter table 块 + refs table 块 + 用户正文
+// 返回 { fmRaw(body YAML), body(用户正文), refsRaw(refs markdown 段) }
+function splitEditorBlocks(body) {
+  let fmRaw = ''
+  let refsRaw = ''
+  const fmMatch = body.match(/<!--FM_TABLE_BEGIN-->([\s\S]*?)<!--FM_TABLE_END-->/)
+  if (fmMatch) {
+    const tbl = fmMatch[1].trim()
+    if (tbl) {
+      const lines = tbl.split('\n').map(l => l.replace(/\|$/, '').trim()).filter(Boolean)
+      if (lines.length >= 3) {
+        const headerCells = lines[0].split('|').slice(1, -1).map(c => c.trim())
+        const sepOk = lines[1].split('|').slice(1, -1).every(c => /^:?-+:?$/.test(c.trim()))
+        if (sepOk) {
+          const vals = lines[2].split('|').slice(1, -1).map(c => c.trim().replace(/\\\|/g, '|'))
+          const obj = {}
+          headerCells.forEach((k, i) => {
+            const v = vals[i] || ''
+            if (v === '' || v === '—') return
+            obj[k] = v
+          })
+          fmRaw = serializeFrontmatter(obj)
+        }
+      }
+    }
+    body = body.replace(fmMatch[0], '').replace(/^\s*[\r\n]+/g, '').replace(/[\r\n]+\s*$/g, '')
+  }
+  const refsMatch = body.match(/<!--REFS_TABLE_BEGIN-->([\s\S]*?)<!--REFS_TABLE_END-->/)
+  if (refsMatch) {
+    refsRaw = refsMatch[1].trim()
+    body = body.replace(refsMatch[0], '').replace(/^\s*[\r\n]+/g, '').replace(/[\r\n]+\s*$/g, '')
+  }
+  return { fmRaw, body: body.trim(), refsRaw }
+}
+
+// ————————————————————————————————————————————————————————————————
+//  v2.2.70：[B] 双链表 → 编辑器正文底部 Markdown 表格（不进磁盘）
+//  - HTML 注释 <!--REFS_TABLE_BEGIN-->...<!--REFS_TABLE_END--> 作为块标记
+//  - wikilink 单元格用 [name](wikilink:encoded) 语法而非 [[name]]，避开 GFM 表转义
+//    （[[ ]] 在 GFM 表里被反斜杠转义为 \[\[ \]，破坏渲染）
+//  - 入链 / 出链各一个子表，列标题：页面 / 类型 / 关键属性
+//  - 保存时被从正文剔除（不算用户内容）
+// ————————————————————————————————————————————————————————————————
+function renderRefsSectionMarkdown(refsOut, refsIn) {
+  let refsMd = ''
+  if (Array.isArray(refsOut) && refsOut.length) {
+    refsMd += '\n\n**↗ 本页引用的页面**\n\n' + renderRefsTableMarkdown(refsOut)
+  }
+  if (Array.isArray(refsIn) && refsIn.length) {
+    refsMd += '\n\n**🔗 引用本页的页面**\n\n' + renderRefsTableMarkdown(refsIn)
+  }
+  if (!refsMd) return ''
+  return '<!--REFS_TABLE_BEGIN-->' + refsMd + '\n\n<!--REFS_TABLE_END-->'
+}
+function renderRefsTableMarkdown(refs) {
+  const rows = refs.map(r => {
     const name = String(r.name || '').trim()
     if (!name) return ''
     const type = String(r.type || '').trim()
     const fields = Array.isArray(r.fields) ? r.fields : []
-    const fieldCell = fields.map(f => {
-      const lbl = String(f.label || '')
-      const val = String(f.value || '')
-      return lbl + '：' + val
-    }).filter(Boolean).join('、')
-    const nameCell = '<a class="wikilink" data-wikilink data-page="' + escapeAttr(name) + '">' + escapeHtml(name) + '</a>'
-    const fieldsCell = fieldCell ? '<td class="fm-ref-fields">' + renderWikiText(fieldCell) + '</td>' : '<td class="fm-ref-fields fm-empty">—</td>'
-    return '<tr>' +
-      '<td class="fm-ref-name">' + nameCell + '</td>' +
-      '<td class="fm-ref-type">' + escapeHtml(type) + '</td>' +
-      fieldsCell +
-      '</tr>'
-  }).filter(Boolean).join('')
-  const bodyRows = rows || '<tr><td colspan="3" class="fm-ref-empty">（暂无，可在下方添加）</td></tr>'
-  return '<div class="fm-company-refs">' +
-    '<div class="fm-ref-title">' + title + '</div>' +
-    '<table class="fm-ref-table"><thead><tr><th>页面</th><th>类型</th><th>关键属性</th></tr></thead>' +
-    '<tbody>' + bodyRows + '</tbody></table>' +
-    '<div class="fm-ref-add">' +
-    '<input type="text" class="fm-ref-add-input" data-add-link="' + escapeAttr(mode) + '" placeholder="＋ 添加双链：输入页面名，回车即建立链接（不存在则自动新建）">' +
-    '</div></div>'
+    const fieldCell = fields.map(f => f.label + '：' + f.value).filter(Boolean).join('、')
+    // wikilink 用 [name](wikilink:encoded) 语法，wikiLinkPlugin 会把它渲染为可点击 pill
+    const enc = encodeURIComponent(name)
+    const wikiCell = '[' + escMdTable(name) + '](wikilink:' + enc + ')'
+    const safeFields = escMdTable(fieldCell)
+    const safeType = escMdTable(type)
+    return '| ' + wikiCell + ' | ' + safeType + ' | ' + safeFields + ' |'
+  }).filter(Boolean)
+  if (!rows.length) return ''
+  return '| 页面 | 类型 | 关键属性 |\n| --- | --- | --- |\n' + rows.join('\n')
 }
-function renderPageRefsSection() {
-  const out = renderPageRefsTable('↗ 本页引用的页面', pageRefsOut || [], 'out')
-  const inc = renderPageRefsTable('🔗 引用本页的页面', pageRefsIn || [], 'in')
-  return out + inc
-}
-function renderPageRefsIntoContainer() {
-  const el = document.getElementById('fmPageRefsContainer')
-  if (!el) return
-  const sec = renderPageRefsSection()
-  el.innerHTML = sec || ''
-  el.style.display = sec ? 'block' : 'none'
-}
-
-// ————————————————————————————————————————————————————————————————
-//  DOM 事件接线（banner / 双链关系表 / 编辑器内双链点击与悬浮预览）
+  // ————————————————————————————————————————————————————————————————
+//  DOM 事件接线（编辑器内双链点击 / 悬浮预览）
 // ————————————————————————————————————————————————————————————————
 function wireEditorDom() {
   if (wired) return
   wired = true
   const dom = editor.action(ctx => ctx.get(editorViewCtx)).dom
+  // v2.2.70：frontmatter / 双链表 都已在正文内（含 wikilink），用统一监听即可
   dom.addEventListener('mouseover', e => {
     const el = e.target.closest && e.target.closest('a.wikilink')
     if (el) showPreviewFor(el)
@@ -936,48 +773,15 @@ function wireEditorDom() {
     const el = e.target.closest && e.target.closest('a.wikilink')
     if (el) hidePreviewSoon()
   })
-  const banner = document.getElementById('fmBanner')
-  if (banner) {
-    banner.addEventListener('click', e => {
-      const el = e.target.closest && e.target.closest('a.wikilink')
-      if (el) {
-        e.preventDefault()
-        const name = el.getAttribute('data-page')
-        const anchor = el.getAttribute('data-anchor') || ''
-        if (name) bridge({ type: 'wikilink', name: name, anchor: anchor })
-      }
-    })
-  }
-  const refsContainer = document.getElementById('fmPageRefsContainer')
-  if (refsContainer) {
-    refsContainer.addEventListener('mouseover', e => {
-      const el = e.target.closest && e.target.closest('a.wikilink')
-      if (el) showPreviewFor(el)
-    })
-    refsContainer.addEventListener('mouseout', e => {
-      const el = e.target.closest && e.target.closest('a.wikilink')
-      if (el) hidePreviewSoon()
-    })
-    refsContainer.addEventListener('click', e => {
-      const el = e.target.closest && e.target.closest('a.wikilink')
-      if (el) {
-        e.preventDefault()
-        const name = el.getAttribute('data-page')
-        const anchor = el.getAttribute('data-anchor') || ''
-        if (name) bridge({ type: 'wikilink', name: name, anchor: anchor })
-      }
-    })
-    refsContainer.addEventListener('keydown', e => {
-      if (e.key !== 'Enter') return
-      const inp = e.target.closest && e.target.closest('input.fm-ref-add-input')
-      if (!inp) return
+  dom.addEventListener('click', e => {
+    const el = e.target.closest && e.target.closest('a.wikilink')
+    if (el) {
       e.preventDefault()
-      const mode = inp.getAttribute('data-add-link') || 'out'
-      const name = (inp.value || '').trim()
-      if (name) bridge({ type: 'addPageLink', mode: mode, name: name })
-      inp.value = ''
-    })
-  }
+      const name = el.getAttribute('data-page')
+      const anchor = el.getAttribute('data-anchor') || ''
+      if (name) bridge({ type: 'wikilink', name: name, anchor: anchor })
+    }
+  })
 }
 
 // ————————————————————————————————————————————————————————————————
@@ -1032,16 +836,22 @@ function loadMarkdown(mdText, editable, mode, autoLink, pageName) {
   pendingFrontmatter = sp.fmRaw
   currentFM = sp.fmRaw ? fmNormalize(parseFrontmatter(sp.fmRaw.split('\n').slice(1, -1))) : {}
   currentEditable = editable !== false
-  pageRefsOut = []
-  pageRefsIn = []
-  renderBanner()
+  // pageRefsOut / pageRefsIn 已由 WikiViewController 通过 setPageReferences(In|Out)
+  // 在 loadMarkdown 之后调用（rebuildBody 会把它们注入正文末尾）。
   bridge({ type: 'getCustomTypes' })
-  let body = sp.body || ''
-  if (autoLink && AUTO_LINK_NAMES.length) body = autoLinkWiki(body, AUTO_LINK_NAMES)
-  const pre = preProcessWiki(body)
+  let userBody = sp.body || ''
+  if (autoLink && AUTO_LINK_NAMES.length) userBody = autoLinkWiki(userBody, AUTO_LINK_NAMES)
+  // v2.2.70：frontmatter 作为正文首段 Markdown 表注入（disk 仍存 YAML）
+  const fmMd = renderFrontmatterMarkdownTable(currentFM)
+  let composed = ''
+  if (fmMd) composed += fmMd + '\n\n'
+  composed += userBody.trimStart()
+  const pre = preProcessWiki(composed)
   const finish = () => {
     editor.action(replaceAll(pre))
     editor.action(ctx => ctx.get(editorViewCtx).setProps({ editable: () => currentEditable }))
+    // 双链表与 frontmatter Markdown 表同步进正文末尾
+    injectRefsBlockIntoBody()
     captureHeadings()
   }
   if (!editor) {
@@ -1051,12 +861,46 @@ function loadMarkdown(mdText, editable, mode, autoLink, pageName) {
   }
 }
 
+// 把 refs block 注入正文末尾（如果 pageRefsOut / pageRefsIn 非空）
+function injectRefsBlockIntoBody() {
+  if (!editor) return
+  const refsMd = renderRefsSectionMarkdown(pageRefsOut, pageRefsIn)
+  if (!refsMd) return
+  let body = editor.action(getMarkdown())
+  body = postProcessWiki(body)
+  // 先去掉已有的 refs 块（避免重复）
+  body = body.replace(/<!--REFS_TABLE_BEGIN-->[\s\S]*?<!--REFS_TABLE_END-->\s*/g, '')
+  body = body.replace(/\n{3,}/g, '\n\n').trim()
+  body += '\n\n' + refsMd
+  const pre = preProcessWiki(body)
+  editor.action(replaceAll(pre))
+}
+
+// 重建正文（用于 setPageReferences 时刷新末尾 refs 表）
+function rebuildBodyWithRefs() {
+  if (!editor) return
+  let body = editor.action(getMarkdown())
+  body = postProcessWiki(body)
+  body = body.replace(/<!--REFS_TABLE_BEGIN-->[\s\S]*?<!--REFS_TABLE_END-->\s*/g, '')
+  body = body.replace(/\n{3,}/g, '\n\n').trim()
+  const refsMd = renderRefsSectionMarkdown(pageRefsOut, pageRefsIn)
+  if (refsMd) body += '\n\n' + refsMd
+  const pre = preProcessWiki(body)
+  editor.action(replaceAll(pre))
+}
+
 function requestSave() {
   if (!editor) return
   let body = editor.action(getMarkdown())
   body = postProcessWiki(body)
   body = body.replace(/\n{3,}/g, '\n\n').replace(/[ \t]+$/gm, '')
-  const out = (pendingFrontmatter ? pendingFrontmatter + '\n' : '') + body
+  // v2.2.70：从正文 Markdown 表反解 frontmatter，跳过 refs 装饰块
+  const { fmRaw, body: userBody } = splitEditorBlocks(body)
+  if (fmRaw) pendingFrontmatter = fmRaw
+  const user = userBody.trim()
+  let out = ''
+  if (pendingFrontmatter) out += pendingFrontmatter + '\n'
+  out += user
   bridge({ type: 'save', markdown: out.trimEnd() })
   return out.trimEnd()
 }
@@ -1101,11 +945,11 @@ function setAutoLinkNames(arr) {
 }
 function setPageReferences(arr) {
   pageRefsIn = Array.isArray(arr) ? arr : []
-  renderBanner()
+  rebuildBodyWithRefs()
 }
 function setPageReferencesOut(arr) {
   pageRefsOut = Array.isArray(arr) ? arr : []
-  renderBanner()
+  rebuildBodyWithRefs()
 }
 function setCustomTypes(arr, selectName) {
   CUSTOM_TYPES = Array.isArray(arr) ? arr : []
@@ -1143,7 +987,14 @@ window.MMEditor = {
     let body = editor.action(getMarkdown())
     body = postProcessWiki(body)
     body = body.replace(/\n{3,}/g, '\n\n').replace(/[ \t]+$/gm, '')
-    return (pendingFrontmatter ? pendingFrontmatter + '\n' : '') + body.trimEnd()
+    // v2.2.70：从正文 Markdown 表反解 frontmatter
+    const { fmRaw, body: userBody } = splitEditorBlocks(body)
+    if (fmRaw) pendingFrontmatter = fmRaw
+    const user = userBody.trim()
+    let out = ''
+    if (pendingFrontmatter) out += pendingFrontmatter + '\n'
+    out += user
+    return out.trimEnd()
   }
 }
 
