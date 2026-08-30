@@ -1198,7 +1198,7 @@ fileprivate enum MilkdownEditorHTML {
       .ProseMirror ul[data-type="taskList"] input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; }
       .ProseMirror blockquote { border-left: 3px solid #cfcfd6; margin-left: 0; padding: 2px 0 2px 14px; color: #555; }
       .ProseMirror code { background: #f0f0f4; border-radius: 4px; padding: 1px 5px; font-size: 0.9em; font-family: "SF Mono", Menlo, Consolas, monospace; }
-      .ProseMirror pre { background: #f4f4f7; border-radius: 8px; padding: 12px 14px; overflow: auto; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 13px; }
+      .ProseMirror pre { background: #f4f4f7; border-radius: 8px; padding: 12px 14px; overflow: auto; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 13px; line-height: 1.45; caret-color: #1c1c1e; }
       .ProseMirror pre code { background: none; padding: 0; }
       .ProseMirror pre .yml-k { color: #0b58a8; font-weight: 600; }
       .ProseMirror pre .yml-sep { color: #8a8a93; }
@@ -1207,6 +1207,9 @@ fileprivate enum MilkdownEditorHTML {
       .ProseMirror pre .yml-n { color: #b5530a; }
       .ProseMirror pre .yml-c { color: #9a9aa2; font-style: italic; }
       .ProseMirror pre .yml-dash { color: #8a4bce; font-weight: 600; }
+      .fm-hidden { display: none !important; }
+      .ProseMirror pre .wikilink { color: #5b54d6; border-bottom: 1px solid rgba(91,84,214,0.5); text-decoration: none; cursor: pointer; }
+      .ProseMirror pre .wikilink-missing { color: #d23b3b; border-bottom: 1px dashed #d23b3b; }
       .ProseMirror a:not(.wikilink) { color: #2f6fdb; }
       .ProseMirror table { border-collapse: collapse; width: 100%; margin: 0.5em 0; }
       .ProseMirror th, .ProseMirror td { border: 1px solid #d8d8e0; padding: 6px 10px; text-align: left; }
@@ -1287,7 +1290,7 @@ fileprivate enum MilkdownEditorHTML {
         
         
         .ProseMirror code { background: #2a2a2e; }
-        .ProseMirror pre { background: #26262b; }
+        .ProseMirror pre { background: #26262b; line-height: 1.45; caret-color: #ebebf0; }
         .ProseMirror blockquote { border-left-color: #3a3a40; color: #b8b8c0; }
         .ProseMirror th, .ProseMirror td { border-color: #3a3a3e; }
         .ProseMirror th { background: #26262b; }
@@ -1308,6 +1311,9 @@ fileprivate enum MilkdownEditorHTML {
         .ProseMirror pre .yml-n { color: #f0a060; }
         .ProseMirror pre .yml-c { color: #8a8a93; font-style: italic; }
         .ProseMirror pre .yml-dash { color: #c8a0ff; font-weight: 600; }
+        .fm-hidden { display: none !important; }
+        .ProseMirror pre .wikilink { color: #b3a8ff; border-bottom: 1px solid rgba(179,168,255,0.5); text-decoration: none; cursor: pointer; }
+        .ProseMirror pre .wikilink-missing { color: #ff7a7a; border-bottom: 1px dashed #ff7a7a; }
       }
     </style>
     </head>

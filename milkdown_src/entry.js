@@ -65,6 +65,7 @@ function parseFrontmatter(lines) {
     if (!m) { i++; continue }
     const key = m[1]
     let val = m[2].trim()
+    const cap = fmCanonical(key)
     if (val === '') {
       const items = []
       let j = i + 1
@@ -73,9 +74,24 @@ function parseFrontmatter(lines) {
         if (st) { items.push(st[1].trim()); j++; continue }
         break
       }
-      if (items.length) fm[key] = items
+      if (items.length) {
+        fm[key] = FM_WIKILINK_KEYS[cap] ? items.map(parseWikilinkItem) : items
+      }
       i = j
-    } else { fm[key] = val; i++ }
+    } else {
+      // 行内列表检测：[a, b, c] / [a, b]（排除 wikilink 形式 "[..](wikilink:..)"）
+      const isInlineList = /^\[.*\]$/.test(val) && val.indexOf('](wikilink:') < 0 &&
+        (val.indexOf(',') >= 0 || cap === 'aliases' || cap === 'tags')
+      if (isInlineList) {
+        const inner = val.slice(1, -1).trim()
+        fm[key] = inner === '' ? [] : inner.split(',').map(x => x.trim()).filter(Boolean)
+      } else if (FM_WIKILINK_KEYS[cap]) {
+        fm[key] = parseWikilinkItem(val)
+      } else {
+        fm[key] = val
+      }
+      i++
+    }
   }
   return fm
 }
@@ -134,6 +150,31 @@ const FM_ORDER = [
   'tags', 'updated'
 ]
 const FM_SKIP = { wiki_首页: 1, backlinks: 1 }
+// v2.2.73：frontmatter 中「页面引用型」字段——其值本就是 Wiki 页名，
+// 在编辑器内渲染为可点击双链（仅显示层用 wikilink 语法，磁盘仍存纯页名）
+const FM_WIKILINK_KEYS = { company: 1, alternative: 1, suspected_alias_of: 1 }
+// 把单个值转成（display=显示层 wikilink 语法 / disk=磁盘纯页名）
+function itemToWikilink(v, display) {
+  let s = (v == null) ? '' : String(v).trim()
+  const m = /^\[([^\]]*)\]\(wikilink:([^)\s]+)\)$/.exec(s)
+  let page = m ? m[2] : s
+  try { page = decodeURIComponent(page) } catch (e) {}
+  if (!display) return yamlScalar(page)
+  if (WIKIPAGES.length && WIKIPAGES.some(p => p.toLowerCase() === page.toLowerCase())) {
+    const enc = encodeURIComponent(page)
+    return '"[' + page + '](wikilink:' + enc + ')"'
+  }
+  return yamlScalar(page)
+}
+// 从（可能带 wikilink 语法的）字符串里解析回纯页名
+function parseWikilinkItem(s) {
+  if (typeof s !== 'string') return String(s)
+  let t = s.trim()
+  if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) t = t.slice(1, -1).trim()
+  const m = /^\[([^\]]*)\]\(wikilink:([^)\s]+)\)$/.exec(t)
+  if (m) { try { return decodeURIComponent(m[2]) } catch (e) { return m[2] } }
+  return t
+}
 const FM_LABEL_CN = {
   type: '类型',
   canonical_name: '规范名',
@@ -422,7 +463,64 @@ function yamlHighlightPlugin() {
   })
 }
 
-// 插入 [[Page]] / [[Page|alias]] 完成后的自动渲染（Obsidian 式「输入双方括号即自动渲染」）
+// ProseMirror 插件：隐藏 frontmatter / refs 表的 HTML 注释边界标记（<!--FM_TABLE_*-->、<!--REFS_TABLE_*-->）
+// 仅视觉隐藏（display:none），绝不从文档移除——这些标记是保存时反解 YAML / refs 的边界，磁盘不写。
+const fmMarkerKey = new PluginKey('fmMarker')
+const FM_MARKER_RE = /<!--(FM_TABLE_BEGIN|FM_TABLE_END|REFS_TABLE_BEGIN|REFS_TABLE_END)-->/
+function fmMarkerPlugin() {
+  return new Plugin({
+    key: fmMarkerKey,
+    props: {
+      decorations(state) {
+        const decos = []
+        state.doc.descendants((node, pos) => {
+          const text = node.isText ? node.text : (node.textContent || '')
+          if (text && FM_MARKER_RE.test(text)) {
+            decos.push(Decoration.node(pos, pos + node.nodeSize, { class: 'fm-hidden' }))
+          }
+        })
+        return DecorationSet.create(state.doc, decos)
+      }
+    }
+  })
+}
+
+// ProseMirror 插件：YAML 代码块内的 [text](wikilink:Page) 文本装饰为可点击双链
+// （代码块内没有 link mark，wikiLinkPlugin 不会命中，这里单独处理 frontmatter 的页面引用字段）
+const wikilinkInCodeKey = new PluginKey('wikilinkInCode')
+const IN_CODE_WL_RE = /\[([^\]]*)\]\(wikilink:([^)\s]+)\)/g
+function wikilinkInsideCodePlugin() {
+  return new Plugin({
+    key: wikilinkInCodeKey,
+    props: {
+      decorations(state) {
+        const decos = []
+        state.doc.descendants((node, pos) => {
+          if (node.type.name !== 'code_block' && node.type.name !== 'codeBlock') return
+          const lang = (node.attrs && (node.attrs.language || node.attrs.lang)) || ''
+          if (lang !== 'yaml' && lang !== 'yml') return
+          const text = node.textContent
+          const base = pos + 1
+          let m
+          IN_CODE_WL_RE.lastIndex = 0
+          while ((m = IN_CODE_WL_RE.exec(text)) !== null) {
+            const start = base + m.index
+            const end = start + m[0].length
+            let page = m[2]
+            try { page = decodeURIComponent(page) } catch (e) {}
+            const missing = page && WIKIPAGES.length && !WIKIPAGES.some(p => p.toLowerCase() === page.toLowerCase())
+            decos.push(Decoration.inline(start, end, {
+              class: 'wikilink' + (missing ? ' wikilink-missing' : ''),
+              'data-wikilink': page,
+              'data-page': page
+            }))
+          }
+        })
+        return DecorationSet.create(state.doc, decos)
+      }
+    }
+  })
+}
 function applyWikiLink(view, page, from, to) {
   const { state } = view
   const markType = state.schema.marks.link
@@ -723,17 +821,37 @@ function scheduleSave() {
   }, 400)
 }
 
-function serializeFrontmatter(fm) {
+function serializeFrontmatter(fm, mode) {
   if (!fm || Object.keys(fm).length === 0) return ''
+  const display = mode !== 'disk'  // display=编辑器内 wikilink 语法；disk=纯页名（pipeline 兼容）
   const lines = ['---']
-  Object.keys(fm).forEach(k => {
+  fmOrderedKeys(fm).filter(k => !FM_SKIP[k]).forEach(k => {
     const dk = fmDisplayName(k)        // 纯英文 PascalCase 显示键（v2.2.72）
     const v = fm[k]
     if (v === undefined || v === null) return
+    const cap = fmCanonical(k)
+    if (FM_WIKILINK_KEYS[cap]) {
+      // 页面引用型字段：display 渲染为可点击双链，disk 落纯页名
+      if (Array.isArray(v)) {
+        if (v.length === 0) { lines.push(dk + ': []'); return }
+        lines.push(dk + ':')
+        v.forEach(item => lines.push('  - ' + itemToWikilink(item, display)))
+      } else {
+        const s = String(v).trim()
+        if (s === '') { lines.push(dk + ': ""'); return }
+        lines.push(dk + ': ' + itemToWikilink(s, display))
+      }
+      return
+    }
     if (Array.isArray(v)) {
       if (v.length === 0) { lines.push(dk + ': []'); return }
-      lines.push(dk + ':')
-      v.forEach(item => lines.push('  - ' + yamlScalar(item)))
+      if (cap === 'aliases' || cap === 'tags') {
+        // 别名 / 标签：行内逗号隔离（v2.2.73），更符合 Obsidian 习惯
+        lines.push(dk + ': [' + v.map(x => yamlScalar(x)).join(', ') + ']')
+      } else {
+        lines.push(dk + ':')
+        v.forEach(item => lines.push('  - ' + yamlScalar(item)))
+      }
     } else {
       const s = String(v)
       if (s === '') { lines.push(dk + ': ""'); return }
@@ -767,7 +885,7 @@ function renderFrontmatterMarkdownTable(fm) {
   if (keys.length === 0) return ''
   if (fmRenderMode === 'yaml') {
     // 直接渲染 YAML 源码：等宽字体让 key/value 清晰可读
-    const yamlText = serializeFrontmatter(fm)
+    const yamlText = serializeFrontmatter(fm, 'display')
     if (!yamlText) return ''
     return '<!--FM_TABLE_BEGIN-->\n\n```yaml\n' + yamlText + '\n```\n\n<!--FM_TABLE_END-->'
   }
@@ -801,12 +919,11 @@ function splitEditorBlocks(body) {
       const fence = inner.match(/```(?:yaml|yml)?\n([\s\S]*?)\n```/)
       if (fence) {
         const yamlText = fence[1].trim()
-        if (yamlText.startsWith('---')) {
-          fmRaw = yamlText
-        } else {
-          // 兼容裸 YAML（无 --- 包裹）
-          fmRaw = '---\n' + yamlText + '\n---'
-        }
+        // v2.2.73：反解为规范磁盘形态（页面引用字段落纯页名、别名行内化），
+        // 避免磁盘残留 wikilink 语法（pipeline 仍按纯页名解析）
+        const norm = (yamlText.startsWith('---') ? yamlText : '---\n' + yamlText + '\n---')
+        const parsed = parseFrontmatter(norm.split('\n').slice(1, -1))
+        fmRaw = serializeFrontmatter(parsed, 'disk')
       } else {
         // 兼容 v2.2.70 旧 table 形态
         const lines = inner.split('\n').map(l => l.replace(/\|$/, '').trim()).filter(Boolean)
@@ -821,7 +938,7 @@ function splitEditorBlocks(body) {
               if (v === '' || v === '—') return
               obj[k] = v
             })
-            fmRaw = serializeFrontmatter(obj)
+            fmRaw = serializeFrontmatter(obj, 'disk')
           }
         }
       }
@@ -860,17 +977,15 @@ function renderRefsTableMarkdown(refs) {
     const name = String(r.name || '').trim()
     if (!name) return ''
     const type = String(r.type || '').trim()
-    const fields = Array.isArray(r.fields) ? r.fields : []
-    const fieldCell = fields.map(f => f.label + '：' + f.value).filter(Boolean).join('、')
+    // v2.2.73：精简为「页面 + 类型」两列，去掉冗余的「关键属性」列
     // wikilink 用 [name](wikilink:encoded) 语法，wikiLinkPlugin 会把它渲染为可点击 pill
     const enc = encodeURIComponent(name)
     const wikiCell = '[' + escMdTable(name) + '](wikilink:' + enc + ')'
-    const safeFields = escMdTable(fieldCell)
     const safeType = escMdTable(type)
-    return '| ' + wikiCell + ' | ' + safeType + ' | ' + safeFields + ' |'
+    return '| ' + wikiCell + ' | ' + safeType + ' |'
   }).filter(Boolean)
   if (!rows.length) return ''
-  return '| 页面 | 类型 | 关键属性 |\n| --- | --- | --- |\n' + rows.join('\n')
+  return '| 页面 | 类型 |\n| --- | --- |\n' + rows.join('\n')
 }
   // ————————————————————————————————————————————————————————————————
 //  DOM 事件接线（编辑器内双链点击 / 悬浮预览）
@@ -938,6 +1053,8 @@ async function buildEditor(editable) {
       .use($prose(() => autocompletePlugin))
       .use($prose(() => autoPairPlugin))
       .use($prose(() => yamlHighlightPlugin()))
+      .use($prose(() => fmMarkerPlugin()))
+      .use($prose(() => wikilinkInsideCodePlugin()))
       .config(ctx => {
         ctx.update(remarkStringifyOptionsCtx, prev => ({ ...prev, bullet: '-', listItemIndent: 'one', fences: true }))
       })

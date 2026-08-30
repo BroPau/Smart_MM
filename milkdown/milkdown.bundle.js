@@ -29801,6 +29801,7 @@
       }
       const key3 = m[1];
       let val = m[2].trim();
+      const cap = fmCanonical(key3);
       if (val === "") {
         const items = [];
         let j = i2 + 1;
@@ -29813,10 +29814,20 @@
           }
           break;
         }
-        if (items.length) fm[key3] = items;
+        if (items.length) {
+          fm[key3] = FM_WIKILINK_KEYS[cap] ? items.map(parseWikilinkItem) : items;
+        }
         i2 = j;
       } else {
-        fm[key3] = val;
+        const isInlineList = /^\[.*\]$/.test(val) && val.indexOf("](wikilink:") < 0 && (val.indexOf(",") >= 0 || cap === "aliases" || cap === "tags");
+        if (isInlineList) {
+          const inner = val.slice(1, -1).trim();
+          fm[key3] = inner === "" ? [] : inner.split(",").map((x) => x.trim()).filter(Boolean);
+        } else if (FM_WIKILINK_KEYS[cap]) {
+          fm[key3] = parseWikilinkItem(val);
+        } else {
+          fm[key3] = val;
+        }
         i2++;
       }
     }
@@ -29943,6 +29954,36 @@
     "updated"
   ];
   var FM_SKIP = { wiki_\u9996\u9875: 1, backlinks: 1 };
+  var FM_WIKILINK_KEYS = { company: 1, alternative: 1, suspected_alias_of: 1 };
+  function itemToWikilink(v, display) {
+    let s = v == null ? "" : String(v).trim();
+    const m = /^\[([^\]]*)\]\(wikilink:([^)\s]+)\)$/.exec(s);
+    let page = m ? m[2] : s;
+    try {
+      page = decodeURIComponent(page);
+    } catch (e) {
+    }
+    if (!display) return yamlScalar(page);
+    if (WIKIPAGES.length && WIKIPAGES.some((p) => p.toLowerCase() === page.toLowerCase())) {
+      const enc = encodeURIComponent(page);
+      return '"[' + page + "](wikilink:" + enc + ')"';
+    }
+    return yamlScalar(page);
+  }
+  function parseWikilinkItem(s) {
+    if (typeof s !== "string") return String(s);
+    let t = s.trim();
+    if (t.startsWith('"') && t.endsWith('"') || t.startsWith("'") && t.endsWith("'")) t = t.slice(1, -1).trim();
+    const m = /^\[([^\]]*)\]\(wikilink:([^)\s]+)\)$/.exec(t);
+    if (m) {
+      try {
+        return decodeURIComponent(m[2]);
+      } catch (e) {
+        return m[2];
+      }
+    }
+    return t;
+  }
   function fmOrderedKeys(fm) {
     const known = FM_ORDER.filter((k) => Object.prototype.hasOwnProperty.call(fm, k));
     const unknown2 = Object.keys(fm).filter((k) => !FM_ORDER.includes(k) && !FM_SKIP[k]);
@@ -30120,6 +30161,62 @@
                 }
               }
               offset += line.length + 1;
+            }
+          });
+          return DecorationSet.create(state.doc, decos);
+        }
+      }
+    });
+  }
+  var fmMarkerKey = new PluginKey("fmMarker");
+  var FM_MARKER_RE = /<!--(FM_TABLE_BEGIN|FM_TABLE_END|REFS_TABLE_BEGIN|REFS_TABLE_END)-->/;
+  function fmMarkerPlugin() {
+    return new Plugin({
+      key: fmMarkerKey,
+      props: {
+        decorations(state) {
+          const decos = [];
+          state.doc.descendants((node2, pos) => {
+            const text5 = node2.isText ? node2.text : node2.textContent || "";
+            if (text5 && FM_MARKER_RE.test(text5)) {
+              decos.push(Decoration.node(pos, pos + node2.nodeSize, { class: "fm-hidden" }));
+            }
+          });
+          return DecorationSet.create(state.doc, decos);
+        }
+      }
+    });
+  }
+  var wikilinkInCodeKey = new PluginKey("wikilinkInCode");
+  var IN_CODE_WL_RE = /\[([^\]]*)\]\(wikilink:([^)\s]+)\)/g;
+  function wikilinkInsideCodePlugin() {
+    return new Plugin({
+      key: wikilinkInCodeKey,
+      props: {
+        decorations(state) {
+          const decos = [];
+          state.doc.descendants((node2, pos) => {
+            if (node2.type.name !== "code_block" && node2.type.name !== "codeBlock") return;
+            const lang = node2.attrs && (node2.attrs.language || node2.attrs.lang) || "";
+            if (lang !== "yaml" && lang !== "yml") return;
+            const text5 = node2.textContent;
+            const base2 = pos + 1;
+            let m;
+            IN_CODE_WL_RE.lastIndex = 0;
+            while ((m = IN_CODE_WL_RE.exec(text5)) !== null) {
+              const start = base2 + m.index;
+              const end = start + m[0].length;
+              let page = m[2];
+              try {
+                page = decodeURIComponent(page);
+              } catch (e) {
+              }
+              const missing = page && WIKIPAGES.length && !WIKIPAGES.some((p) => p.toLowerCase() === page.toLowerCase());
+              decos.push(Decoration.inline(start, end, {
+                class: "wikilink" + (missing ? " wikilink-missing" : ""),
+                "data-wikilink": page,
+                "data-page": page
+              }));
             }
           });
           return DecorationSet.create(state.doc, decos);
@@ -30438,20 +30535,44 @@
   }
   function renderBanner() {
   }
-  function serializeFrontmatter(fm) {
+  function serializeFrontmatter(fm, mode) {
     if (!fm || Object.keys(fm).length === 0) return "";
+    const display = mode !== "disk";
     const lines = ["---"];
-    Object.keys(fm).forEach((k) => {
+    fmOrderedKeys(fm).filter((k) => !FM_SKIP[k]).forEach((k) => {
       const dk = fmDisplayName(k);
       const v = fm[k];
       if (v === void 0 || v === null) return;
+      const cap = fmCanonical(k);
+      if (FM_WIKILINK_KEYS[cap]) {
+        if (Array.isArray(v)) {
+          if (v.length === 0) {
+            lines.push(dk + ": []");
+            return;
+          }
+          lines.push(dk + ":");
+          v.forEach((item) => lines.push("  - " + itemToWikilink(item, display)));
+        } else {
+          const s = String(v).trim();
+          if (s === "") {
+            lines.push(dk + ': ""');
+            return;
+          }
+          lines.push(dk + ": " + itemToWikilink(s, display));
+        }
+        return;
+      }
       if (Array.isArray(v)) {
         if (v.length === 0) {
           lines.push(dk + ": []");
           return;
         }
-        lines.push(dk + ":");
-        v.forEach((item) => lines.push("  - " + yamlScalar(item)));
+        if (cap === "aliases" || cap === "tags") {
+          lines.push(dk + ": [" + v.map((x) => yamlScalar(x)).join(", ") + "]");
+        } else {
+          lines.push(dk + ":");
+          v.forEach((item) => lines.push("  - " + yamlScalar(item)));
+        }
       } else {
         const s = String(v);
         if (s === "") {
@@ -30477,7 +30598,7 @@
     const keys2 = fmOrderedKeys(fm).filter((k) => !FM_SKIP[k]);
     if (keys2.length === 0) return "";
     if (fmRenderMode === "yaml") {
-      const yamlText = serializeFrontmatter(fm);
+      const yamlText = serializeFrontmatter(fm, "display");
       if (!yamlText) return "";
       return "<!--FM_TABLE_BEGIN-->\n\n```yaml\n" + yamlText + "\n```\n\n<!--FM_TABLE_END-->";
     }
@@ -30507,11 +30628,9 @@
         const fence = inner.match(/```(?:yaml|yml)?\n([\s\S]*?)\n```/);
         if (fence) {
           const yamlText = fence[1].trim();
-          if (yamlText.startsWith("---")) {
-            fmRaw = yamlText;
-          } else {
-            fmRaw = "---\n" + yamlText + "\n---";
-          }
+          const norm = yamlText.startsWith("---") ? yamlText : "---\n" + yamlText + "\n---";
+          const parsed = parseFrontmatter(norm.split("\n").slice(1, -1));
+          fmRaw = serializeFrontmatter(parsed, "disk");
         } else {
           const lines = inner.split("\n").map((l) => l.replace(/\|$/, "").trim()).filter(Boolean);
           if (lines.length >= 3) {
@@ -30525,7 +30644,7 @@
                 if (v === "" || v === "\u2014") return;
                 obj[k] = v;
               });
-              fmRaw = serializeFrontmatter(obj);
+              fmRaw = serializeFrontmatter(obj, "disk");
             }
           }
         }
@@ -30555,16 +30674,13 @@
       const name = String(r.name || "").trim();
       if (!name) return "";
       const type = String(r.type || "").trim();
-      const fields = Array.isArray(r.fields) ? r.fields : [];
-      const fieldCell = fields.map((f) => f.label + "\uFF1A" + f.value).filter(Boolean).join("\u3001");
       const enc = encodeURIComponent(name);
       const wikiCell = "[" + escMdTable(name) + "](wikilink:" + enc + ")";
-      const safeFields = escMdTable(fieldCell);
       const safeType = escMdTable(type);
-      return "| " + wikiCell + " | " + safeType + " | " + safeFields + " |";
+      return "| " + wikiCell + " | " + safeType + " |";
     }).filter(Boolean);
     if (!rows.length) return "";
-    return "| \u9875\u9762 | \u7C7B\u578B | \u5173\u952E\u5C5E\u6027 |\n| --- | --- | --- |\n" + rows.join("\n");
+    return "| \u9875\u9762 | \u7C7B\u578B |\n| --- | --- |\n" + rows.join("\n");
   }
   function wireEditorDom() {
     if (wired) return;
@@ -30615,7 +30731,7 @@
       const e = await Editor.make(async (ctx) => {
         ctx.set(rootCtx, document.getElementById("editor"));
         ctx.set(defaultValueCtx, "");
-      }).use(commonmark).use(gfm2).use($prose(() => wikiLinkPlugin())).use($prose(() => autocompletePlugin)).use($prose(() => autoPairPlugin)).use($prose(() => yamlHighlightPlugin())).config((ctx) => {
+      }).use(commonmark).use(gfm2).use($prose(() => wikiLinkPlugin())).use($prose(() => autocompletePlugin)).use($prose(() => autoPairPlugin)).use($prose(() => yamlHighlightPlugin())).use($prose(() => fmMarkerPlugin())).use($prose(() => wikilinkInsideCodePlugin())).config((ctx) => {
         ctx.update(remarkStringifyOptionsCtx, (prev) => ({ ...prev, bullet: "-", listItemIndent: "one", fences: true }));
       }).create();
       editor = e;
