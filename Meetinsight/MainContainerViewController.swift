@@ -181,7 +181,7 @@ final class MainContainerViewController: NSViewController {
         saveBtn.isEnabled = (tab != .settings)
     }
 
-    @objc private func saveActive() {
+    @objc func saveActive() {
         if let saveable = pages[activeTab] as? SaveablePage {
             saveable.saveCurrent()
         }

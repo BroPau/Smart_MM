@@ -177,6 +177,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         appMenu.addItem(quitItem)
         mainMenu.addItem(appItem)
 
+        // v2.2.76：文件菜单——把 ⌘S 接入响应链，调用 MainContainerViewController.saveActive
+        let fileMenu = NSMenu(title: "文件")
+        let fileItem = NSMenuItem(title: "文件", action: nil, keyEquivalent: "")
+        fileItem.submenu = fileMenu
+        let saveItem = NSMenuItem(title: "保存", action: #selector(MainContainerViewController.saveActive), keyEquivalent: "s")
+        saveItem.target = nil  // 响应链：MainContainerViewController.saveActive
+        fileMenu.addItem(saveItem)
+        mainMenu.addItem(fileItem)
+
         // 编辑菜单：把复制/粘贴/全选/撤销等系统快捷键接入响应链（#5）
         let editMenu = NSMenu(title: "编辑")
         let editItem = NSMenuItem(title: "编辑", action: nil, keyEquivalent: "")

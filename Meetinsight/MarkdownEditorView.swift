@@ -160,6 +160,10 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
     private var pendingAutoLink: Bool = false
     private var pendingPageName: String = ""
 
+    /// v2.2.76：debounced 自动保存——每次 dirty 触发后 0.8s 静默再落盘。
+    private var autoSaveWorkItem: DispatchWorkItem?
+    private let autoSaveDelay: TimeInterval = 0.8
+
     /// v2.2.65：当前页是否有未保存改动（切页自动保存用）。
     /// JS 编辑触发 onUpdate → 经 editorBridge 推送 {type:'dirty'} 置 true；
     /// 载入新页（load）/ 显式保存（requestSave）复位 false。
@@ -199,6 +203,7 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
     }
 
     deinit {
+        autoSaveWorkItem?.cancel()
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "editorBridge")
     }
 
@@ -243,6 +248,8 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
     /// mode 可选：'ir'(实时预览,默认) / 'wysiwyg'(真·所见即所得) / 'sv'(分屏)。
     /// autoLink=true 时（仅纪要页单人纪要用），加载时会把正文里出现的已知 Wiki 页名裸词自动包裹为 [[名称]]。
     func load(markdown: String, editable: Bool = true, mode: String = "ir", autoLink: Bool = false, pageName: String = "") {
+        autoSaveWorkItem?.cancel()
+        autoSaveWorkItem = nil
         isDirty = false
         pendingMarkdown = markdown
         pendingEditable = editable
@@ -264,6 +271,17 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
     func requestSave() {
         isDirty = false
         webView.evaluateJavaScript("requestSave()")
+    }
+
+    /// v2.2.76：debounced 自动保存。ProseMirror onUpdate 每键击都推 dirty，
+    /// 静默 0.8s 后统一调 requestSave() 走原 save bridge 写盘，避免每键击都写。
+    private func scheduleAutoSave() {
+        autoSaveWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.requestSave()
+        }
+        autoSaveWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + autoSaveDelay, execute: work)
     }
 
     /// 推送现有页面名列表给 JS（双链自动完成 + 缺失页判定）。
@@ -348,6 +366,8 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
         case "dirty":
             // v2.2.65：编辑器正文被用户编辑（onUpdate）→ 标记脏，供切页自动保存判定。
             isDirty = true
+            // v2.2.76：debounce 0.8s 后自动落盘（避免每键击写盘）
+            scheduleAutoSave()
         case "getPages":
             let pages = delegate?.markdownEditorRequestsPageList(self) ?? []
             setWikiPages(pages)
@@ -1171,7 +1191,7 @@ fileprivate enum TipTapEditorHTML {
         .ProseMirror pre { background: #26262b; }
         .ProseMirror blockquote { border-left-color: #3a3a40; color: #b8b8c0; }
         .ProseMirror .pm-table th, .ProseMirror .pm-table td { border-color: #3a3a3e; }
-        .ProseMirror .pm-table th { background: #26262b; }
+        .ProseMirror .pm-table th { background: #26262b; color: #ebebf0; }
         .ProseMirror .selectedCell:after { background: rgba(179,168,255,0.16); }
         .pm-table-bar { background: #2a2a2e; border-color: #3a3a3e; box-shadow: 0 4px 16px rgba(0,0,0,0.42); }
         .pm-table-bar-btn { color: #d6d6de; }
@@ -1451,7 +1471,7 @@ fileprivate enum MilkdownEditorHTML {
         .ProseMirror pre { background: #26262b; line-height: 1.45; caret-color: #ebebf0; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
         .ProseMirror blockquote { border-left-color: #3a3a40; color: #b8b8c0; }
         .ProseMirror .pm-table th, .ProseMirror .pm-table td { border-color: #3a3a3e; }
-        .ProseMirror .pm-table th { background: #26262b; }
+        .ProseMirror .pm-table th { background: #26262b; color: #ebebf0; }
         .ProseMirror .selectedCell:after { background: rgba(179,168,255,0.16); }
         .pm-table-bar { background: #2a2a2e; border-color: #3a3a3e; box-shadow: 0 4px 16px rgba(0,0,0,0.42); }
         .pm-table-bar-btn { color: #d6d6de; }

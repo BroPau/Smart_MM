@@ -117,6 +117,7 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
             // 有缓存：直接渲染（秒开，不跑 Python）
             self.pages = cache.pages
             WikiIndex.shared.sync(from: self.pages)
+            self.autoSizeSidebarColumnsIfNeeded()  // v2.2.76
             self.tableView.reloadData()
             // 选中缓存中记录的页面（或默认首页）
             var row = 0
@@ -179,11 +180,14 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         }
 
         nameColumn.title = "名称"
-        nameColumn.width = UserDefaults.standard.object(forKey: PersistKey.nameColWidth) as? CGFloat ?? 320
         nameColumn.minWidth = 160
+        nameColumn.maxWidth = 560
         typeColumn.title = "类型"
-        typeColumn.width = UserDefaults.standard.object(forKey: PersistKey.typeColWidth) as? CGFloat ?? 120
         typeColumn.minWidth = 80
+        typeColumn.maxWidth = 220
+        // v2.2.76：有持久化宽度则恢复；否则先放 minWidth 占位，autoSizeSidebarColumnsIfNeeded() 在页加载完后按内容覆盖
+        nameColumn.width = UserDefaults.standard.object(forKey: PersistKey.nameColWidth) as? CGFloat ?? nameColumn.minWidth
+        typeColumn.width = UserDefaults.standard.object(forKey: PersistKey.typeColWidth) as? CGFloat ?? typeColumn.minWidth
         hasRestoredColumnWidths = true
         tableView.addTableColumn(nameColumn)
         tableView.addTableColumn(typeColumn)
@@ -334,6 +338,7 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
             self.pages = list
             // 同步共享索引，供「会议纪要」页做名词联动 / 缺失页判定
             WikiIndex.shared.sync(from: self.pages)
+            self.autoSizeSidebarColumnsIfNeeded()  // v2.2.76
             self.tableView.reloadData()
             // 写缓存
             WikiCache.shared.savePages(list, selectedPageName: currentName)
@@ -884,6 +889,30 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
                 UserDefaults.standard.set(col.width, forKey: PersistKey.typeColWidth)
             }
         }
+    }
+
+    // MARK: - v2.2.76：首次打开 / 无持久化列宽时按内容计算最小列宽
+    private func autoSizeSidebarColumnsIfNeeded() {
+        let hasName = UserDefaults.standard.object(forKey: PersistKey.nameColWidth) != nil
+        let hasType = UserDefaults.standard.object(forKey: PersistKey.typeColWidth) != nil
+        guard !hasName && !hasType else { return }  // 用户已拖拽自定义过列宽，尊重之
+        let cellFont = NSFont.systemFont(ofSize: 13)
+        let headerFont = NSFont.boldSystemFont(ofSize: 13)
+        let pad: CGFloat = 28  // cell 内边距 + 文本框间距
+        var maxName: CGFloat = 0
+        var maxType: CGFloat = 0
+        for p in pages {
+            let n = (p.name as NSString).size(withAttributes: [.font: cellFont]).width
+            if n > maxName { maxName = n }
+            let t = (p.type.capitalized as NSString).size(withAttributes: [.font: cellFont]).width
+            if t > maxType { maxType = t }
+        }
+        let headerName = ("名称" as NSString).size(withAttributes: [.font: headerFont]).width
+        let headerType = ("类型" as NSString).size(withAttributes: [.font: headerFont]).width
+        let nameW = min(max(maxName, headerName) + pad, nameColumn.maxWidth)
+        let typeW = min(max(maxType, headerType) + pad, typeColumn.maxWidth)
+        nameColumn.width = max(nameW, nameColumn.minWidth)
+        typeColumn.width = max(typeW, typeColumn.minWidth)
     }
 
     // MARK: - NSSplitViewDelegate
