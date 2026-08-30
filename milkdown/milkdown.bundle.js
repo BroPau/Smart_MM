@@ -30346,10 +30346,16 @@
     }
     return s;
   }
+  var fmRenderMode = "yaml";
   function renderFrontmatterMarkdownTable(fm) {
     if (!fm || typeof fm !== "object") return "";
     const keys2 = fmOrderedKeys(fm).filter((k) => !FM_SKIP[k]);
     if (keys2.length === 0) return "";
+    if (fmRenderMode === "yaml") {
+      const yamlText = serializeFrontmatter(fm);
+      if (!yamlText) return "";
+      return "<!--FM_TABLE_BEGIN-->\n\n```yaml\n" + yamlText + "\n```\n\n<!--FM_TABLE_END-->";
+    }
     const headerRow = "| " + keys2.map((k) => escMdTable(k)).join(" | ") + " |";
     const sepRow = "| " + keys2.map((_) => "---").join(" | ") + " |";
     const valRow = "| " + keys2.map((k) => {
@@ -30371,21 +30377,31 @@
     let refsRaw = "";
     const fmMatch = body.match(/<!--FM_TABLE_BEGIN-->([\s\S]*?)<!--FM_TABLE_END-->/);
     if (fmMatch) {
-      const tbl = fmMatch[1].trim();
-      if (tbl) {
-        const lines = tbl.split("\n").map((l) => l.replace(/\|$/, "").trim()).filter(Boolean);
-        if (lines.length >= 3) {
-          const headerCells = lines[0].split("|").slice(1, -1).map((c) => c.trim());
-          const sepOk = lines[1].split("|").slice(1, -1).every((c) => /^:?-+:?$/.test(c.trim()));
-          if (sepOk) {
-            const vals = lines[2].split("|").slice(1, -1).map((c) => c.trim().replace(/\\\|/g, "|"));
-            const obj = {};
-            headerCells.forEach((k, i2) => {
-              const v = vals[i2] || "";
-              if (v === "" || v === "\u2014") return;
-              obj[k] = v;
-            });
-            fmRaw = serializeFrontmatter(obj);
+      const inner = fmMatch[1].trim();
+      if (inner) {
+        const fence = inner.match(/```(?:yaml|yml)?\n([\s\S]*?)\n```/);
+        if (fence) {
+          const yamlText = fence[1].trim();
+          if (yamlText.startsWith("---")) {
+            fmRaw = yamlText;
+          } else {
+            fmRaw = "---\n" + yamlText + "\n---";
+          }
+        } else {
+          const lines = inner.split("\n").map((l) => l.replace(/\|$/, "").trim()).filter(Boolean);
+          if (lines.length >= 3) {
+            const headerCells = lines[0].split("|").slice(1, -1).map((c) => c.trim());
+            const sepOk = lines[1].split("|").slice(1, -1).every((c) => /^:?-+:?$/.test(c.trim()));
+            if (sepOk) {
+              const vals = lines[2].split("|").slice(1, -1).map((c) => c.trim().replace(/\\\|/g, "|"));
+              const obj = {};
+              headerCells.forEach((k, i2) => {
+                const v = vals[i2] || "";
+                if (v === "" || v === "\u2014") return;
+                obj[k] = v;
+              });
+              fmRaw = serializeFrontmatter(obj);
+            }
           }
         }
       }
@@ -30429,21 +30445,41 @@
     if (wired) return;
     wired = true;
     const dom = editor.action((ctx) => ctx.get(editorViewCtx)).dom;
+    const findWikilink = (node2) => node2 && node2.closest ? node2.closest('.wikilink, a[href^="wikilink:"]') : null;
     dom.addEventListener("mouseover", (e) => {
-      const el = e.target.closest && e.target.closest("a.wikilink");
+      const el = findWikilink(e.target);
       if (el) showPreviewFor(el);
     });
     dom.addEventListener("mouseout", (e) => {
-      const el = e.target.closest && e.target.closest("a.wikilink");
+      const el = findWikilink(e.target);
       if (el) hidePreviewSoon();
     });
     dom.addEventListener("click", (e) => {
-      const el = e.target.closest && e.target.closest("a.wikilink");
+      const el = findWikilink(e.target);
       if (el) {
         e.preventDefault();
-        const name = el.getAttribute("data-page");
-        const anchor = el.getAttribute("data-anchor") || "";
-        if (name) bridge({ type: "wikilink", name, anchor });
+        let name = el.getAttribute("data-page") || el.getAttribute("data-wikilink") || "";
+        let anchor = el.getAttribute("data-anchor") || "";
+        if (!name) {
+          const a = el.matches && el.matches('a[href^="wikilink:"]') ? el : el.parentElement && el.parentElement.closest ? el.parentElement.closest('a[href^="wikilink:"]') : null;
+          const href = a && a.getAttribute("href") || "";
+          if (href.startsWith("wikilink:")) {
+            const enc = href.slice("wikilink:".length);
+            try {
+              name = decodeURIComponent(enc);
+            } catch (err) {
+              name = enc;
+            }
+          }
+        }
+        if (name) {
+          const h = name.indexOf("#");
+          if (h >= 0) {
+            anchor = name.slice(h + 1).trim();
+            name = name.slice(0, h).trim();
+          }
+          bridge({ type: "wikilink", name, anchor });
+        }
       }
     });
   }

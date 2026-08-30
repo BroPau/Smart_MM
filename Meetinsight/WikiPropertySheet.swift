@@ -161,14 +161,22 @@ extension WikiPageSpec {
 //          → 光标不居中。
 // v2.2.46：改回系统原生 roundedBezel —— 自带圆角边框 + 文本垂直居中，最可靠，外观与
 //          会议纪要文本框一致。单行字段不含 `[[Page]]`，双链渲染集中在多行 WikiLinkTextView。
+// v2.2.71：macOS 26 Tahoe 上系统 roundedBezel 不再画边框（实测所有 NSTextField / NSPopUpButton /
+//          NSScrollView+layer.borderWidth 都失效）。改用自定义 NSTextFieldCell 在
+//          drawBezel(withFrame:in:) 中自绘圆角矩形 + 描边 + 背景填充，独立于系统样式。
 final class WikiLinkTextField: NSTextField, NSTextFieldDelegate {
     var onChange: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        // v2.2.46：系统原生 roundedBezel（自带圆角边框 + 文本垂直居中）。
+        // v2.2.71：自定义 cell 自绘 bezel（macOS 26 系统 .roundedBezel 不画边框）
         self.isBordered = true
-        self.bezelStyle = .roundedBezel
+        self.isBezeled = true
+        self.bezelStyle = .roundedBezel  // 仍设上，部分 macOS 版本仍会用到
+        let cell = WikiLinkBezelCell(textCell: "")
+        cell.bezelStyle = .roundedBezel
+        cell.isBezeled = true
+        self.cell = cell
         self.font = .systemFont(ofSize: 12)
         self.textColor = .labelColor
         self.delegate = self
@@ -176,7 +184,7 @@ final class WikiLinkTextField: NSTextField, NSTextFieldDelegate {
         self.usesSingleLineMode = true
         self.cell?.wraps = false
         self.cell?.isScrollable = true
-        // wantsLayer 仅用于在 markInvalid() 时叠红色边框（原生 bezel 之上）。
+        // wantsLayer 仅用于在 markInvalid() 时叠红色边框（自绘 bezel 之上）。
         self.wantsLayer = true
         // 固定 24px 高（与 NSTextField 等同，纵向与多行字段对齐）。
         self.heightAnchor.constraint(equalToConstant: 24).isActive = true
@@ -190,25 +198,46 @@ final class WikiLinkTextField: NSTextField, NSTextFieldDelegate {
     func controlTextDidChange(_ obj: Notification) { onChange?() }
     func controlTextDidEndEditing(_ obj: Notification) { onChange?() }
 
-    /// 校验失败：在原生 bezel 之上叠红色边框（之后用户编辑会由 onChange 调 clearInvalid 复位）。
+    /// 校验失败：在自绘 bezel 之上叠红色边框（之后用户编辑会由 onChange 调 clearInvalid 复位）。
     func markInvalid() {
         self.layer?.borderColor = NSColor.systemRed.cgColor
         self.layer?.borderWidth = 1.5
     }
-    /// 复位：去掉叠加边框，回到原生 roundedBezel 外观。
+    /// 复位：去掉叠加边框，回到自绘 bezel 外观。
     func clearInvalid() {
         self.layer?.borderWidth = 0
     }
 }
 
-// MARK: - WikiLinkTextView（v2.2.44 重写：NSScrollView 直接包 NSTextView，去掉外层 NSView）
+// v2.2.71：自定义 NSTextFieldCell，draw 自绘圆角矩形 + 描边 + 背景填充。
+// macOS 26 上系统 .roundedBezel 不画边框，必须自己画。NSCell 没有独立的 drawBezel
+// 钩子，正确的覆盖点是 draw(withFrame:in:) → 先画 bezel + 背景，再调 super.drawInterior
+// 让系统画文字。
+final class WikiLinkBezelCell: NSTextFieldCell {
+    override func draw(withFrame frame: NSRect, in controlView: NSView) {
+        // 1) 自绘 bezel：圆角矩形 + 填背景 + 描边
+        let r = frame.insetBy(dx: 0.5, dy: 0.5)
+        let path = NSBezierPath(roundedRect: r, xRadius: 5, yRadius: 5)
+        NSColor.controlBackgroundColor.setFill()
+        path.fill()
+        NSColor.separatorColor.setStroke()
+        path.lineWidth = 1
+        path.stroke()
+        // 2) 调 super.drawInterior 让系统画文字（保留 NSTextField 的文字布局/光标行为）
+        super.drawInterior(withFrame: frame, in: controlView)
+    }
+}
+
+// MARK: - WikiLinkTextView（v2.2.71：NSView 容器包 NSScrollView + draw 自绘边框）
 //
-// 多行版本，高度 24px（与 v2.2.33 一致，纵向滚动）。直接继承 NSScrollView，
-// documentView 为 NSTextView（**无外层 NSView 包装**），从根上修复 hit-test / first-responder
-// 链断裂（这正是「点不到 / 回不去 / 某些框死锁」的真正根因）。
-// 同样的 `[[Page]]` 高亮 + 点击跳转（clickedOnLink → WikiLinkRouter.open）。
-final class WikiLinkTextView: NSScrollView, NSTextViewDelegate {
+// 多行版本，高度 24px。继承 NSView（v2.2.44 是直接继承 NSScrollView），外层 NSView 容器
+// 仅用于在 draw(_:) 中画圆角边框 + 背景，不消费任何 hit-test 事件（NSTextView 仍直接
+// 作为 NSScrollView 的 documentView，第一响应者链不变）。改动动机：macOS 26 Tahoe 上
+// NSScrollView 的 layer.borderColor / borderWidth 全部不渲染（v2.2.70 部署后实测
+// 「职能范围」「公司」等多行字段无边框），改用 draw(_:) 绕过 layer 系统。
+final class WikiLinkTextView: NSView, NSTextViewDelegate {
     let textView: NSTextView
+    private let scrollView: NSScrollView
     var onChange: (() -> Void)?
     var stringValue: String { textView.string }
 
@@ -219,6 +248,7 @@ final class WikiLinkTextView: NSScrollView, NSTextViewDelegate {
 
     override init(frame frameRect: NSRect) {
         textView = NSTextView()
+        scrollView = NSScrollView()
         super.init(frame: frameRect)
 
         // 1) textView 必须先正确设置 sizing，再作为 documentView 挂到 scrollView。
@@ -241,29 +271,52 @@ final class WikiLinkTextView: NSScrollView, NSTextViewDelegate {
         textView.delegate = self
         textView.backgroundColor = .textBackgroundColor
 
-        // 2) ScrollView 配置（无 bezel；圆角 + 边框靠外层 layer 自绘）
-        self.translatesAutoresizingMaskIntoConstraints = false
-        self.hasVerticalScroller = true
-        self.hasHorizontalScroller = false
-        self.borderType = .noBorder
-        self.drawsBackground = false
-        self.autohidesScrollers = true
-        // NSTextView 默认 textContainer.widthTracksTextView=true + 高度随内容；
-        // 配合 .width 自动调整，containerSize 不用手设，挂上 documentView 后会自动撑开。
-        self.documentView = textView
+        // 2) ScrollView 配置（无 bezel；外层 NSView 用 draw 画圆角 + 边框）
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
+        scrollView.autohidesScrollers = true
+        scrollView.documentView = textView
 
-        // 3) 圆角边框（layer 自绘）
+        // 3) 外层 NSView 容器 + 内部 ScrollView 布局
         self.wantsLayer = true
-        self.layer?.borderColor = NSColor.separatorColor.cgColor
-        self.layer?.borderWidth = 1
-        self.layer?.cornerRadius = 5
-        // masksToBounds=true 让 cornerRadius 真正生效（否则 documentView 会溢出圆角）
-        self.layer?.masksToBounds = true
+        addSubview(scrollView)
+        NSLayoutConstraint.activate([
+            scrollView.topAnchor.constraint(equalTo: topAnchor, constant: 1),
+            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 1),
+            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -1),
+            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -1)
+        ])
 
         // 4) 固定 24px 高（与单行字段纵向对齐，多行内容滚动）。
         self.heightAnchor.constraint(equalToConstant: 24).isActive = true
     }
     required init?(coder: NSCoder) { nil }
+
+    /// v2.2.71：自绘圆角边框 + 背景填充（macOS 26 layer 边框失效，回退到 draw）
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 5, yRadius: 5)
+        NSColor.controlBackgroundColor.setFill()
+        path.fill()
+        NSColor.separatorColor.setStroke()
+        path.lineWidth = 1
+        path.stroke()
+    }
+
+    /// 校验失败：在自绘边框之上叠红色描边
+    func markInvalid() {
+        self.layer?.borderColor = NSColor.systemRed.cgColor
+        self.layer?.borderWidth = 1.5
+        self.needsDisplay = true
+    }
+    /// 复位：去掉叠加描边
+    func clearInvalid() {
+        self.layer?.borderWidth = 0
+        self.needsDisplay = true
+    }
 
     func textDidChange(_ notification: Notification) {
         onChange?()
@@ -342,27 +395,18 @@ final class WikiLinkTextView: NSScrollView, NSTextViewDelegate {
         // 重置 typingAttributes → 输入新字符为普通文字色，不继承链接色/下划线。
         textView.typingAttributes = baseAttrs
     }
-
-    /// 校验失败：在 layer 自绘边框之上叠红色边框（之后用户编辑会由 onChange 调 clearInvalid 复位）。
-    func markInvalid() {
-        self.layer?.borderColor = NSColor.systemRed.cgColor
-        self.layer?.borderWidth = 1.5
-    }
-    /// 复位：恢复分隔色细边框（正常外观）。
-    func clearInvalid() {
-        self.layer?.borderColor = NSColor.separatorColor.cgColor
-        self.layer?.borderWidth = 1
-    }
 }
 
 // MARK: - 全站双链点击路由已由各 NSTextView 的 `clickedOnLink` 直接转发到 handleMeetinsightLink
 // （见 WikiLinkTextView）。原 WikiLinkClickRouter 中间层从未被实例化，v2.2.44 已删除。
 
-// MARK: - TagFieldView（v2.2.33 改造：pill 行 + addField 独立下行）
+// MARK: - TagFieldView（v2.2.71：自绘外层边框，关闭 addField 自身 bezel）
 //
 // 仿 Obsidian 笔记属性的多标签输入控件。
 // - 上行（高 24）：pill 区，NSScrollView 容纳，多了横向滚动；末尾可显示「+ 添加」placeholder。
 // - 下行（高 24）：独立的 NSTextField，Enter 添加 pill。
+// - v2.2.71：macOS 26 上 NSTextField.roundedBezel 不画边框 → 关闭 addField 自身 bezel，
+//   整个 TagFieldView 用 draw(_:) 自绘圆角边框 + 背景；addField 占满内部、不画自己的边框。
 final class TagFieldView: NSView {
     private let pillScroll = NSScrollView()
     private let pillContainer = NSStackView()
@@ -413,11 +457,13 @@ final class TagFieldView: NSView {
         pillDoc.addSubview(pillContainer)
         pillScroll.documentView = pillDoc
 
-        // 下行 addField
+        // 下行 addField（v2.2.71：关闭 bezel，由外层 draw 画边框；填满内部）
         addField.translatesAutoresizingMaskIntoConstraints = false
         addField.placeholderString = "+ 添加（按 Enter）"
         addField.font = .systemFont(ofSize: 12)
-        addField.bezelStyle = .roundedBezel
+        addField.isBezeled = false          // v2.2.71：macOS 26 roundedBezel 不画边框
+        addField.isBordered = false         // 关闭边框由外层 draw 接管
+        addField.drawsBackground = false    // 透明背景让外层背景透过
         addField.target = self
         addField.action = #selector(commitAdd)
         addField.interceptTarget = self
@@ -445,6 +491,17 @@ final class TagFieldView: NSView {
         rebuildPills()
     }
     required init?(coder: NSCoder) { nil }
+
+    /// v2.2.71：自绘外层圆角边框 + 背景填充（macOS 26 系统 bezel 失效）
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 5, yRadius: 5)
+        NSColor.controlBackgroundColor.setFill()
+        path.fill()
+        NSColor.separatorColor.setStroke()
+        path.lineWidth = 1
+        path.stroke()
+    }
 
     private func rebuildPills() {
         for v in pillContainer.arrangedSubviews { v.removeFromSuperview() }
@@ -553,6 +610,9 @@ final class TypeFieldView: NSView {
         popup.heightAnchor.constraint(equalToConstant: 24).isActive = true
         popup.target = self
         popup.action = #selector(popupChanged)
+        // v2.2.71：关闭 popup 自身 bezel，由外层 draw 接管（macOS 26 NSPopUpButton
+        // 的默认 bezel 跟 NSTextField 一样不画边框了）
+        popup.bezelStyle = .recessed  // 系统无 bezel 描边时等于关闭，保留交互态反馈
         addSubview(popup)
 
         addBtn.translatesAutoresizingMaskIntoConstraints = false
@@ -575,6 +635,18 @@ final class TypeFieldView: NSView {
         ])
     }
     required init?(coder: NSCoder) { nil }
+
+    /// v2.2.71：自绘 popup 区域（顶部 24px）的圆角边框 + 背景填充；按钮区不画边框
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let popupRect = NSRect(x: 0, y: bounds.height - 24, width: bounds.width, height: 24)
+        let path = NSBezierPath(roundedRect: popupRect.insetBy(dx: 0.5, dy: 0.5), xRadius: 5, yRadius: 5)
+        NSColor.controlBackgroundColor.setFill()
+        path.fill()
+        NSColor.separatorColor.setStroke()
+        path.lineWidth = 1
+        path.stroke()
+    }
 
     @objc private func popupChanged() { onChange?() }
     @objc private func addTapped() { onAddNew?() }

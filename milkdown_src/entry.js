@@ -659,17 +659,26 @@ function yamlScalar(s) {
 }
 
 // ————————————————————————————————————————————————————————————————
-//  v2.2.70：[A] frontmatter → 编辑器正文内 Markdown 表格（磁盘仍为 YAML）
-//  - HTML 注释 <!--FM_TABLE_BEGIN-->...<!--FM_TABLE_END--> 作为块标记
-//  - 表头 = YAML 原 key（类型、Type、canonical_name 等）
-//  - 列表值（aliases / tags）以「、」在单元格内串接
-//  - 加载：currentFM → 注入正文首段；保存：从正文首段反解回 YAML
-//  - 此形态让用户能直接在 Milkdown 表格里改属性，跟正文 markdown 完全同构
+//  v2.2.71 [A] frontmatter → 编辑器正文内「YAML 源码」渲染（磁盘仍为 YAML）
+//  - 渲染形态：<!--FM_TABLE_BEGIN--> 块里包 ```yaml\n---\n<yaml>\n---\n```
+//    → Milkdown 把它当 fenced code block 渲染 → 等宽字体 + 代码块边框
+//  - 切回原 banner 模式：把 fmRenderMode 设回 'table'（v2.2.70 旧形态）
+//  - 加载：currentFM → serializeFrontmatter → 嵌进 yaml fence
+//  - 保存：splitEditorBlocks 从 fence 反解 YAML → 重新生成 frontmatter 文本
+//  - HTML 注释作为磁盘边界（绝不写盘），即使用户手改了 fence 里的内容
 // ————————————————————————————————————————————————————————————————
+const fmRenderMode = 'yaml'  // 'yaml' = 直接渲染 YAML 源码（v2.2.71）｜ 'table' = 旧表格
 function renderFrontmatterMarkdownTable(fm) {
   if (!fm || typeof fm !== 'object') return ''
   const keys = fmOrderedKeys(fm).filter(k => !FM_SKIP[k])
   if (keys.length === 0) return ''
+  if (fmRenderMode === 'yaml') {
+    // 直接渲染 YAML 源码：等宽字体让 key/value 清晰可读
+    const yamlText = serializeFrontmatter(fm)
+    if (!yamlText) return ''
+    return '<!--FM_TABLE_BEGIN-->\n\n```yaml\n' + yamlText + '\n```\n\n<!--FM_TABLE_END-->'
+  }
+  // fallback：旧 table 形态（保留以备回退）
   const headerRow = '| ' + keys.map(k => escMdTable(k)).join(' | ') + ' |'
   const sepRow = '| ' + keys.map(_ => '---').join(' | ') + ' |'
   const valRow = '| ' + keys.map(k => {
@@ -693,21 +702,34 @@ function splitEditorBlocks(body) {
   let refsRaw = ''
   const fmMatch = body.match(/<!--FM_TABLE_BEGIN-->([\s\S]*?)<!--FM_TABLE_END-->/)
   if (fmMatch) {
-    const tbl = fmMatch[1].trim()
-    if (tbl) {
-      const lines = tbl.split('\n').map(l => l.replace(/\|$/, '').trim()).filter(Boolean)
-      if (lines.length >= 3) {
-        const headerCells = lines[0].split('|').slice(1, -1).map(c => c.trim())
-        const sepOk = lines[1].split('|').slice(1, -1).every(c => /^:?-+:?$/.test(c.trim()))
-        if (sepOk) {
-          const vals = lines[2].split('|').slice(1, -1).map(c => c.trim().replace(/\\\|/g, '|'))
-          const obj = {}
-          headerCells.forEach((k, i) => {
-            const v = vals[i] || ''
-            if (v === '' || v === '—') return
-            obj[k] = v
-          })
-          fmRaw = serializeFrontmatter(obj)
+    const inner = fmMatch[1].trim()
+    if (inner) {
+      // v2.2.71 优先：抽出 ```yaml\n---\n...\n---\n``` 块直接当作 YAML 文本
+      const fence = inner.match(/```(?:yaml|yml)?\n([\s\S]*?)\n```/)
+      if (fence) {
+        const yamlText = fence[1].trim()
+        if (yamlText.startsWith('---')) {
+          fmRaw = yamlText
+        } else {
+          // 兼容裸 YAML（无 --- 包裹）
+          fmRaw = '---\n' + yamlText + '\n---'
+        }
+      } else {
+        // 兼容 v2.2.70 旧 table 形态
+        const lines = inner.split('\n').map(l => l.replace(/\|$/, '').trim()).filter(Boolean)
+        if (lines.length >= 3) {
+          const headerCells = lines[0].split('|').slice(1, -1).map(c => c.trim())
+          const sepOk = lines[1].split('|').slice(1, -1).every(c => /^:?-+:?$/.test(c.trim()))
+          if (sepOk) {
+            const vals = lines[2].split('|').slice(1, -1).map(c => c.trim().replace(/\\\|/g, '|'))
+            const obj = {}
+            headerCells.forEach((k, i) => {
+              const v = vals[i] || ''
+              if (v === '' || v === '—') return
+              obj[k] = v
+            })
+            fmRaw = serializeFrontmatter(obj)
+          }
         }
       }
     }
@@ -764,22 +786,44 @@ function wireEditorDom() {
   if (wired) return
   wired = true
   const dom = editor.action(ctx => ctx.get(editorViewCtx)).dom
-  // v2.2.70：frontmatter / 双链表 都已在正文内（含 wikilink），用统一监听即可
+  // v2.2.71 关键修正：v2.2.70 的 wikiLinkPlugin 是给 text 节点加 class="wikilink"，
+  // 实际渲染的 <a> 元素本身没 wikilink 类。旧选择器 `a.wikilink` 永远匹不到。
+  // 新选择器：.wikilink 装饰的 span/text 或 href 协议为 wikilink: 的 <a> 都能命中。
+  const findWikilink = (node) => node && node.closest
+    ? node.closest('.wikilink, a[href^="wikilink:"]')
+    : null
   dom.addEventListener('mouseover', e => {
-    const el = e.target.closest && e.target.closest('a.wikilink')
+    const el = findWikilink(e.target)
     if (el) showPreviewFor(el)
   })
   dom.addEventListener('mouseout', e => {
-    const el = e.target.closest && e.target.closest('a.wikilink')
+    const el = findWikilink(e.target)
     if (el) hidePreviewSoon()
   })
   dom.addEventListener('click', e => {
-    const el = e.target.closest && e.target.closest('a.wikilink')
+    const el = findWikilink(e.target)
     if (el) {
       e.preventDefault()
-      const name = el.getAttribute('data-page')
-      const anchor = el.getAttribute('data-anchor') || ''
-      if (name) bridge({ type: 'wikilink', name: name, anchor: anchor })
+      let name = el.getAttribute('data-page') || el.getAttribute('data-wikilink') || ''
+      let anchor = el.getAttribute('data-anchor') || ''
+      if (!name) {
+        // 退路：从最近的 <a href="wikilink:..."> 取 target
+        const a = el.matches && el.matches('a[href^="wikilink:"]')
+          ? el
+          : (el.parentElement && el.parentElement.closest
+              ? el.parentElement.closest('a[href^="wikilink:"]')
+              : null)
+        const href = (a && a.getAttribute('href')) || ''
+        if (href.startsWith('wikilink:')) {
+          const enc = href.slice('wikilink:'.length)
+          try { name = decodeURIComponent(enc) } catch (err) { name = enc }
+        }
+      }
+      if (name) {
+        const h = name.indexOf('#')
+        if (h >= 0) { anchor = name.slice(h + 1).trim(); name = name.slice(0, h).trim() }
+        bridge({ type: 'wikilink', name, anchor })
+      }
     }
   })
 }
