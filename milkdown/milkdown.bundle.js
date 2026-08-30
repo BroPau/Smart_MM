@@ -30170,7 +30170,6 @@
   }
   var fmMarkerKey = new PluginKey("fmMarker");
   var FM_MARKER_RE = /<!--(FM_TABLE_BEGIN|FM_TABLE_END|REFS_TABLE_BEGIN|REFS_TABLE_END)-->/;
-  var HTML_NODE_NAMES = { html_block: 1, htmlBlock: 1, html_inline: 1, htmlInline: 1 };
   function fmMarkerPlugin() {
     return new Plugin({
       key: fmMarkerKey,
@@ -30178,13 +30177,11 @@
         decorations(state) {
           const decos = [];
           state.doc.descendants((node2, pos) => {
-            const tname = node2.type && node2.type.name || "";
             let raw = "";
-            if (HTML_NODE_NAMES[tname]) {
-              const a = node2.attrs || {};
-              raw = a.value || a.text || a.html || a.source || "";
-            } else if (node2.isText) {
+            if (node2.isText) {
               raw = node2.text || "";
+            } else if (node2.attrs && typeof node2.attrs.value === "string" && node2.attrs.value) {
+              raw = node2.attrs.value;
             } else {
               raw = node2.textContent || "";
             }

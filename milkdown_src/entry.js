@@ -467,10 +467,10 @@ function yamlHighlightPlugin() {
 // 仅视觉隐藏（display:none），绝不从文档移除——这些标记是保存时反解 YAML / refs 的边界，磁盘不写。
 const fmMarkerKey = new PluginKey('fmMarker')
 const FM_MARKER_RE = /<!--(FM_TABLE_BEGIN|FM_TABLE_END|REFS_TABLE_BEGIN|REFS_TABLE_END)-->/
-// Milkdown 把 <!-- ... --> 注释节点映射为 html_block / html_inline leaf node，
-// HTML 字符串存在 node.attrs.value（见 bundle: span[data-value]={node.attrs.value}）。
-// Leaf node 没有 children，node.textContent 恒为 ''——所以必须从 attrs.value 取。
-const HTML_NODE_NAMES = { html_block: 1, htmlBlock: 1, html_inline: 1, htmlInline: 1 }
+// Milkdown 把 <!-- ... --> 注释节点映射为 type="html" 的 inline atom 节点（见 bundle htmlSchema：
+// $nodeSchema("html")，attrs:{value}，toDOM 渲染为 <span data-type="html" data-value>{value}</span>）。
+// 这是 leaf 节点、无 children，node.textContent 恒为 ''——所以必须优先从 node.attrs.value 取 HTML 字符串。
+// 不硬编码 type 名（不同 milkdown 版本可能叫 html/html_block/html_inline），统一探测 attrs.value 即可。
 function fmMarkerPlugin() {
   return new Plugin({
     key: fmMarkerKey,
@@ -478,13 +478,11 @@ function fmMarkerPlugin() {
       decorations(state) {
         const decos = []
         state.doc.descendants((node, pos) => {
-          const tname = (node.type && node.type.name) || ''
           let raw = ''
-          if (HTML_NODE_NAMES[tname]) {
-            const a = node.attrs || {}
-            raw = a.value || a.text || a.html || a.source || ''
-          } else if (node.isText) {
+          if (node.isText) {
             raw = node.text || ''
+          } else if (node.attrs && typeof node.attrs.value === 'string' && node.attrs.value) {
+            raw = node.attrs.value
           } else {
             raw = node.textContent || ''
           }
