@@ -147,6 +147,15 @@ function fmNormalize(fm) {
     const c = fmCanonical(k)
     if (!seen.has(c)) { out[c] = fm[k]; seen.add(c) }
   }
+  // v2.2.77：清洗——剥嵌套 [[ ]] / 引号 / 反斜杠转义，让 FM_WIKILINK_KEYS 与 aliases/tags
+  // 字段都拿到干净形态（load + save 两路径都走这里，杜绝 "[[[\"[[X]]\"]]]" 这种反复包嵌套）
+  for (const k of Object.keys(out)) {
+    if (FM_WIKILINK_KEYS[k]) {
+      out[k] = cleanWikilinkField(out[k])
+    } else if (k === 'aliases' || k === 'tags') {
+      out[k] = cleanListField(out[k])
+    }
+  }
   return out
 }
 const FM_ORDER = [
@@ -210,6 +219,77 @@ function parseWikilinkItem(s) {
   if (typeof s !== 'string') return String(s)
   const t = parseWikiTarget(s)
   return t.page ? t.target : s.trim()
+}
+// v2.2.77：把任意形态的"页面引用型"字段值归一为干净页名
+// 反复剥外层 [[ ... ]] / [alias](wikilink:...) / 引号 / Obsidian |alias / #anchor
+// 关键：先全剥反斜杠（页名语境下 \ 无意义，且脏数据常带 \" / \] 等 YAML 逃逸残留）
+// —— 修复 v2.2.73 起 disk 端 [["[[X]]"]] 这种反复包的脏数据
+function cleanWikilinkValue(v) {
+  if (v == null) return ''
+  let s = String(v).trim()
+  if (!s) return ''
+  // 先剥所有反斜杠（脏数据常带 \\\\\" / \\\\\\\" 等 YAML 逃逸残留）
+  s = s.replace(/\\/g, '')
+  for (let i = 0; i < 6; i++) {
+    let changed = false
+    // 剥外层双引号 / 单引号
+    if (s.length >= 2 && ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'")))) {
+      s = s.slice(1, -1).trim(); changed = true
+    }
+    // 剥外层 [[ ... ]]（非贪婪，剥最外层）
+    let ob = s.match(/^\[\[([\s\S]+?)\]\]$/)
+    if (ob) { s = ob[1].trim(); changed = true }
+    // 剥外层 [alias](wikilink:ENC)
+    let md = s.match(/^\[([^\]]*)\]\(wikilink:[^)\s]+\)$/)
+    if (md) { s = md[1].trim(); changed = true }
+    if (!changed) break
+  }
+  // 剥 Obsidian 别名 |alias 与锚点 #anchor
+  const pipe = s.indexOf('|')
+  if (pipe >= 0) s = s.slice(0, pipe).trim()
+  const hash = s.indexOf('#')
+  if (hash >= 0) s = s.slice(0, hash).trim()
+  // 再去一次外层引号（若残留）
+  if (s.length >= 2 && ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'")))) {
+    s = s.slice(1, -1).trim()
+  }
+  return s
+}
+function cleanWikilinkField(v) {
+  if (Array.isArray(v)) {
+    const out = v.map(cleanWikilinkValue).map(x => x.trim()).filter(Boolean)
+    return out
+  }
+  return cleanWikilinkValue(v)
+}
+// v2.2.77：容错解析 aliases/tags 列表——破 YAML（反斜杠转义 / 嵌套 [ ]）时仍能吐出干净 tag
+// 全剥反斜杠（标签/别名语境下 \ 无意义；末尾孤立 \ 用 \\[\\w] 之类也兜不住，直接 replace(/\\/g,'') 最稳）
+function cleanListItem(x) {
+  if (x == null) return ''
+  let s = String(x).trim()
+  if (!s) return ''
+  // 剥外层引号
+  if (s.length >= 2 && ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'")))) {
+    s = s.slice(1, -1).trim()
+  }
+  // 全剥反斜杠（脏数据 \\[ / \\] / \\\" / \\\\ 残留）
+  s = s.replace(/\\/g, '')
+  // 剥残留的方括号 / 引号字符
+  s = s.replace(/[\[\]"]/g, '')
+  return s.trim()
+}
+function cleanListField(v) {
+  if (Array.isArray(v)) {
+    return [...new Set(v.map(cleanListItem).map(x => x.trim()).filter(Boolean))]
+  }
+  if (v == null) return []
+  let s = String(v).trim()
+  if (!s) return []
+  // 试图解 flow seq [a, b, "c"]
+  const flow = s.match(/^\[(.*)\]$/s)
+  let raw = flow ? flow[1] : s
+  // 兼容中英逗号；结果去重（脏数据常把同一 tag 写两遍，set 化利于自愈）
+  return [...new Set(raw.split(/[,，]/).map(cleanListItem).map(x => x.trim()).filter(Boolean))]
 }
 const FM_LABEL_CN = {
   type: '类型',
@@ -1172,7 +1252,8 @@ function splitEditorBlocks(body) {
         // 避免磁盘残留 wikilink 语法（pipeline 仍按纯页名解析）
         const norm = (yamlText.startsWith('---') ? yamlText : '---\n' + yamlText + '\n---')
         const parsed = parseFrontmatter(norm.split('\n').slice(1, -1))
-        fmRaw = serializeFrontmatter(parsed, 'disk')
+        // v2.2.77：save 路径也走 fmNormalize，把 "[[[\"[[X]]\"]]]" / 破 tags 清洗为干净形态
+        fmRaw = serializeFrontmatter(fmNormalize(parsed), 'disk')
       } else {
         // 兼容 v2.2.70 旧 table 形态
         const lines = inner.split('\n').map(l => l.replace(/\|$/, '').trim()).filter(Boolean)
@@ -1187,7 +1268,8 @@ function splitEditorBlocks(body) {
               if (v === '' || v === '—') return
               obj[k] = v
             })
-            fmRaw = serializeFrontmatter(obj, 'disk')
+            // v2.2.77：旧 table 形态也走 fmNormalize 清洗
+            fmRaw = serializeFrontmatter(fmNormalize(obj), 'disk')
           }
         }
       }
@@ -1286,6 +1368,27 @@ function wireEditorDom() {
 }
 
 // ————————————————————————————————————————————————————————————————
+//  v2.2.77：实时自动保存 dirty 信号
+//  v2.2.76 的 Swift 侧 scheduleAutoSave() 在等 {type:'dirty'}，但本文件此前未发，链路空转。
+//  这里挂一个 ProseMirror 视图插件：每次 doc 真正变化（≠ 仅选区移动）→ 推 dirty。
+//  宿主 0.8s debounce 静默落盘。load 触发的 replaceAll 也算 doc 变化，会写一次——
+//  这恰好让 fmNormalize 清洗后的干净 FM 落盘（脏数据自愈）。
+// ————————————————————————————————————————————————————————————————
+const autoSaveDirtyKey = new PluginKey('autoSaveDirty')
+function autoSaveDirtyPlugin() {
+  return new Plugin({
+    key: autoSaveDirtyKey,
+    view: () => ({
+      update(view, prevState) {
+        if (prevState && view.state.doc !== prevState.doc) {
+          bridge({ type: 'dirty' })
+        }
+      }
+    })
+  })
+}
+
+// ————————————————————————————————————————————————————————————————
 //  Milkdown 编辑器构建 + 公开 API
 // ————————————————————————————————————————————————————————————————
 let buildPromise = null
@@ -1306,6 +1409,8 @@ async function buildEditor(editable) {
       .use($prose(() => wikilinkInsideCodePlugin()))
       .use($prose(() => unifiedTableClassPlugin()))
       .use($prose(() => tableToolbarPlugin()))
+      // v2.2.77：注册自动保存 dirty 信号插件
+      .use($prose(() => autoSaveDirtyPlugin()))
       .config(ctx => {
         ctx.update(remarkStringifyOptionsCtx, prev => ({ ...prev, bullet: '-', listItemIndent: 'one', fences: true }))
       })
