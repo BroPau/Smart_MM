@@ -42,9 +42,8 @@ function escapeHtml(s) {
 function escapeAttr(s) {
   return escapeHtml(s).replace(/"/g, '&quot;')
 }
-function isDark() {
-  return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
-}
+// v2.2.77：删除死函数 isDark()——Milkdown 路径不使用（主题由 Swift 模板 CSS 变量控制）；
+// Vditor 回退模板（MarkdownEditorView.swift）内有其独立副本，互不影响。
 
 // ————————————————————————————————————————————————————————————————
 //  frontmatter 解析（轻量，不依赖 yaml 库；加载时剥离，保存时回贴）
@@ -357,38 +356,9 @@ function renderWikiText(s) {
       anchorAttr + '>' + escapeHtml(alias || page) + '</a>'
   })
 }
-function renderFrontmatterBanner(fm) {
-  if (!fm || Object.keys(fm).length === 0) return ''
-  const rows = []
-  fmOrderedKeys(fm).forEach(k => {
-    if (FM_SKIP[k]) return
-    const t = fmFieldType(k, fm[k])
-    const icon = fmFieldIcon(t, k)
-    const label = fmLabel(k)
-    if (t === 'list') {
-      const items = fmListItems(fm[k])
-      if (!items.length) return
-      const chips = '<span class="fm-chips readonly">' + items.map(it => '<span class="fm-chip">' + escapeHtml(it) + '</span>').join('') + '</span>'
-      rows.push(fmRowHtml(icon, label, chips))
-    } else if (t === 'date') {
-      const dv = (fm[k] || '').toString().trim()
-      if (!dv) return
-      rows.push(fmRowHtml(icon, label, '<span class="fm-date-val">' + escapeHtml(dv) + '</span>'))
-    } else if (t === 'longtext') {
-      const dv = (fm[k] == null ? '' : String(fm[k])).trim()
-      const inner = dv
-        ? '<div class="fm-longtext-val">' + renderWikiText(dv) + '</div>'
-        : '<div class="fm-longtext-val fm-empty">（空）</div>'
-      rows.push(fmRowHtml(icon, label, inner))
-    } else {
-      const dv = fmDisplay(fm[k])
-      if (!dv) return
-      rows.push(fmRowHtml(icon, label, '<span class="fm-scalar-val">' + renderWikiText(dv) + '</span>'))
-    }
-  })
-  if (rows.length === 0) return ''
-  return '<div class="fm-grid">' + rows.join('') + '</div>'
-}
+// v2.2.77：删除死函数 renderFrontmatterBanner()——v2.2.68 的 frontmatter「属性信息卡」渲染器，
+// v2.2.71 起 frontmatter 已改为正文内 ```yaml fence 渲染（renderFrontmatterMarkdownTable），
+// 此函数无任何调用点；Vditor 回退模板（MarkdownEditorView.swift）内有其独立副本，互不影响。
 function fmRowHtml(icon, label, valueHtml, opts) {
   const cls = (opts && opts.long) ? 'fm-row fm-row-long' : 'fm-row'
   return '<div class="' + cls + '"><div class="fm-row-label"><span class="fm-icon">' + icon + '</span><span class="fm-key">' + escapeHtml(label) + '</span></div>' +
@@ -430,7 +400,7 @@ function showPreviewFor(el) {
   pv.style.top = (rect.bottom + 8) + 'px'
   bridge({ type: 'wikilinkPreview', name: name })
 }
-function hidePreview() { if (previewEl) previewEl.style.display = 'none' }
+// v2.2.77：删除死函数 hidePreview()——全工程无调用点（预览隐藏改由 previewHideTimer 内联处理）。
 
 // 宿主回填预览内容
 window.MMEditor_showPreview = function (name, html) {
@@ -1142,13 +1112,9 @@ function autoLinkLine(line, sorted) {
 // ————————————————————————————————————————————————————————————————
 function renderBanner() { /* v2.2.70：frontmatter 已迁到正文 Markdown 表，banner 渲染下线 */ }
 
-let _bannerSaveTimer = null
-function scheduleSave() {
-  if (_bannerSaveTimer) clearTimeout(_bannerSaveTimer)
-  _bannerSaveTimer = setTimeout(() => {
-    if (window.MMEditor && window.MMEditor.requestSave) window.MMEditor.requestSave()
-  }, 400)
-}
+// v2.2.77：删除死函数 scheduleSave() 及其独占变量 _bannerSaveTimer——v2.2.68 banner 时代的
+// 前端 debounce 保存，v2.2.76 起改由 Swift 侧 scheduleAutoSave()（0.8s DispatchWorkItem）统一负责，
+// 此处的 400ms setTimeout 已无调用点。
 
 function serializeFrontmatter(fm, mode) {
   if (!fm || Object.keys(fm).length === 0) return ''
