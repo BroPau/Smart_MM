@@ -562,6 +562,19 @@ final class SettingsViewController: NSViewController, URLSessionDownloadDelegate
     @objc private func ragModelSelected() {
         let m = currentRAGModel()
         AppConfig.shared.ragModelKey = m.id
+        // v2.2.78【关键修复】切档时必须让「上一个模型」的显式路径失效。
+        // pipeline.py::_load_embedding_model 的加载优先级是
+        //     MM_EMBEDDING_MODEL_PATH(0，显式目录)  >  MM_EMBEDDING_MODEL(1，HF id)
+        // 若切档后仍残留旧模型的目录，即使 ragModelKey 已改成 m3，pipeline 也会按路径
+        // 加载旧模型 —— 表现为「设置页切了档、实际模型没变」的静默失效。
+        // 处理：旧路径目录名与所选模型 HF id 末段不一致 → 清空，
+        // 交由 refreshRAGModelPath() 按新模型重新探测（沙箱缓存命中则自动回填正确路径）。
+        if let oldPath = AppConfig.shared.embeddingModelPath {
+            let expectDir = m.hfId.split(separator: "/").last.map(String.init) ?? ""
+            if oldPath.lastPathComponent != expectDir {
+                AppConfig.shared.embeddingModelPath = nil
+            }
+        }
         updateRAGModelDesc()
         refreshRAGModelPath()
     }

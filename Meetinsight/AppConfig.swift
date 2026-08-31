@@ -273,6 +273,17 @@ final class AppConfig {
         }
     }
 
+    /// v2.2.78：把当前档位（含默认值）**显式落盘**到 `MM_RAG_MODEL_KEY`。
+    ///
+    /// 背景（修复点）：此前**只有设置页**会写 `MM_RAG_MODEL_KEY`；安装向导只写
+    /// `embeddingModelPath`、从不写档位标识。于是「跑完向导」的配置文件里查不到
+    /// 当前档位 —— 设置页下拉显示的是 getter 的默认值，与真实在用的模型可能不一致，
+    /// 排障时也无从判断用户究竟装了哪一档。
+    /// 向导安装成功后调用本方法，让配置文件自描述当前档位。
+    func persistRAGModelKey() {
+        defaults.set(ragModelKey, forKey: "MM_RAG_MODEL_KEY")
+    }
+
     /// Hugging Face 缓存/下载根目录（HF_HOME）。
     /// **关键**：沙箱 App 禁止写用户主目录下的 ~/.cache，故指向沙箱容器可写的
     /// Caches/huggingface（App 进程天生可读写）。下载与离线加载都走这个目录，

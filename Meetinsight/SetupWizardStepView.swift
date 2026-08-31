@@ -1113,6 +1113,9 @@ final class StepEmbeddingModelView: WizardStepView {
                 if ok {
                     AppConfig.shared.embeddingModelPath = self.downloadDir
                     AppConfig.shared.embeddingModelSkipped = false
+                    // v2.2.78：把当前档位显式落盘（此前向导只写路径、不写 MM_RAG_MODEL_KEY，
+                    // 配置文件里查不到档位，设置页下拉与真实在用的模型可能对不上）。
+                    AppConfig.shared.persistRAGModelKey()
                     self.skipped = false
                     // partial success 的 message 含「X 个文件失败」详情
                     if msg != "下载完成" {
