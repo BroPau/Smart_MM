@@ -9,6 +9,7 @@
 //
 
 import Foundation
+import Darwin   // SIGKILL / kill：旧子进程后台强制回收兜底（防止 GB 级 whisper/torch 僵尸占用内存）
 
 /// pipeline.py 单次运行的结果。
 struct PipelineResult {
@@ -32,6 +33,9 @@ final class PipelineRunner {
     static let shared = PipelineRunner()
 
     private var currentProcess: Process?
+    /// 运行令牌：每次 run()/cancel() 递增，terminationHandler 据此判断本 run 是否已被新 run 取代，
+    /// 避免被取消/取代的旧 run 的 completion 误触发 UI，也作为「单次仅一个重进程」的守卫。
+    private var runToken: Int = 0
     private let outQueue = DispatchQueue(label: "pipeline.stdout")
     private let errQueue = DispatchQueue(label: "pipeline.stderr")
     // stderr 行缓冲（JSON-Lines 切分用，类属性以便 terminationHandler 收尾）
@@ -53,6 +57,25 @@ final class PipelineRunner {
     ) {
         let cfg = AppConfig.shared
         let target = script ?? cfg.pipelineScript
+
+        // —— 内存安全守卫：先回收可能仍在运行的旧子进程 ——
+        // 反复「重新运行」却不清旧进程，会叠加多个 GB 级 whisper/torch 子进程 → 系统 OOM 崩溃。
+        // 启动新进程前必须 terminate 旧进程；runToken 守卫确保被取代的旧 run 的 completion 不会误触 UI / 重复落盘。
+        let myToken: Int
+        if let prev = currentProcess, prev.isRunning {
+            prev.terminate()
+            // 后台兜底：2s 未退出 → SIGINT；再 2s 仍存活 → SIGKILL，确保内存立即释放。
+            let mon = prev
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.0) {
+                if mon.isRunning { mon.interrupt() }
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.0) {
+                    if mon.isRunning { Darwin.kill(mon.processIdentifier, SIGKILL) }
+                }
+            }
+        }
+        runToken += 1
+        myToken = runToken
+
         let process = Process()
         process.executableURL = cfg.pythonExecutable
         process.arguments = [target.path] + arguments
@@ -86,6 +109,8 @@ final class PipelineRunner {
                     let step = obj["step"] as? String
                     let prog = (obj["progress"] as? NSNumber).map { $0.doubleValue }
                     DispatchQueue.main.async {
+                        // runToken 守卫：被取代/取消的旧 run 不再派发进度，避免进度条回退/串台。
+                        guard self.runToken == myToken else { return }
                         progress(PipelineProgress(level: level, message: msg, step: step, progress: prog))
                     }
                 }
@@ -111,6 +136,8 @@ final class PipelineRunner {
             let capturedStderr = self.stderrRawText
             let json = Self.parseTrailingJSON(outText)
             DispatchQueue.main.async {
+                // runToken 守卫：被取代/取消的旧 run 不再派发 completion，避免误触 UI 与重复落盘。
+                guard self.runToken == myToken else { return }
                 let ok = proc.terminationStatus == 0
                 let error: NSError? = ok ? nil : NSError(
                     domain: "PipelineRunner",
@@ -133,6 +160,7 @@ final class PipelineRunner {
             try process.run()
         } catch {
             DispatchQueue.main.async {
+                guard self.runToken == myToken else { return }
                 completion(PipelineResult(exitCode: -1, stdout: "", finalJSON: nil, error: error))
             }
         }
@@ -140,6 +168,8 @@ final class PipelineRunner {
 
     /// 取消当前运行（若正在运行）。
     func cancel() {
+        // 递增 runToken，使任何在途子进程的 completion/progress 都失效，避免取消后再回调 UI。
+        runToken += 1
         currentProcess?.terminate()
         currentProcess = nil
     }

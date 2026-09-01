@@ -204,7 +204,12 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
 
     deinit {
         autoSaveWorkItem?.cancel()
+        webView.stopLoading()
+        // 主动释放 WebContent 进程占用的内存：撕掉脚本消息通道 + 载入空白页，使 JS 堆/DOM 可回收，
+        // 否则 WKWebView 的 web 进程会一直驻留（直到 webView 随视图一起 dealloc，期间持续占内存）。
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "editorBridge")
+        webView.configuration.userContentController.removeAllUserScripts()
+        webView.load(URLRequest(url: URL(string: "about:blank")!))
     }
 
     private func setup() {

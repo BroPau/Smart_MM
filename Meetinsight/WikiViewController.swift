@@ -340,6 +340,8 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
             // 记录当前选中页名（用于缓存 + 静默刷新后恢复选中）
             let currentName = self.selectedPage?.name
             self.pages = list
+            // v2.2.81：构建双链/反链索引缓存（只在此处重建一次，切页不再重读全部文件）
+            self.buildLinkIndex()
             // 同步共享索引，供「会议纪要」页做名词联动 / 缺失页判定
             WikiIndex.shared.sync(from: self.pages)
             self.autoSizeSidebarColumnsIfNeeded()  // v2.2.76
@@ -387,70 +389,28 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
     private func referencesToThis(for page: WikiPage) -> [[String: Any]] {
         let targets = Set(([page.name] + page.aliases).map { $0.lowercased() })
         guard !targets.isEmpty else { return [] }
-        let regex = try? NSRegularExpression(pattern: #"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]"#, options: [])
         var out: [[String: Any]] = []
         var seen = Set<String>()
+        // wiki 页入链：仅做内存集合命中，不再重读每个文件全文（内存优化，v2.2.81）
         for p in pages where p.file != page.file {
-            let url = p.isHome ? homeFile : wikiPagesDir.appendingPathComponent(p.file)
-            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
-            let range = NSRange(text.startIndex..., in: text)
-            var hit = false
-            regex?.enumerateMatches(in: text, options: [], range: range) { match, _, _ in
-                guard let match, let r = Range(match.range(at: 1), in: text) else { return }
-                // v2.2.75：去掉 #区块 锚点后再比对，块级引用同样算作引用本页
-                if targets.contains(Self.linkTargetKey(String(text[r]))) { hit = true }
-            }
-            guard hit else { continue }
+            guard let keys = linkIndex.outgoingByFile[p.file], !keys.isDisjoint(with: targets) else { continue }
             let key = p.name.lowercased()
             guard !seen.contains(key) else { continue }
             seen.insert(key)
-
-            var fields: [[String: String]] = []
-            let fm = parseFrontmatterScalar(text)
-            let t = (fm["type"] ?? "").lowercased()
-            let wanted = WikiViewController.referenceWantedKeys(for: t)
-            for w in wanted {
-                if let v = fm[w], !v.isEmpty {
-                    fields.append(["label": backlinkFieldLabel(w), "value": v])
-                }
-            }
             var dict: [String: Any] = ["name": p.name, "type": p.type]
-            if !fields.isEmpty { dict["fields"] = fields }
+            if let meta = linkIndex.metaByFile[p.file], !meta.fields.isEmpty {
+                dict["fields"] = meta.fields
+            }
             out.append(dict)
         }
-        // v2.2.75【反向互通】LLM WiKi 与会议纪要是同一个知识库 ——
-        // 凡在 003_Meeting_Minutes 里 [[引用本页]] 的纪要，同样列入「引用本页的页面」。
-        out.append(contentsOf: minutesReferencing(targets: targets))
-        return out
-    }
-
-    /// v2.2.75：扫描 003_Meeting_Minutes，找出正文里 [[引用了本页]] 的纪要。
-    private func minutesReferencing(targets: Set<String>) -> [[String: Any]] {
-        let dir = AppConfig.shared.baseDir.appendingPathComponent("003_Meeting_Minutes")
-        guard FileManager.default.fileExists(atPath: dir.path) else { return [] }
-        guard let en = FileManager.default.enumerator(
-            at: dir, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]
-        ) else { return [] }
-        let regex = try? NSRegularExpression(pattern: #"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]"#, options: [])
-        var out: [[String: Any]] = []
-        var seen = Set<String>()
-        for case let url as URL in en {
-            guard url.pathExtension.lowercased() == "md" else { continue }
-            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
-            var hit = false
-            let range = NSRange(text.startIndex..., in: text)
-            regex?.enumerateMatches(in: text, options: [], range: range) { match, _, _ in
-                guard let match, let r = Range(match.range(at: 1), in: text) else { return }
-                if targets.contains(Self.linkTargetKey(String(text[r]))) { hit = true }
-            }
-            guard hit else { continue }
-            let name = url.deletingPathExtension().lastPathComponent
+        // 会议纪要入链：同样走索引，不重读纪要全文（v2.2.81）
+        for (name, keys) in linkIndex.minuteOutgoing where !keys.isDisjoint(with: targets) {
             let key = name.lowercased()
             guard !seen.contains(key) else { continue }
             seen.insert(key)
             out.append(["name": name, "type": "会议纪要"])
         }
-        return out.sorted { ($0["name"] as? String ?? "") < ($1["name"] as? String ?? "") }
+        return out
     }
 
     /// v2.2.75：把 [[目标]] 里的原始文本归一为比较键 —— 去掉 #区块 锚点、去空白、小写。
@@ -483,20 +443,11 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
             let key = p.name.lowercased()
             if seen.contains(key) { continue }
             seen.insert(key)
-            // 读目标页 frontmatter，取关键属性（与入链同款展示逻辑）
-            let tUrl = p.isHome ? homeFile : wikiPagesDir.appendingPathComponent(p.file)
-            guard let tText = try? String(contentsOf: tUrl, encoding: .utf8) else { continue }
-            let fm = parseFrontmatterScalar(tText)
-            let t = (fm["type"] ?? p.type).lowercased()
-            let wanted = WikiViewController.referenceWantedKeys(for: t)
-            var fields: [[String: String]] = []
-            for w in wanted {
-                if let v = fm[w], !v.isEmpty {
-                    fields.append(["label": backlinkFieldLabel(w), "value": v])
-                }
-            }
+            // 直接读索引里的元信息，避免为每个出链目标再读一次全文（内存优化，v2.2.81）
             var dict: [String: Any] = ["name": p.name, "type": p.type]
-            if !fields.isEmpty { dict["fields"] = fields }
+            if let meta = linkIndex.metaByFile[p.file], !meta.fields.isEmpty {
+                dict["fields"] = meta.fields
+            }
             out.append(dict)
         }
         return out
@@ -540,7 +491,7 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
         return result
     }
 
-    private func backlinkFieldLabel(_ key: String) -> String {
+    private static func backlinkFieldLabel(_ key: String) -> String {
         switch key {
         case "company": return "公司"
         case "title": return "职位"
@@ -568,6 +519,11 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
     }
 
     private func selectPage(_ page: WikiPage) {
+        // v2.2.81：离开上一页前，用其最新落盘内容增量刷新索引（只重读 1 个文件，远比旧逻辑重读全部页面便宜），
+        // 保证导航过程中出链/入链索引始终新鲜，无需每次切页都全量重建。
+        if let prev = selectedPage, prev.file != page.file {
+            updateLinkIndex(for: prev)
+        }
         // v2.2.65：切页前若当前页有未保存改动，先自动保存（无需手动点保存键）。
         // 此时 selectedPage 仍是上一页（尚未被本函数改写），editor 仍呈现上一页内容，
         // saveCurrent() 会经 editorBridge 把上一页正文回传落盘。
@@ -713,6 +669,84 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
     // v2.2.68：缓存当前页的「出链 / 入链」明细，供表格「添加双链」时就地刷新（无需整页重载）
     private var currentOutgoing: [[String: Any]] = []
     private var currentIncoming: [[String: Any]] = []
+
+    // MARK: - v2.2.81：双链/反链索引缓存（内存优化）
+    // 旧逻辑：每次切页都 String(contentsOf:) 重读全部 209 个 wiki 页 + 全部会议纪要全文 → 瞬时数百 MB 分配 + 卡顿。
+    // 现改为「构建一次索引，切页仅做内存集合命中」：索引存每个页面的出链目标键集合 + 元信息（名称/别名/类型/展示字段）。
+    private struct WikiLinkIndex {
+        var outgoingByFile: [String: Set<String>] = [:]   // wiki 页 file -> 出链目标键集合（lowercased，已剥 #锚点）
+        var metaByFile: [String: PageMeta] = [:]           // wiki 页 file -> 元信息（含按类型算好的展示字段）
+        var minuteOutgoing: [String: Set<String>] = [:]    // 纪要文件名(去扩展名) -> 出链目标键集合
+    }
+    private struct PageMeta {
+        let name: String
+        let aliases: [String]
+        let type: String
+        let fields: [[String: String]]
+    }
+    private var linkIndex = WikiLinkIndex()
+
+    /// 全量重建索引（在 refreshPagesFromPipeline 内、pages 已更新后调用一次）。
+    private func buildLinkIndex() {
+        var idx = WikiLinkIndex()
+        let regex = try? NSRegularExpression(pattern: #"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]"#, options: [])
+        for p in pages {
+            updateIndex(&idx, for: p, regex: regex)
+        }
+        let dir = AppConfig.shared.baseDir.appendingPathComponent("003_Meeting_Minutes")
+        if FileManager.default.fileExists(atPath: dir.path),
+           let en = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) {
+            for case let url as URL in en {
+                guard url.pathExtension.lowercased() == "md" else { continue }
+                guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+                let name = url.deletingPathExtension().lastPathComponent
+                idx.minuteOutgoing[name] = Self.extractLinkKeys(text, regex: regex)
+            }
+        }
+        linkIndex = idx
+    }
+
+    /// 离开某页时增量刷新其索引条目（只重读 1 个文件，远比旧逻辑重读全部页面便宜）。
+    private func updateLinkIndex(for page: WikiPage) {
+        let regex = try? NSRegularExpression(pattern: #"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]"#, options: [])
+        var idx = linkIndex
+        updateIndex(&idx, for: page, regex: regex)
+        linkIndex = idx
+    }
+
+    private func updateIndex(_ idx: inout WikiLinkIndex, for page: WikiPage, regex: NSRegularExpression?) {
+        let url = page.isHome ? homeFile : wikiPagesDir.appendingPathComponent(page.file)
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return }
+        idx.outgoingByFile[page.file] = Self.extractLinkKeys(text, regex: regex)
+        let fm = parseFrontmatterScalar(text)
+        idx.metaByFile[page.file] = PageMeta(
+            name: page.name, aliases: page.aliases, type: page.type,
+            fields: Self.fieldsFor(type: page.type, fm: fm)
+        )
+    }
+
+    private static func extractLinkKeys(_ text: String, regex: NSRegularExpression?) -> Set<String> {
+        var set = Set<String>()
+        guard let regex else { return set }
+        let range = NSRange(text.startIndex..., in: text)
+        regex.enumerateMatches(in: text, options: [], range: range) { match, _, _ in
+            guard let match, let r = Range(match.range(at: 1), in: text) else { return }
+            set.insert(Self.linkTargetKey(String(text[r])))
+        }
+        return set
+    }
+
+    private static func fieldsFor(type: String, fm: [String: String]) -> [[String: String]] {
+        let t = type.lowercased()
+        let wanted = referenceWantedKeys(for: t)
+        var fields: [[String: String]] = []
+        for w in wanted {
+            if let v = fm[w], !v.isEmpty {
+                fields.append(["label": backlinkFieldLabel(w), "value": v])
+            }
+        }
+        return fields
+    }
 
     private func submitPageCommand(arguments: [String]) {
         setBusy(true, status: "写入中…")
@@ -1202,7 +1236,7 @@ extension WikiViewController: MarkdownEditorViewDelegate, SaveablePage {
                         let fm = self.parseFrontmatterScalar(tText)
                         let t = (fm["type"] ?? page.type).lowercased()
                         for w in WikiViewController.referenceWantedKeys(for: t) {
-                            if let v = fm[w], !v.isEmpty { fields.append(["label": self.backlinkFieldLabel(w), "value": v]) }
+                            if let v = fm[w], !v.isEmpty { fields.append(["label": Self.backlinkFieldLabel(w), "value": v]) }
                         }
                     }
                     var dict: [String: Any] = ["name": page.name, "type": page.type]
