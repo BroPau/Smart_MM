@@ -38,7 +38,8 @@ final class WikiIndex {
                 return
             }
             var list: [WikiPage] = [
-                WikiPage(name: "WiKi 首页", type: "home", aliases: [], file: "WiKi首页.md", isHome: true)
+                // file 必须与 pipeline 生成的 MOC 文件名一致（Wiki_首页.md，见 WikiViewController.homeFile 契约）
+                WikiPage(name: "WiKi 首页", type: "home", aliases: [], file: "Wiki_首页.md", isHome: true)
             ]
             for d in arr {
                 guard let name = d["name"] as? String,

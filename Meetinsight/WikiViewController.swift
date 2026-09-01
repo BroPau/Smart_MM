@@ -76,7 +76,10 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
 
     private var wikiDir: URL { AppConfig.shared.baseDir.appendingPathComponent("005_LLMWiKi") }
     private var wikiPagesDir: URL { wikiDir.appendingPathComponent("wiki_pages") }
-    private var homeFile: URL { wikiDir.appendingPathComponent("WiKi首页.md") }
+    // ⚠️ 首页文件名必须与 pipeline.Config.WIKI_MOC 完全一致（磁盘真实文件 = `Wiki_首页.md`，
+    // 由 --build-index / _auto_rebuild_wiki 生成）。切勿改成 `WiKi首页.md`——那个名字的文件
+    // 从不被创建，会导致首页加载失败（「无法读取文件」）。显示名仍可保持「WiKi 首页」。
+    private var homeFile: URL { wikiDir.appendingPathComponent("Wiki_首页.md") }
     private var wikiScriptsDir: URL {
         // ① Bundle 内嵌 PythonEngine/005_LLMWiKi（v2.2.12+ 推荐路径，sandbox 友好）。
         // ② 回退到 `pipelineScript` 所在目录的 005_LLMWiKi/ 子目录（兼容开发期把脚本放在
@@ -324,7 +327,8 @@ final class WikiViewController: NSViewController, NSTableViewDataSource, NSTable
                 return
             }
             var list: [WikiPage] = [
-                WikiPage(name: "WiKi 首页", type: "home", aliases: [], file: "WiKi首页.md", isHome: true)
+                // file 必须与 pipeline 生成的 MOC 文件名一致（Wiki_首页.md），见 homeFile 上的契约注释
+                WikiPage(name: "WiKi 首页", type: "home", aliases: [], file: "Wiki_首页.md", isHome: true)
             ]
             for d in arr {
                 guard let name = d["name"] as? String,
@@ -1093,8 +1097,8 @@ extension WikiViewController: MarkdownEditorViewDelegate, SaveablePage {
     func markdownEditorDidRequestSave(_ editor: MarkdownEditorView, markdown: String) {
         guard let page = pendingSavePage else { return }
         pendingSavePage = nil
-        // WiKi 首页（WiKi首页.md）是 --build-index 生成的导航页，没有实体 frontmatter
-        // （无 Type / CanonicalName），不适用 --edit-wiki-page 契约，保持直写。
+        // WiKi 首页（Wiki_首页.md，由 --build-index 生成）是导航页，没有实体 frontmatter
+        // （无 Type / CanonicalName），不适用 --edit-wiki-page 契约，保持直写（homeFile）。
         if page.isHome {
             do {
                 try markdown.write(to: homeFile, atomically: true, encoding: .utf8)
