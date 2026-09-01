@@ -262,7 +262,20 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
         pendingAutoLink = autoLink
         pendingPageName = pageName
         if didLoad {
-            webView.evaluateJavaScript("loadMarkdown(\(jsString(markdown)), \(jsBool(editable)), \(jsString(mode)), \(jsBool(autoLink)), \(jsString(pageName)))")
+            // v2.2.82：改用 `callAsyncJavaScript` 的具名 arguments 字典传参（macOS 11+ 即可用），
+            // 不再把整篇 markdown 拼成巨型转义 JS 字符串字面量 ——
+            // 旧写法 Swift 堆 + JS 堆各存一份 MB 级副本，大文档切页时瞬时内存暴涨。
+            // ⚠️ 注意：`evaluateJavaScript` **没有** `arguments:` 重载（任何 macOS 版本都没有），
+            // 只有 `callAsyncJavaScript` 支持具名参数传入；functionBody 按匿名函数体处理，
+            // 字典的 key 即 JS 里的参数名。这里不 return，保持与旧版一致的 fire-and-forget 语义。
+            webView.callAsyncJavaScript(
+                "window.loadMarkdown(md, editable, mode, autoLink, pageName)",
+                arguments: ["md": markdown, "editable": editable, "mode": mode,
+                            "autoLink": autoLink, "pageName": pageName],
+                in: nil,
+                in: .page,
+                completionHandler: nil
+            )
         }
     }
 
@@ -345,7 +358,14 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
             pendingMarkdown = nil
             let pname = pendingPageName
             pendingPageName = ""
-            webView.evaluateJavaScript("loadMarkdown(\(jsString(pending)), \(jsBool(pendingEditable)), \(jsString(pendingMode)), \(jsBool(pendingAutoLink)), \(jsString(pname)))")
+            webView.callAsyncJavaScript(
+                "window.loadMarkdown(md, editable, mode, autoLink, pageName)",
+                arguments: ["md": pending, "editable": pendingEditable, "mode": pendingMode,
+                            "autoLink": pendingAutoLink, "pageName": pname],
+                in: nil,
+                in: .page,
+                completionHandler: nil
+            )
         }
     }
 
@@ -382,10 +402,17 @@ final class MarkdownEditorView: NSView, WKNavigationDelegate {
             // 必须延后到下一个 runloop 再执行。
             if let name = message["name"] as? String {
                 let md = delegate?.markdownEditorPreviewForWikilink(self, name: name)
-                let jsName = jsString(name)
-                let jsMd = jsString(md ?? "")
+                let previewName = name
+                let previewMd = md ?? ""
                 DispatchQueue.main.async {
-                    self.webView.evaluateJavaScript("MMEditor.showPreview(\(jsName), \(jsMd))")
+                    // v2.2.82：同样改用 arguments 字典传参，避免把预览页整篇 markdown 拼成巨型转义 JS 字符串。
+                    self.webView.callAsyncJavaScript(
+                        "window.MMEditor.showPreview(pName, pMd)",
+                        arguments: ["pName": previewName, "pMd": previewMd],
+                        in: nil,
+                        in: .page,
+                        completionHandler: nil
+                    )
                 }
             }
         case "pageHeadings":
